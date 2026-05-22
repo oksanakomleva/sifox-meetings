@@ -251,15 +251,57 @@ async def _join_meeting(page, url: str) -> set[str]:
 
 # ── Participant detection ─────────────────────────────────────────────────────
 
+_UI_NOISE = {
+    "protocaller", "подключиться", "войти", "join", "ваше имя",
+    "your name", "имя", "name", "микрофон", "камера", "mic", "camera",
+    "mute", "unmute", "выйти", "leave", "отключить", "включить",
+}
+
+
+def _is_real_name(text: str) -> bool:
+    """Return True if text looks like a real participant name."""
+    t = text.strip()
+    if len(t) < 2 or len(t) > 60:
+        return False
+    lower = t.lower()
+    # Reject if contains any UI noise phrase
+    for noise in _UI_NOISE:
+        if noise in lower:
+            return False
+    # Reject pure digits / punctuation
+    if re.match(r'^[\d\s\W]+$', t):
+        return False
+    return True
+
+
 async def _get_participant_names(page) -> set[str]:
     try:
+        # Try specific participant list selectors first
+        for selector in [
+            "div[class*='ParticipantName']",
+            "div[class*='participant-name']",
+            "span[class*='participant-name']",
+            "div[class*='MemberName']",
+            "div[data-testid*='participant'] span",
+        ]:
+            elements = await page.locator(selector).all()
+            if elements:
+                names = set()
+                for el in elements:
+                    text = (await el.text_content() or "").strip()
+                    if _is_real_name(text) and text != "Protocaller":
+                        names.add(text)
+                if names:
+                    return names
+
+        # Fallback: broader selector with strict filtering
         elements = await page.locator(
-            "div[class*='participant'], div[class*='member'], span[class*='name']"
+            "div[class*='participant'], div[class*='member']"
         ).all()
         names = set()
         for el in elements:
             text = (await el.text_content() or "").strip()
-            if text and len(text) > 1 and text != "Protocaller":
+            if _is_real_name(text) and text != "Protocaller":
                 names.add(text)
         return names
     except Exception:
@@ -283,11 +325,20 @@ async def _get_active_speakers(page) -> list[str]:
 async def _wait_for_meeting_end(page, initial_participants: set[str]) -> None:
     meeting_started = len(initial_participants) > 0
     empty_polls = 0
+    deadline = time.monotonic() + config.MAX_RECORDING_HOURS * 3600
+    # If started with no real participants, count empty polls from the start
+    if not meeting_started:
+        empty_polls = 0
 
     while True:
         await asyncio.sleep(config.PARTICIPANT_POLL_INTERVAL)
+
+        # Hard deadline
+        if time.monotonic() > deadline:
+            logger.info("Max recording time reached — stopping")
+            return
+
         try:
-            # Check for page crash / redirect
             current_url = page.url
             if "telemost" not in current_url.lower():
                 logger.info("URL changed — meeting ended")
@@ -302,9 +353,10 @@ async def _wait_for_meeting_end(page, initial_participants: set[str]) -> None:
         if others:
             meeting_started = True
             empty_polls = 0
-        elif meeting_started:
+        else:
             empty_polls += 1
-            logger.info("Empty poll %d/%d", empty_polls, config.EMPTY_POLLS_TO_END)
+            logger.info("Empty poll %d/%d (started=%s)", empty_polls, config.EMPTY_POLLS_TO_END, meeting_started)
+            # End if: meeting was started and now empty, OR never started after 3 polls
             if empty_polls >= config.EMPTY_POLLS_TO_END:
                 logger.info("Meeting ended (no participants)")
                 return
