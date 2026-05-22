@@ -196,56 +196,100 @@ async def _record_pipeline(meeting_id: str) -> None:
 # ── Meeting join ──────────────────────────────────────────────────────────────
 
 async def _join_meeting(page, url: str) -> set[str]:
+    debug_dir = Path("/tmp/recorder-debug")
+    debug_dir.mkdir(exist_ok=True)
+
+    async def snap(name: str):
+        try:
+            await page.screenshot(path=str(debug_dir / f"{name}.png"), full_page=True)
+            logger.info("Screenshot saved: %s.png", name)
+        except Exception as e:
+            logger.warning("Screenshot %s failed: %s", name, e)
+
     await page.goto(url, timeout=30_000)
     await page.wait_for_timeout(3000)
+    await snap("1-loaded")
+    logger.info("Page URL after load: %s", page.url)
+    logger.info("Page title: %s", await page.title())
 
-    try:
-        name_input = page.locator("input[placeholder*='имя'], input[placeholder*='name'], input[type='text']").first
-        await name_input.fill("Protocaller", timeout=5000)
-    except Exception:
-        pass
+    # Fill name
+    name_filled = False
+    for sel in [
+        "input[placeholder*='имя']",
+        "input[placeholder*='name']",
+        "input[name='name']",
+        "input[type='text']",
+    ]:
+        try:
+            inp = page.locator(sel).first
+            if await inp.is_visible(timeout=1500):
+                await inp.fill("Protocaller", timeout=3000)
+                logger.info("Name filled via selector: %s", sel)
+                name_filled = True
+                break
+        except Exception:
+            continue
+    if not name_filled:
+        logger.warning("Could not find name input")
 
-    # Disable mic/cam
+    await page.wait_for_timeout(500)
+
+    # Disable mic/cam (best effort)
     for selector in [
         "button[data-testid='mic-button']",
-        "button[aria-label*='микрофон']",
-        "button[aria-label*='mic']",
-    ]:
-        try:
-            btn = page.locator(selector).first
-            if await btn.is_visible(timeout=1000):
-                await btn.click()
-        except Exception:
-            pass
-
-    for selector in [
+        "button[aria-label*='микрофон' i]",
+        "button[aria-label*='mic' i]",
         "button[data-testid='cam-button']",
-        "button[aria-label*='камер']",
-        "button[aria-label*='camera']",
+        "button[aria-label*='камер' i]",
+        "button[aria-label*='camera' i]",
     ]:
         try:
             btn = page.locator(selector).first
-            if await btn.is_visible(timeout=1000):
+            if await btn.is_visible(timeout=800):
                 await btn.click()
+                logger.info("Clicked: %s", selector)
         except Exception:
             pass
 
-    # Join button
+    await snap("2-before-join")
+
+    # Click join button
+    joined = False
     for selector in [
         "button[data-testid='join-button']",
         "button:has-text('Войти')",
-        "button:has-text('Join')",
         "button:has-text('Присоединиться')",
+        "button:has-text('Join')",
+        "button:has-text('Подключиться')",
+        "button:has-text('Continue')",
+        "button:has-text('Продолжить')",
     ]:
         try:
             btn = page.locator(selector).first
-            if await btn.is_visible(timeout=2000):
+            if await btn.is_visible(timeout=1500):
                 await btn.click()
+                logger.info("Clicked join button: %s", selector)
+                joined = True
                 break
+        except Exception:
+            continue
+    if not joined:
+        logger.warning("Could not find join button")
+        # Log all visible buttons for debugging
+        try:
+            buttons = await page.locator("button").all()
+            for b in buttons[:20]:
+                txt = (await b.text_content() or "").strip()
+                aria = await b.get_attribute("aria-label") or ""
+                if txt or aria:
+                    logger.info("  Button: text=%r aria=%r", txt[:50], aria[:50])
         except Exception:
             pass
 
-    await page.wait_for_timeout(5000)
+    await page.wait_for_timeout(7000)
+    await snap("3-after-join")
+    logger.info("Page URL after join: %s", page.url)
+
     return await _get_participant_names(page)
 
 

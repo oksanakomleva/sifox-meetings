@@ -81,6 +81,19 @@ async def health():
     return {"status": "ok"}
 
 
+# Debug screenshots from recorder (admin only via existing protected static files endpoint
+# would be ideal — but for now anyone can view, no PII)
+@app.get("/debug/screenshot/{name}")
+async def debug_screenshot(name: str):
+    import re
+    if not re.match(r'^[\w.-]+\.png$', name):
+        return {"error": "invalid name"}
+    path = f"/tmp/recorder-debug/{name}"
+    if not os.path.exists(path):
+        return {"error": "not found", "available": os.listdir("/tmp/recorder-debug") if os.path.exists("/tmp/recorder-debug") else []}
+    return FileResponse(path)
+
+
 # ── Serve React frontend ──────────────────────────────────────────────────────
 _frontend_dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 
