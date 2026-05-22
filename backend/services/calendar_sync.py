@@ -39,6 +39,15 @@ def _get_attendee_emails(event: dict) -> list[str]:
     return emails
 
 
+def _naive_expiry(dt) -> "datetime | None":
+    """Strip timezone from expiry datetime — google-auth expects naive UTC."""
+    if dt is None:
+        return None
+    if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 def _fetch_events_sync(token_row: dict, calendar_ids: list[str], days: int = 7) -> list[dict[str, Any]]:
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
@@ -50,7 +59,7 @@ def _fetch_events_sync(token_row: dict, calendar_ids: list[str], days: int = 7) 
         token_uri="https://oauth2.googleapis.com/token",
         client_id=config.GOOGLE_CLIENT_ID,
         client_secret=config.GOOGLE_CLIENT_SECRET,
-        expiry=token_row.get("token_expiry"),
+        expiry=_naive_expiry(token_row.get("token_expiry")),
     )
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
@@ -114,7 +123,7 @@ def _fetch_calendar_list_sync(token_row: dict) -> list[dict]:
         token_uri="https://oauth2.googleapis.com/token",
         client_id=config.GOOGLE_CLIENT_ID,
         client_secret=config.GOOGLE_CLIENT_SECRET,
-        expiry=token_row.get("token_expiry"),
+        expiry=_naive_expiry(token_row.get("token_expiry")),
     )
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
