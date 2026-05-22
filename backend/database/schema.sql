@@ -15,8 +15,8 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS sessions (
     id         TEXT PRIMARY KEY,         -- random token
     user_id    BIGINT REFERENCES users(id) ON DELETE CASCADE,
-    expires_at TIMESTAMP NOT NULL,
-    created_at TIMESTAMP DEFAULT NOW()
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
@@ -106,6 +106,39 @@ CREATE TABLE IF NOT EXISTS meeting_access_grants (
     user_id    BIGINT REFERENCES users(id) ON DELETE CASCADE,
     meeting_id UUID REFERENCES meetings(id) ON DELETE CASCADE,
     granted_by BIGINT REFERENCES users(id),
-    created_at TIMESTAMP DEFAULT NOW(),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (user_id, meeting_id)
 );
+
+-- ── Migrations: convert TIMESTAMP → TIMESTAMPTZ for existing tables ───────────
+DO $$
+DECLARE
+    col RECORD;
+    cols TEXT[][] := ARRAY[
+        ARRAY['sessions',              'expires_at'],
+        ARRAY['sessions',              'created_at'],
+        ARRAY['users',                 'created_at'],
+        ARRAY['users',                 'last_login'],
+        ARRAY['google_tokens',         'token_expiry'],
+        ARRAY['google_tokens',         'updated_at'],
+        ARRAY['calendars',             'created_at'],
+        ARRAY['meetings',              'created_at'],
+        ARRAY['meetings',              'updated_at'],
+        ARRAY['calendar_meeting_links','created_at'],
+        ARRAY['chat_messages',         'created_at'],
+        ARRAY['meeting_access_grants', 'created_at']
+    ];
+    i INT;
+BEGIN
+    FOR i IN 1..array_length(cols, 1) LOOP
+        SELECT data_type INTO col
+        FROM information_schema.columns
+        WHERE table_name = cols[i][1] AND column_name = cols[i][2];
+        IF col.data_type = 'timestamp without time zone' THEN
+            EXECUTE format(
+                'ALTER TABLE %I ALTER COLUMN %I TYPE TIMESTAMPTZ USING %I AT TIME ZONE ''UTC''',
+                cols[i][1], cols[i][2], cols[i][2]
+            );
+        END IF;
+    END LOOP;
+END $$;
