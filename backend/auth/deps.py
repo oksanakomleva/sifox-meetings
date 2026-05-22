@@ -19,7 +19,6 @@ async def get_current_user(
 
 
 async def get_admin_user(
-    current_user: Annotated[dict, None] = None,
     session_token: Annotated[str | None, Cookie(alias="session")] = None,
 ) -> dict:
     if not session_token:
