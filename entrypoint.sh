@@ -7,14 +7,21 @@ export DISPLAY=:99
 sleep 1
 
 # ── PulseAudio ────────────────────────────────────────────────────────────────
-pulseaudio --start \
+# Unset PULSE_SERVER before starting daemon — otherwise PulseAudio sees it
+# and refuses to start thinking a server is already configured
+unset PULSE_SERVER
+
+pulseaudio \
+  --system \
+  -n \
   --exit-idle-time=-1 \
-  --daemonize=false \
+  --daemonize=no \
+  --log-target=stderr \
   --load="module-native-protocol-unix socket=/tmp/pulse.sock auth-anonymous=1" \
-  --log-target=stderr &
+  --load="module-null-sink sink_name=default_sink" &
 
 export PULSE_SERVER=unix:/tmp/pulse.sock
-sleep 1
+sleep 2
 
 echo "Xvfb and PulseAudio started"
 
