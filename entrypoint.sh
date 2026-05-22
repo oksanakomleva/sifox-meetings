@@ -15,16 +15,19 @@ unset PULSE_SERVER
 mkdir -p /tmp/pulse-runtime
 chmod 700 /tmp/pulse-runtime
 export PULSE_RUNTIME_PATH=/tmp/pulse-runtime
-export HOME=/tmp
 
-pulseaudio \
-  --daemonize=no \
-  --exit-idle-time=-1 \
-  --disallow-exit \
-  -n \
-  --log-target=stderr \
-  --load="module-native-protocol-unix socket=/tmp/pulse.sock auth-anonymous=1" \
-  --load="module-null-sink sink_name=default_sink" &
+# Start PulseAudio in a subshell so HOME=/tmp doesn't leak to Chromium/Playwright
+(
+  export HOME=/tmp
+  pulseaudio \
+    --daemonize=no \
+    --exit-idle-time=-1 \
+    --disallow-exit \
+    -n \
+    --log-target=stderr \
+    --load="module-native-protocol-unix socket=/tmp/pulse.sock auth-anonymous=1" \
+    --load="module-null-sink sink_name=default_sink"
+) &
 
 export PULSE_SERVER=unix:/tmp/pulse.sock
 sleep 2
