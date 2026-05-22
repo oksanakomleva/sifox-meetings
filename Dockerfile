@@ -30,7 +30,7 @@ COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Install Playwright + Chromium
-RUN playwright install chromium --with-deps
+RUN playwright install chromium
 
 # Pre-download Whisper model (avoids timeout on first run)
 ARG WHISPER_MODEL=medium
