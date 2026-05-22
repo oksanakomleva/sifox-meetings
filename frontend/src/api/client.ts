@@ -1,10 +1,11 @@
 const BASE = '/api'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const { headers: extraHeaders, ...restOptions } = options ?? {}
   const res = await fetch(`${BASE}${path}`, {
     credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-    ...options,
+    ...restOptions,
+    headers: { 'Content-Type': 'application/json', ...extraHeaders },
   })
   if (res.status === 401) {
     if (!window.location.pathname.startsWith('/login')) {
