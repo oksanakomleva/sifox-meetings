@@ -1,0 +1,106 @@
+"""
+telemost-web backend
+FastAPI app serving REST API + static React frontend.
+"""
+import asyncio
+import logging
+import os
+from contextlib import asynccontextmanager
+
+import uvicorn
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+from config import config
+from database.connection import init_db, close_db
+from database import models
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ── Startup ──────────────────────────────────────────────────────────
+    await init_db(config.DATABASE_URL)
+
+    stuck = await models.reset_stuck_meetings()
+    if stuck:
+        logger.warning("Reset %d stuck meetings on startup", stuck)
+
+    # Ensure audio dir exists
+    os.makedirs(config.AUDIO_DIR, exist_ok=True)
+
+    # Background tasks
+    from services.calendar_sync import run_sync_loop
+    from services.recorder import run_recording_scheduler
+
+    sync_task = asyncio.create_task(run_sync_loop(), name="calendar-sync")
+    scheduler_task = asyncio.create_task(run_recording_scheduler(), name="rec-scheduler")
+
+    logger.info("telemost-web started")
+    yield
+
+    # ── Shutdown ─────────────────────────────────────────────────────────
+    sync_task.cancel()
+    scheduler_task.cancel()
+    await close_db()
+    logger.info("telemost-web stopped")
+
+
+app = FastAPI(title="Sifox Meetings", lifespan=lifespan)
+
+# CORS (dev only — in prod frontend is served from same origin)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[config.BASE_URL, "http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── API routes ────────────────────────────────────────────────────────────────
+from api.auth import router as auth_router
+from api.meetings import router as meetings_router
+from api.chat import router as chat_router
+from api.admin import router as admin_router
+
+app.include_router(auth_router)
+app.include_router(meetings_router)
+app.include_router(chat_router)
+app.include_router(admin_router)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+# ── Serve React frontend ──────────────────────────────────────────────────────
+_frontend_dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+
+if os.path.exists(_frontend_dist):
+    app.mount("/assets", StaticFiles(directory=os.path.join(_frontend_dist, "assets")), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        index = os.path.join(_frontend_dist, "index.html")
+        return FileResponse(index)
+else:
+    @app.get("/")
+    async def dev_root():
+        return {"message": "API running. Frontend not built yet — run `npm run build` in /frontend."}
+
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8000")),
+        reload=False,
+    )

@@ -1,0 +1,432 @@
+"""
+Meeting recorder — adapted from telemost-bot.
+Joins Telemost meeting as guest, records audio, transcribes, analyses.
+One instance per meeting, coordinated by DB status.
+"""
+import asyncio
+import logging
+import os
+import re
+import signal
+import subprocess
+import time
+from pathlib import Path
+from datetime import datetime, timezone
+
+from config import config
+from database import models
+from services.transcriber import transcribe_audio
+from services.analyzer import analyze_meeting
+
+logger = logging.getLogger(__name__)
+
+# In-memory registry of active recordings: meeting_id -> task
+_active: dict[str, asyncio.Task] = {}
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+async def start_recording(meeting_id: str) -> None:
+    """Claim and record a meeting. No-op if already taken."""
+    if meeting_id in _active:
+        logger.info("Meeting %s already recording", meeting_id)
+        return
+
+    claimed = await models.claim_meeting_for_recording(meeting_id)
+    if not claimed:
+        logger.info("Meeting %s already claimed by another worker", meeting_id)
+        return
+
+    task = asyncio.create_task(
+        _record_pipeline(meeting_id),
+        name=f"record-{meeting_id[:8]}",
+    )
+    _active[meeting_id] = task
+    task.add_done_callback(lambda _: _active.pop(meeting_id, None))
+
+
+# ── Pipeline ──────────────────────────────────────────────────────────────────
+
+async def _record_pipeline(meeting_id: str) -> None:
+    meeting = await models.get_meeting(meeting_id)
+    if not meeting:
+        return
+
+    url = meeting["meeting_url"]
+    audio_filename = f"{meeting_id}.wav"
+    audio_path = Path(config.AUDIO_DIR) / audio_filename
+    audio_path.parent.mkdir(parents=True, exist_ok=True)
+
+    sink_name = f"meet_{meeting_id[:8]}"
+    audio_proc: asyncio.subprocess.Process | None = None
+    browser = None
+    pw = None
+
+    try:
+        # 1. PulseAudio sink
+        await _create_pulse_sink(sink_name)
+        await asyncio.sleep(0.5)
+        await _set_default_sink(sink_name)
+
+        # 2. Browser
+        from playwright.async_api import async_playwright
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(
+            headless=False,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--autoplay-policy=no-user-gesture-required",
+                "--use-fake-ui-for-media-stream",
+            ],
+            env={**os.environ, "DISPLAY": ":99", "PULSE_SERVER": "unix:/tmp/pulse.sock"},
+        )
+        page = await browser.new_page()
+
+        # 3. Join meeting
+        participants = await _join_meeting(page, url)
+        logger.info("Joined meeting %s, participants: %s", meeting_id[:8], participants)
+
+        # 4. Start audio capture
+        await models.update_meeting_status(meeting_id, "recording")
+        audio_proc = await _start_audio_capture(str(audio_path), sink_name)
+
+        # 5. Speaker timeline
+        speaker_timeline: list[tuple[float, str]] = []
+        t0 = time.monotonic()
+
+        async def track_speakers():
+            while True:
+                await asyncio.sleep(1)
+                try:
+                    speakers = await _get_active_speakers(page)
+                    for sp in speakers:
+                        t = time.monotonic() - t0
+                        if not speaker_timeline or speaker_timeline[-1][1] != sp:
+                            speaker_timeline.append((t, sp))
+                except Exception:
+                    pass
+
+        tracker = asyncio.create_task(track_speakers())
+
+        # 6. Wait for meeting end
+        await _wait_for_meeting_end(page, participants)
+        tracker.cancel()
+
+        # 7. Stop recording
+        end_time = datetime.now(timezone.utc)
+        await _stop_audio_capture(audio_proc)
+        audio_proc = None
+
+        await browser.close()
+        browser = None
+        await pw.stop()
+        pw = None
+
+        await models.update_meeting_status(meeting_id, "transcribing")
+
+        # Check audio file
+        if not audio_path.exists() or audio_path.stat().st_size < 10_000:
+            raise RuntimeError(f"Audio file missing or too small: {audio_path}")
+
+        # 8. Transcribe
+        segments = await transcribe_audio(str(audio_path))
+        if not segments:
+            raise RuntimeError("Empty transcription")
+
+        # Build transcript with speaker labels
+        effective_tl = _effective_speaker_timeline(speaker_timeline, participants)
+        transcript_text = _build_transcript(segments, effective_tl)
+        await models.save_transcript(meeting_id, transcript_text)
+        await models.save_meeting_audio(
+            meeting_id, audio_filename, audio_path.stat().st_size
+        )
+
+        # Save participants
+        for p in participants:
+            if p != "Protocaller":
+                await models.upsert_participant(meeting_id, p)
+        await models.resolve_participants_by_email(meeting_id)
+
+        # 9. Analyze
+        await models.update_meeting_status(meeting_id, "analyzing")
+        analysis = await analyze_meeting(transcript_text)
+        await models.save_analysis(
+            meeting_id,
+            summary=analysis["summary"],
+            tags=analysis["tags"],
+            topic=analysis["topic"],
+            meeting_type=analysis["meeting_type"],
+        )
+
+        # Update end time
+        from database.connection import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE meetings SET end_time = $1 WHERE id = $2",
+                end_time, meeting_id,
+            )
+
+        logger.info("Meeting %s done", meeting_id[:8])
+
+    except asyncio.CancelledError:
+        logger.info("Recording %s cancelled", meeting_id[:8])
+        raise
+    except Exception as e:
+        logger.error("Recording %s failed: %s", meeting_id[:8], e, exc_info=True)
+        await models.update_meeting_status(meeting_id, "error", str(e)[:500])
+    finally:
+        if audio_proc and audio_proc.returncode is None:
+            await _stop_audio_capture(audio_proc)
+        if browser:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+        if pw:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
+        await _delete_pulse_sink(sink_name)
+
+
+# ── Meeting join ──────────────────────────────────────────────────────────────
+
+async def _join_meeting(page, url: str) -> set[str]:
+    await page.goto(url, timeout=30_000)
+    await page.wait_for_timeout(3000)
+
+    try:
+        name_input = page.locator("input[placeholder*='имя'], input[placeholder*='name'], input[type='text']").first
+        await name_input.fill("Protocaller", timeout=5000)
+    except Exception:
+        pass
+
+    # Disable mic/cam
+    for selector in [
+        "button[data-testid='mic-button']",
+        "button[aria-label*='микрофон']",
+        "button[aria-label*='mic']",
+    ]:
+        try:
+            btn = page.locator(selector).first
+            if await btn.is_visible(timeout=1000):
+                await btn.click()
+        except Exception:
+            pass
+
+    for selector in [
+        "button[data-testid='cam-button']",
+        "button[aria-label*='камер']",
+        "button[aria-label*='camera']",
+    ]:
+        try:
+            btn = page.locator(selector).first
+            if await btn.is_visible(timeout=1000):
+                await btn.click()
+        except Exception:
+            pass
+
+    # Join button
+    for selector in [
+        "button[data-testid='join-button']",
+        "button:has-text('Войти')",
+        "button:has-text('Join')",
+        "button:has-text('Присоединиться')",
+    ]:
+        try:
+            btn = page.locator(selector).first
+            if await btn.is_visible(timeout=2000):
+                await btn.click()
+                break
+        except Exception:
+            pass
+
+    await page.wait_for_timeout(5000)
+    return await _get_participant_names(page)
+
+
+# ── Participant detection ─────────────────────────────────────────────────────
+
+async def _get_participant_names(page) -> set[str]:
+    try:
+        elements = await page.locator(
+            "div[class*='participant'], div[class*='member'], span[class*='name']"
+        ).all()
+        names = set()
+        for el in elements:
+            text = (await el.text_content() or "").strip()
+            if text and len(text) > 1 and text != "Protocaller":
+                names.add(text)
+        return names
+    except Exception:
+        return set()
+
+
+async def _get_active_speakers(page) -> list[str]:
+    try:
+        elements = await page.locator("div[class*='rootStroke'], div[class*='speaking']").all()
+        speakers = []
+        for el in elements:
+            name = await el.get_attribute("data-name") or await el.text_content() or ""
+            name = name.strip()
+            if name and name != "Protocaller":
+                speakers.append(name)
+        return speakers
+    except Exception:
+        return []
+
+
+async def _wait_for_meeting_end(page, initial_participants: set[str]) -> None:
+    meeting_started = len(initial_participants) > 0
+    empty_polls = 0
+
+    while True:
+        await asyncio.sleep(config.PARTICIPANT_POLL_INTERVAL)
+        try:
+            # Check for page crash / redirect
+            current_url = page.url
+            if "telemost" not in current_url.lower():
+                logger.info("URL changed — meeting ended")
+                return
+        except Exception:
+            logger.info("Page crashed — meeting ended")
+            return
+
+        new_names = await _get_participant_names(page)
+        others = [n for n in new_names if n != "Protocaller"]
+
+        if others:
+            meeting_started = True
+            empty_polls = 0
+        elif meeting_started:
+            empty_polls += 1
+            logger.info("Empty poll %d/%d", empty_polls, config.EMPTY_POLLS_TO_END)
+            if empty_polls >= config.EMPTY_POLLS_TO_END:
+                logger.info("Meeting ended (no participants)")
+                return
+
+
+# ── Audio capture ─────────────────────────────────────────────────────────────
+
+async def _start_audio_capture(
+    output_path: str, sink_name: str
+) -> asyncio.subprocess.Process:
+    monitor = f"{sink_name}.monitor"
+    cmd = (
+        f"parec --device={monitor} --format=s16le --rate=16000 --channels=1 "
+        f"| ffmpeg -y -f s16le -ar 16000 -ac 1 -i pipe:0 "
+        f"-acodec pcm_s16le {output_path}"
+    )
+    proc = await asyncio.create_subprocess_shell(
+        cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    return proc
+
+
+async def _stop_audio_capture(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is not None:
+        return
+    try:
+        proc.send_signal(signal.SIGINT)
+        await asyncio.wait_for(proc.wait(), timeout=8.0)
+    except (asyncio.TimeoutError, ProcessLookupError, OSError):
+        try:
+            proc.terminate()
+            await asyncio.wait_for(proc.wait(), timeout=3.0)
+        except Exception:
+            pass
+
+
+# ── PulseAudio ────────────────────────────────────────────────────────────────
+
+async def _create_pulse_sink(name: str) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        "pactl", "load-module", "module-null-sink",
+        f"sink_name={name}", f"sink_properties=device.description={name}",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.wait()
+
+
+async def _set_default_sink(name: str) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        "pactl", "set-default-sink", name,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.wait()
+
+
+async def _delete_pulse_sink(name: str) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        "pactl", "unload-module", f"sink_name={name}",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.wait()
+
+
+# ── Transcript building ───────────────────────────────────────────────────────
+
+def _effective_speaker_timeline(
+    timeline: list[tuple[float, str]],
+    participants: set[str],
+) -> list[tuple[float, str]]:
+    if timeline:
+        return timeline
+    others = [p for p in participants if p != "Protocaller"]
+    if len(others) == 1:
+        return [(0.0, others[0])]
+    return []
+
+
+def _build_transcript(segments, speaker_timeline: list[tuple[float, str]]) -> str:
+    lines = []
+    current_speaker = "Участник"
+
+    for seg in segments:
+        # Find speaker at this timestamp
+        for ts, name in reversed(speaker_timeline):
+            if seg.start >= ts:
+                current_speaker = name
+                break
+        lines.append(f"[{_fmt_time(seg.start)}] {current_speaker}: {seg.text}")
+
+    return "\n".join(lines)
+
+
+def _fmt_time(seconds: float) -> str:
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
+# ── Scheduler: start pending meetings ────────────────────────────────────────
+
+async def run_recording_scheduler() -> None:
+    """Background loop: pick up pending meetings and start recording."""
+    while True:
+        try:
+            pending = await models.get_pending_meetings_to_start(
+                within_minutes=config.JOIN_BEFORE_MINUTES + 1
+            )
+            for meeting in pending:
+                mid = str(meeting["id"])
+                if mid not in _active:
+                    logger.info(
+                        "Scheduling recording for meeting %s at %s",
+                        mid[:8], meeting.get("start_time"),
+                    )
+                    await start_recording(mid)
+        except Exception as e:
+            logger.error("Scheduler error: %s", e)
+        await asyncio.sleep(30)

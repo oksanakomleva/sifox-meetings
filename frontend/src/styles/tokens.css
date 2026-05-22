@@ -1,0 +1,139 @@
+/*
+  Design tokens — Sifox / Copula UI
+  Source: Figma "Copula-UI" color palette + typography slide
+
+  Fonts:
+    Titles  → Montserrat 700/800  (open-source replacement for Druk LCG)
+    Body    → Nunito 400/600/800  (used directly in Figma, free on Google Fonts)
+*/
+
+:root {
+  /* ── Brand palette ─────────────────────────────────────────────────────── */
+
+  /* Primary blue */
+  --color-accent:       #373BF9;   /* ACCENT */
+  --color-accent-3:     #697DFF;   /* ACCENT 3 */
+  --color-accent-4:     #92AEFF;   /* ACCENT 4 / BACKGROUND 3 light */
+  --color-accent-5:     #D1E1FF;   /* ACCENT 5 / MESSAGE */
+  --color-accent-6:     #E8EFFF;   /* BACKGROUND (lightest blue) */
+
+  /* Pink accent */
+  --color-accent-pink:  #FF87CE;   /* ACCENT 2 */
+
+  /* Gradient (sidebar, hero blocks) */
+  --gradient-brand:     linear-gradient(213.22deg, #7578FF 8.37%, #373BF9 110.93%);
+  --gradient-bg3:       linear-gradient(180deg, #92AEFF 0%, #373BF9 100%);
+
+  /* ── Semantic colors ───────────────────────────────────────────────────── */
+
+  /* Primary action */
+  --color-primary:        var(--color-accent);
+  --color-primary-hover:  #2B2FD4;
+  --color-primary-light:  var(--color-accent-6);
+  --color-primary-mid:    var(--color-accent-5);
+
+  /* Backgrounds */
+  --color-bg:           #F5F7FF;   /* slightly tinted white, close to E8EFFF */
+  --color-surface:      #FFFFFF;   /* MAIN */
+  --color-surface-2:    var(--color-accent-6);   /* E8EFFF */
+  --color-message-bg:   var(--color-accent-5);   /* D1E1FF */
+
+  /* Sidebar — dark version uses gradient */
+  --color-sidebar-bg:   #1A1C3A;   /* deep dark navy */
+  --color-sidebar-text: #FFFFFF;
+  --color-sidebar-muted:#9292AD;   /* TEXT 3 */
+  --color-sidebar-hover:rgba(55, 59, 249, 0.18);
+  --color-sidebar-active:rgba(55, 59, 249, 0.32);
+
+  /* Text */
+  --color-text:           #2E313E;  /* darkest — used for headings in Figma */
+  --color-text-brand:     #323030;  /* logo color — main body text */
+  --color-text-secondary: #74748F;  /* TEXT 2 */
+  --color-text-muted:     #9292AD;  /* TEXT 3 */
+  --color-text-placeholder:#C6CADD; /* last swatch */
+
+  /* Status */
+  --color-success:        #16A34A;
+  --color-success-bg:     #F0FDF4;
+  --color-warning:        #D97706;
+  --color-warning-bg:     #FFFBEB;
+  --color-error:          #DC2626;
+  --color-error-bg:       #FEF2F2;
+  --color-info:           var(--color-accent);
+  --color-info-bg:        var(--color-accent-6);
+
+  /* Borders */
+  --color-border:         #C6CADD;  /* last palette swatch */
+  --color-border-strong:  #9292AD;  /* TEXT 3 */
+
+  /* ── Typography ─────────────────────────────────────────────────────────── */
+
+  /* Montserrat — titles (replaces Druk LCG, uppercase, weight 700-800) */
+  --font-title:    'Montserrat', -apple-system, sans-serif;
+  /* Nunito — body text (used directly in Figma design) */
+  --font-body:     'Nunito', -apple-system, sans-serif;
+  /* Default (body) */
+  --font-family:   var(--font-body);
+
+  --font-size-xs:    0.75rem;    /* 12px */
+  --font-size-sm:    0.875rem;   /* 14px */
+  --font-size-base:  1rem;       /* 16px  ← Nunito 16 in Figma */
+  --font-size-lg:    1.125rem;   /* 18px */
+  --font-size-xl:    1.25rem;    /* 20px */
+  --font-size-2xl:   1.5rem;     /* 24px  ← Nunito/Druk 24 in Figma */
+  --font-size-3xl:   1.875rem;   /* 30px */
+  --font-size-4xl:   2.5rem;     /* 40px */
+
+  --font-weight-normal:    400;
+  --font-weight-medium:    500;
+  --font-weight-semibold:  600;
+  --font-weight-bold:      700;
+  --font-weight-extrabold: 800;
+
+  --line-height-tight:   1.2;
+  --line-height-normal:  1.4;   /* Nunito 22/16 ≈ 1.375 */
+  --line-height-relaxed: 1.75;
+
+  /* Letter spacing for titles (Druk used 0.02–0.05em) */
+  --letter-spacing-title: 0.02em;
+  --letter-spacing-caps:  0.05em;
+
+  /* ── Spacing ────────────────────────────────────────────────────────────── */
+  --space-1:  0.25rem;
+  --space-2:  0.5rem;
+  --space-3:  0.75rem;
+  --space-4:  1rem;
+  --space-5:  1.25rem;
+  --space-6:  1.5rem;
+  --space-8:  2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+
+  /* ── Border radius ──────────────────────────────────────────────────────── */
+  /* Figma uses both sharp (0px) and rounded (8–12px) — we keep both options */
+  --radius-sm:   4px;
+  --radius-md:   8px;
+  --radius-lg:   12px;   /* Figma card radius: 12px */
+  --radius-xl:   16px;
+  --radius-2xl:  24px;
+  --radius-full: 9999px;
+
+  /* ── Shadows ────────────────────────────────────────────────────────────── */
+  /* From Figma: box-shadow: 0px 4px 10.7px rgba(57, 60, 75, 0.3) */
+  --shadow-card: 0px 4px 10.7px rgba(57, 60, 75, 0.20);
+  --shadow-sm:   0 1px 3px 0 rgba(57, 60, 75, 0.12);
+  --shadow-md:   0 4px 10px -1px rgba(57, 60, 75, 0.18);
+  --shadow-lg:   0 8px 20px -4px rgba(57, 60, 75, 0.18);
+  --shadow-xl:   0 20px 40px -8px rgba(55, 59, 249, 0.15);
+
+  /* ── Layout ─────────────────────────────────────────────────────────────── */
+  --sidebar-width:      240px;
+  --header-height:      64px;
+  --content-max-width:  1200px;
+
+  /* ── Transitions ────────────────────────────────────────────────────────── */
+  --transition-fast: 150ms ease;
+  --transition-base: 200ms ease;
+  --transition-slow: 300ms ease;
+}
