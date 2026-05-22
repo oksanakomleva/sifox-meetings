@@ -234,51 +234,55 @@ async def _join_meeting(page, url: str) -> set[str]:
 
     await page.wait_for_timeout(500)
 
-    # Disable mic/cam (best effort)
+    # Telemost has mic/cam OFF by default — don't click them, it triggers
+    # permission errors and modals that block the join button.
+
+    # Dismiss any modal/popup (e.g. "Понятно", "Закрыть") that might block join
     for selector in [
-        "button[data-testid='mic-button']",
-        "button[aria-label*='микрофон' i]",
-        "button[aria-label*='mic' i]",
-        "button[data-testid='cam-button']",
-        "button[aria-label*='камер' i]",
-        "button[aria-label*='camera' i]",
+        "button:has-text('Понятно')",
+        "button:has-text('OK')",
+        "button:has-text('Закрыть')",
+        "button[aria-label*='Закрыть' i]",
     ]:
         try:
             btn = page.locator(selector).first
-            if await btn.is_visible(timeout=800):
+            if await btn.is_visible(timeout=500):
                 await btn.click()
-                logger.info("Clicked: %s", selector)
+                logger.info("Dismissed modal: %s", selector)
+                await page.wait_for_timeout(500)
         except Exception:
             pass
 
     await snap("2-before-join")
 
-    # Click join button
+    # Click join button — try has-text, fallback to clicking by force
     joined = False
     for selector in [
-        "button[data-testid='join-button']",
-        "button:has-text('Войти')",
-        "button:has-text('Присоединиться')",
-        "button:has-text('Join')",
         "button:has-text('Подключиться')",
-        "button:has-text('Continue')",
-        "button:has-text('Продолжить')",
+        "button:has-text('Присоединиться')",
+        "button:has-text('Войти')",
+        "button:has-text('Join')",
+        "button[data-testid='join-button']",
     ]:
         try:
             btn = page.locator(selector).first
-            if await btn.is_visible(timeout=1500):
-                await btn.click()
-                logger.info("Clicked join button: %s", selector)
-                joined = True
-                break
-        except Exception:
+            count = await btn.count()
+            if count == 0:
+                continue
+            # Force click even if covered (force=True bypasses visibility check)
+            await btn.click(force=True, timeout=3000)
+            logger.info("Clicked join button: %s", selector)
+            joined = True
+            break
+        except Exception as e:
+            logger.info("Selector %s failed: %s", selector, e)
             continue
+
     if not joined:
         logger.warning("Could not find join button")
-        # Log all visible buttons for debugging
         try:
             buttons = await page.locator("button").all()
-            for b in buttons[:20]:
+            for b in buttons[:30]:
                 txt = (await b.text_content() or "").strip()
                 aria = await b.get_attribute("aria-label") or ""
                 if txt or aria:
