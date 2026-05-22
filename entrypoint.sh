@@ -11,11 +11,17 @@ sleep 1
 # and refuses to start thinking a server is already configured
 unset PULSE_SERVER
 
+# Provide a writable runtime path so PulseAudio doesn't try to use root's homedir
+mkdir -p /tmp/pulse-runtime
+chmod 700 /tmp/pulse-runtime
+export PULSE_RUNTIME_PATH=/tmp/pulse-runtime
+export HOME=/tmp
+
 pulseaudio \
-  --system \
-  -n \
-  --exit-idle-time=-1 \
   --daemonize=no \
+  --exit-idle-time=-1 \
+  --disallow-exit \
+  -n \
   --log-target=stderr \
   --load="module-native-protocol-unix socket=/tmp/pulse.sock auth-anonymous=1" \
   --load="module-null-sink sink_name=default_sink" &
