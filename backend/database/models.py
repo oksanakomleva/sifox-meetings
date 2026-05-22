@@ -257,7 +257,20 @@ async def upsert_meeting(
             ON CONFLICT (meeting_url) DO UPDATE
               SET title = COALESCE(EXCLUDED.title, meetings.title),
                   start_time = COALESCE(EXCLUDED.start_time, meetings.start_time),
-                  updated_at = NOW()
+                  updated_at = NOW(),
+                  -- Reset error/done meetings to pending if rescheduled in the future
+                  status = CASE
+                    WHEN meetings.status IN ('error', 'done')
+                         AND EXCLUDED.start_time > NOW() + INTERVAL '2 minutes'
+                    THEN 'pending'
+                    ELSE meetings.status
+                  END,
+                  error_message = CASE
+                    WHEN meetings.status IN ('error', 'done')
+                         AND EXCLUDED.start_time > NOW() + INTERVAL '2 minutes'
+                    THEN NULL
+                    ELSE meetings.error_message
+                  END
             RETURNING *
             """,
             meeting_url, title, start_time,
