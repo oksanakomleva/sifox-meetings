@@ -18,6 +18,7 @@ export interface Meeting {
   meeting_type: string | null
   audio_path: string | null
   audio_size: number | null
+  error_message: string | null
   created_at: string
   participants?: Participant[]
   transcript?: string
