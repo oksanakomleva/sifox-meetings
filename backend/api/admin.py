@@ -248,6 +248,37 @@ class LaunchSpeakerRequest(BaseModel):
     duration_minutes: int = 5
 
 
+@router.post("/test/run-speaker-sync")
+async def run_speaker_sync(req: LaunchSpeakerRequest, caller: TestOrAdminUser):
+    """Run test_speaker.py synchronously for up to 30s and return its output (for debugging)."""
+    speaker_script = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "tests", "e2e", "test_speaker.py")
+    )
+    try:
+        proc = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                sys.executable, speaker_script,
+                "--url", req.meeting_url,
+                "--duration", "1",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            ),
+            timeout=5,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            proc.kill()
+            stdout, stderr = await proc.communicate()
+        return {
+            "returncode": proc.returncode,
+            "stdout": stdout.decode(errors="replace")[-3000:],
+            "stderr": stderr.decode(errors="replace")[-3000:],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @router.get("/test/debug-speaker")
 async def debug_test_speaker(caller: TestOrAdminUser):
     """Check test_speaker.py environment: audio file, playwright, python path."""
