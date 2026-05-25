@@ -248,6 +248,38 @@ class LaunchSpeakerRequest(BaseModel):
     duration_minutes: int = 5
 
 
+@router.get("/test/debug-speaker")
+async def debug_test_speaker(caller: TestOrAdminUser):
+    """Check test_speaker.py environment: audio file, playwright, python path."""
+    import subprocess as _sp
+    speaker_script = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "tests", "e2e", "test_speaker.py")
+    )
+    audio_file = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "tests", "e2e", "test_audio.wav")
+    )
+    result = {
+        "speaker_script_exists": os.path.exists(speaker_script),
+        "speaker_script_path": speaker_script,
+        "audio_exists": os.path.exists(audio_file),
+        "audio_size": os.path.getsize(audio_file) if os.path.exists(audio_file) else 0,
+        "audio_path": audio_file,
+        "display": os.environ.get("DISPLAY"),
+        "pulse_server": os.environ.get("PULSE_SERVER"),
+        "python": sys.executable,
+    }
+    # Quick import check
+    try:
+        proc = _sp.run(
+            [sys.executable, "-c", "from playwright.async_api import async_playwright; print('OK')"],
+            capture_output=True, text=True, timeout=10,
+        )
+        result["playwright_import"] = proc.stdout.strip() or proc.stderr.strip()[:200]
+    except Exception as e:
+        result["playwright_import"] = str(e)
+    return result
+
+
 @router.post("/test/launch-speaker")
 async def launch_test_speaker(req: LaunchSpeakerRequest, caller: TestOrAdminUser):
     """
