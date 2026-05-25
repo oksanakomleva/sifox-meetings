@@ -191,6 +191,20 @@ async def delete_invitation(invitation_id: int, admin: AdminUser):
     return {"ok": True}
 
 
+# ── Maintenance ───────────────────────────────────────────────────────────────
+
+@router.delete("/meetings/errors")
+async def delete_error_meetings(admin: AdminUser):
+    """One-shot cleanup: delete all meetings with status=error."""
+    from database.connection import get_pool
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM meetings WHERE status = 'error'")
+    count = int(result.split()[-1])
+    logger.info("Deleted %d error meetings by admin user_id=%s", count, admin["user_id"])
+    return {"ok": True, "deleted": count}
+
+
 # ── E2E Testing ───────────────────────────────────────────────────────────────
 
 @router.post("/test/start-e2e")
