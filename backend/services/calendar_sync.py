@@ -70,6 +70,9 @@ def _fetch_events_sync(token_row: dict, calendar_ids: list[str], days: int = 7) 
 
     service = build("calendar", "v3", credentials=creds, cache_discovery=False)
     now = datetime.now(timezone.utc)
+    # Look 30 min into the past so recurring meetings that started recently
+    # are still captured (Google Calendar filters by start_time with singleEvents=True)
+    time_min = now - timedelta(minutes=30)
     time_max = now + timedelta(days=days)
 
     events = []
@@ -77,7 +80,7 @@ def _fetch_events_sync(token_row: dict, calendar_ids: list[str], days: int = 7) 
         try:
             result = service.events().list(
                 calendarId=cal_id,
-                timeMin=now.isoformat(),
+                timeMin=time_min.isoformat(),
                 timeMax=time_max.isoformat(),
                 singleEvents=True,
                 orderBy="startTime",
