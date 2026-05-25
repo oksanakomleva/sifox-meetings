@@ -222,16 +222,21 @@ async def _start_e2e_test_impl(caller: dict) -> dict:
         10,  # duration_minutes
     )
 
-    # Immediately sync so bot sees the new event
-    asyncio.create_task(sync_all_users())
+    # Sync immediately so the bot sees the new event right away
+    await sync_all_users()
 
     # Schedule test speaker: join 3 min after event start (= 6 min from now),
     # so the recorder bot has time to arrive first
     asyncio.create_task(_launch_speaker_after_delay(meeting_url, delay_seconds=210, duration_minutes=5))
 
+    # Look up the meeting record so we can return its ID to the smoke test
+    meeting = await models.get_meeting_by_url(meeting_url)
+    meeting_id = str(meeting["id"]) if meeting else None
+
     return {
         "status": "started",
         "meeting_url": meeting_url,
+        "meeting_id": meeting_id,
         "calendar_event_id": event_id,
         "calendar_id": cal["google_calendar_id"],
         "message": "Calendar event created for +3 min, sync triggered, Test Speaker will join at +6 min",

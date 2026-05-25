@@ -219,6 +219,7 @@ class SmokeTest:
         r = self.requests.delete(
             f"{self.base_url}/api/admin/test/calendar-event/{event_id}",
             cookies=self.cookies,
+            headers=self._auth_headers,
             params={"calendar_id": calendar_id},
             timeout=15,
         )
@@ -247,6 +248,12 @@ class SmokeTest:
 
         calendar_id = e2e_data.get("calendar_id", "")
         event_id = e2e_data.get("calendar_event_id", "")
+        meeting_id = e2e_data.get("meeting_id", "")
+
+        if meeting_id:
+            print(f"  Tracking meeting_id={meeting_id[:8]}...")
+        else:
+            print("  WARNING: no meeting_id returned, watching all recent meetings")
 
         # Wait for the pipeline to complete
         print(f"\n⏳ Waiting up to {timeout_minutes} min for pipeline to complete...")
@@ -254,53 +261,48 @@ class SmokeTest:
         last_status = None
 
         while time.time() < deadline:
-            r = self._get("/api/admin/meetings?limit=5")
+            r = self._get("/api/admin/meetings?limit=20")
             if r.status_code != 200:
                 time.sleep(15)
                 continue
 
             meetings = r.json().get("meetings", [])
 
-            # Find the E2E test meeting (most recent with our URL)
-            active = next(
-                (
-                    m for m in meetings
-                    if m.get("status") in ("pending", "recording", "transcribing", "analyzing")
-                ),
-                None,
-            )
-            if active and active["status"] != last_status:
-                print(f"  → {active['id'][:8]} status: {active['status']}")
-                last_status = active["status"]
-
-            done = next(
-                (m for m in meetings if m.get("status") == "done"),
-                None,
-            )
-            if done and done.get("summary"):
-                self._check("Pipeline reached status=done", True, f"meeting {done['id'][:8]}")
-                # Verify artifacts
-                self._check("Transcript not empty", bool(done.get("transcript")), "")
-                self._check("Summary generated", bool(done.get("summary")), "")
-                self._check("Tags assigned", bool(done.get("tags")), "")
-                self._check("Meeting type classified", bool(done.get("meeting_type")), done.get("meeting_type", ""))
-                # Verify transcript contains actual speech (not empty transcription)
-                transcript = done.get("transcript", "")
-                self._check(
-                    "Transcript has content (>50 chars)",
-                    len(transcript) > 50,
-                    f"{len(transcript)} chars",
+            # Track specific meeting if we have its ID
+            if meeting_id:
+                target = next((m for m in meetings if m["id"] == meeting_id), None)
+            else:
+                target = next(
+                    (m for m in meetings if m.get("status") in ("pending", "recording", "transcribing", "analyzing")),
+                    None,
                 )
-                break
 
-            error = next((m for m in meetings if m.get("status") == "error"), None)
-            if error:
-                self._check(
-                    "Pipeline reached status=done",
-                    False,
-                    f"error: {error.get('error_message', 'unknown')[:100]}",
-                )
-                break
+            if target:
+                status = target.get("status")
+                if status != last_status:
+                    print(f"  → {target['id'][:8]} status: {status}")
+                    last_status = status
+
+                if status == "done" and target.get("summary"):
+                    self._check("Pipeline reached status=done", True, f"meeting {target['id'][:8]}")
+                    self._check("Transcript not empty", bool(target.get("transcript")), "")
+                    self._check("Summary generated", bool(target.get("summary")), "")
+                    self._check("Tags assigned", bool(target.get("tags")), "")
+                    self._check("Meeting type classified", bool(target.get("meeting_type")), target.get("meeting_type", ""))
+                    transcript = target.get("transcript", "")
+                    self._check(
+                        "Transcript has content (>50 chars)",
+                        len(transcript) > 50,
+                        f"{len(transcript)} chars",
+                    )
+                    break
+                elif status == "error":
+                    self._check(
+                        "Pipeline reached status=done",
+                        False,
+                        f"error: {target.get('error_message', 'unknown')[:100]}",
+                    )
+                    break
 
             time.sleep(20)
         else:

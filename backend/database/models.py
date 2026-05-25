@@ -324,11 +324,18 @@ async def upsert_meeting(
             VALUES ($1, $2, $3)
             ON CONFLICT (meeting_url) DO UPDATE
               SET title = COALESCE(EXCLUDED.title, meetings.title),
-                  start_time = COALESCE(EXCLUDED.start_time, meetings.start_time),
                   updated_at = NOW(),
+                  -- Always update start_time for pending meetings so the bot picks up
+                  -- the new occurrence immediately (e.g. E2E test reusing a permanent URL).
+                  -- For recording/transcribing/analyzing, keep start_time as-is.
+                  start_time = CASE
+                    WHEN meetings.status IN ('pending', 'error', 'done')
+                    THEN EXCLUDED.start_time
+                    ELSE meetings.start_time
+                  END,
                   -- Reset error/done meetings to pending for new/current occurrences.
-                  -- Handles permanent Telemost rooms reused across multiple calendar events:
-                  -- reset if the new start_time is on a different day OR in the future.
+                  -- Also reset pending meetings whose start_time changed to a new day
+                  -- (handles permanent Telemost rooms reused across calendar events).
                   status = CASE
                     WHEN meetings.status IN ('error', 'done')
                          AND (
@@ -352,6 +359,16 @@ async def upsert_meeting(
             meeting_url, title, start_time,
         )
     return dict(row)
+
+
+async def get_meeting_by_url(meeting_url: str) -> dict[str, Any] | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, title, status, start_time FROM meetings WHERE meeting_url = $1",
+            meeting_url,
+        )
+    return dict(row) if row else None
 
 
 async def claim_meeting_for_recording(meeting_id: str) -> bool:
