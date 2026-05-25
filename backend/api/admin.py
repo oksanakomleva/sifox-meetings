@@ -110,6 +110,31 @@ async def reanalyze_meeting(meeting_id: str, admin: AdminUser):
     return {"ok": True, "message": "Re-analysis started"}
 
 
+@router.post("/meetings/{meeting_id}/restart")
+async def restart_meeting(meeting_id: str, admin: AdminUser):
+    """Reset a done/error meeting back to pending so the recorder picks it up again."""
+    from database.connection import get_pool
+    from datetime import datetime, timezone
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE meetings
+               SET status        = 'pending',
+                   start_time    = GREATEST(start_time, NOW()),
+                   error_message = NULL,
+                   updated_at    = NOW()
+             WHERE id = $1
+            RETURNING id, status, start_time
+            """,
+            meeting_id,
+        )
+    if not row:
+        raise HTTPException(404, "Meeting not found")
+    return {"ok": True, "meeting_id": meeting_id, "status": row["status"], "start_time": str(row["start_time"])}
+
+
 class GrantAccessRequest(BaseModel):
     user_id: int
     meeting_id: str
