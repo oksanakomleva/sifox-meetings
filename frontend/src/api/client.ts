@@ -41,6 +41,10 @@ export const api = {
     audioUrl: (id: string) => `/api/meetings/${id}/audio`,
     week: () =>
       request<{ meetings: import('../types').Meeting[] }>('/meetings/week'),
+    weekSummary: () =>
+      request<{ summary: string | null; count: number }>('/meetings/week-summary'),
+    upcoming: () =>
+      request<{ meetings: import('../types').Meeting[] }>('/meetings/upcoming'),
   },
 
   // ── Admin ──────────────────────────────────────────────────────────────────────

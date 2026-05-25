@@ -15,6 +15,53 @@ router = APIRouter(prefix="/api/meetings", tags=["meetings"])
 CurrentUser = Annotated[dict, Depends(get_current_user)]
 
 
+@router.get("/week-summary")
+async def week_summary(user: CurrentUser):
+    """AI-generated summary of the last 7 days for Dashboard."""
+    from openai import AsyncOpenAI
+    meetings = await models.get_meetings_this_week(user["user_id"], user["is_admin"])
+    if not meetings:
+        return {"summary": None, "count": 0}
+
+    parts = []
+    for m in meetings:
+        name = m.get("topic") or m.get("title") or "Без названия"
+        date_val = m.get("start_time")
+        date_str = date_val.strftime("%d.%m") if hasattr(date_val, "strftime") else str(date_val)[:10]
+        excerpt = (m.get("summary") or "")[:600]
+        parts.append(f"• {name} ({date_str}): {excerpt}")
+
+    context = "\n".join(parts)
+    client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+    resp = await client.chat.completions.create(
+        model=config.OPENAI_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Ты пишешь краткую деловую сводку по итогам рабочей недели. "
+                    "Отвечай на русском языке. 3–5 предложений, только суть: "
+                    "что обсуждалось, ключевые решения и темы."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Встречи за последние 7 дней:\n{context}\n\nНапиши сводку.",
+            },
+        ],
+        max_tokens=400,
+        temperature=0.3,
+    )
+    return {"summary": resp.choices[0].message.content, "count": len(meetings)}
+
+
+@router.get("/upcoming")
+async def upcoming_meetings(user: CurrentUser):
+    """Pending/active meetings for Calendar tab."""
+    meetings = await models.get_upcoming_meetings_for_user(user["user_id"], user["is_admin"])
+    return {"meetings": meetings}
+
+
 @router.get("/week")
 async def meetings_this_week(user: CurrentUser):
     """Last 7 days of completed meetings with summaries (for Dashboard)."""

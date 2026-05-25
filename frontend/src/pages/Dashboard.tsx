@@ -1,42 +1,26 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import ChatWidget from '../components/ChatWidget'
-import type { Meeting, ChatMessage } from '../types'
+import type { ChatMessage } from '../types'
 
 export default function Dashboard() {
-  const [meetings, setMeetings] = useState<Meeting[]>([])
+  const [summary, setSummary] = useState<string | null>(null)
+  const [meetingCount, setMeetingCount] = useState(0)
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([])
-  const [loading, setLoading] = useState(true)
-  const navigate = useNavigate()
+  const [loadingSummary, setLoadingSummary] = useState(true)
+  const [loadingChat, setLoadingChat] = useState(true)
 
   useEffect(() => {
-    Promise.all([
-      api.meetings.week().catch(() => ({ meetings: [] as Meeting[] })),
-      api.chat.history(undefined).catch(() => ({ messages: [] as ChatMessage[] })),
-    ]).then(([weekData, historyData]) => {
-      setMeetings(weekData.meetings)
-      setChatHistory(historyData.messages)
-    }).finally(() => setLoading(false))
+    api.meetings.weekSummary()
+      .then(r => { setSummary(r.summary); setMeetingCount(r.count) })
+      .catch(() => setSummary(null))
+      .finally(() => setLoadingSummary(false))
+
+    api.chat.history(undefined)
+      .then(r => setChatHistory(r.messages))
+      .catch(() => {})
+      .finally(() => setLoadingChat(false))
   }, [])
-
-  const fmt = (iso: string | null) => {
-    if (!iso) return '—'
-    return new Date(iso).toLocaleString('ru-RU', {
-      weekday: 'short', day: 'numeric', month: 'short',
-      hour: '2-digit', minute: '2-digit',
-    })
-  }
-
-  const meetingTypeLabel: Record<string, string> = {
-    sales: 'Продажи',
-    internal: 'Внутренняя',
-    planning: 'Планирование',
-    review: 'Ревью',
-    interview: 'Интервью',
-    partner: 'Партнёр',
-    other: 'Другое',
-  }
 
   return (
     <div className="main-content">
@@ -47,113 +31,56 @@ export default function Dashboard() {
 
       <div className="page-body" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
 
-        {/* ── Weekly summary ── */}
+        {/* ── Weekly AI summary ── */}
         <section>
-          <h2 style={{
-            fontSize: 'var(--font-size-lg)',
-            fontWeight: 'var(--font-weight-semibold)',
-            marginBottom: 'var(--space-4)',
-            color: 'var(--color-text)',
-          }}>
-            Встречи за последние 7 дней
-          </h2>
-
-          {loading ? (
-            <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-8)' }}>
-              <span className="spinner" style={{ width: 28, height: 28 }} />
-            </div>
-          ) : meetings.length === 0 ? (
-            <div className="card" style={{
-              color: 'var(--color-text-secondary)',
-              fontSize: 'var(--font-size-sm)',
-              textAlign: 'center',
-              padding: 'var(--space-10)',
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
+            <h2 style={{
+              fontSize: 'var(--font-size-lg)',
+              fontWeight: 'var(--font-weight-semibold)',
+              color: 'var(--color-text)',
+              margin: 0,
             }}>
-              Нет завершённых встреч за последние 7 дней
-            </div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-              {meetings.map(m => (
-                <div
-                  key={m.id}
-                  className="card card-hover"
-                  onClick={() => navigate(`/meetings/${m.id}`)}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--space-4)' }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      {/* Title + type badge */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-1)' }}>
-                        <span style={{
-                          fontWeight: 'var(--font-weight-semibold)',
-                          fontSize: 'var(--font-size-base)',
-                          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                        }}>
-                          {m.topic || m.title || 'Без названия'}
-                        </span>
-                        {m.meeting_type && (
-                          <span style={{
-                            flexShrink: 0,
-                            fontSize: 'var(--font-size-xs)',
-                            background: 'var(--color-surface-2)',
-                            color: 'var(--color-text-secondary)',
-                            padding: '1px 7px',
-                            borderRadius: 'var(--radius-full)',
-                            fontWeight: 500,
-                          }}>
-                            {meetingTypeLabel[m.meeting_type] ?? m.meeting_type}
-                          </span>
-                        )}
-                      </div>
+              Итоги недели
+            </h2>
+            {!loadingSummary && meetingCount > 0 && (
+              <span style={{
+                fontSize: 'var(--font-size-xs)',
+                color: 'var(--color-text-muted)',
+                fontWeight: 400,
+              }}>
+                {meetingCount} {meetingCount === 1 ? 'встреча' : meetingCount < 5 ? 'встречи' : 'встреч'}
+              </span>
+            )}
+          </div>
 
-                      {/* Date */}
-                      <div style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)', marginBottom: 'var(--space-2)' }}>
-                        {fmt(m.start_time)}
-                      </div>
-
-                      {/* Summary excerpt */}
-                      {m.summary && (
-                        <div style={{
-                          fontSize: 'var(--font-size-sm)',
-                          color: 'var(--color-text-secondary)',
-                          lineHeight: 'var(--line-height-relaxed)',
-                          display: '-webkit-box',
-                          WebkitLineClamp: 3,
-                          WebkitBoxOrient: 'vertical',
-                          overflow: 'hidden',
-                        }}>
-                          {m.summary}
-                        </div>
-                      )}
-
-                      {/* Tags */}
-                      {m.tags && m.tags.length > 0 && (
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-1)', marginTop: 'var(--space-2)' }}>
-                          {m.tags.slice(0, 5).map(tag => (
-                            <span key={tag} style={{
-                              fontSize: 'var(--font-size-xs)',
-                              background: 'var(--color-accent-6)',
-                              color: 'var(--color-accent)',
-                              padding: '2px 8px',
-                              borderRadius: 'var(--radius-full)',
-                              fontWeight: 'var(--font-weight-medium)',
-                            }}>
-                              #{tag}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Arrow */}
-                    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6"
-                      style={{ width: 18, height: 18, flexShrink: 0, color: 'var(--color-text-muted)' }}>
-                      <path d="M7 4l6 6-6 6"/>
-                    </svg>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+          <div className="card">
+            {loadingSummary ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', color: 'var(--color-text-secondary)', fontSize: 'var(--font-size-sm)' }}>
+                <span className="spinner" style={{ width: 18, height: 18, flexShrink: 0 }} />
+                Генерирую сводку…
+              </div>
+            ) : summary ? (
+              <p style={{
+                fontSize: 'var(--font-size-base)',
+                lineHeight: 'var(--line-height-relaxed)',
+                color: 'var(--color-text)',
+                margin: 0,
+                whiteSpace: 'pre-wrap',
+              }}>
+                {summary}
+              </p>
+            ) : (
+              <p style={{
+                fontSize: 'var(--font-size-sm)',
+                color: 'var(--color-text-muted)',
+                margin: 0,
+                textAlign: 'center',
+                padding: 'var(--space-6) 0',
+              }}>
+                Нет завершённых встреч за последние 7 дней
+              </p>
+            )}
+          </div>
         </section>
 
         {/* ── Global AI chat ── */}
@@ -174,7 +101,16 @@ export default function Dashboard() {
             Задайте вопрос по всем доступным вам встречам
           </p>
           <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-            <ChatWidget initialHistory={chatHistory} />
+            {loadingChat ? (
+              <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-8)' }}>
+                <span className="spinner" style={{ width: 24, height: 24 }} />
+              </div>
+            ) : (
+              <ChatWidget
+                initialHistory={chatHistory}
+                emptyPlaceholder="Спросите о любой встрече, решениях, задачах или участниках…"
+              />
+            )}
           </div>
         </section>
 

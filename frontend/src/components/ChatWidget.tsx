@@ -4,9 +4,10 @@ import type { ChatMessage } from '../types'
 interface Props {
   meetingId?: string
   initialHistory?: ChatMessage[]
+  emptyPlaceholder?: string
 }
 
-export default function ChatWidget({ meetingId, initialHistory = [] }: Props) {
+export default function ChatWidget({ meetingId, initialHistory = [], emptyPlaceholder }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>(initialHistory)
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
@@ -87,7 +88,7 @@ export default function ChatWidget({ meetingId, initialHistory = [] }: Props) {
       }}>
         {messages.length === 0 && (
           <div style={{ color: 'var(--color-text-muted)', fontSize: 'var(--font-size-sm)', textAlign: 'center', marginTop: 'auto' }}>
-            Задайте вопрос о встрече
+            {emptyPlaceholder ?? 'Задайте вопрос о встрече'}
           </div>
         )}
         {messages.map((msg, i) => (

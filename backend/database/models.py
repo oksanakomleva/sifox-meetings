@@ -769,6 +769,49 @@ async def delete_invitation(invitation_id: int) -> None:
 
 # ── Weekly meetings (for Dashboard) ──────────────────────────────────────────
 
+async def get_upcoming_meetings_for_user(user_id: int, is_admin: bool) -> list[dict]:
+    """Pending/active meetings visible to this user (for calendar tab)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if is_admin:
+            rows = await conn.fetch(
+                """
+                SELECT id, title, topic, start_time, end_time, status, meeting_type
+                FROM meetings
+                WHERE status IN ('pending', 'recording', 'transcribing', 'analyzing')
+                  AND start_time > NOW() - interval '2 hours'
+                ORDER BY start_time ASC
+                LIMIT 100
+                """,
+            )
+        else:
+            user = await get_user_by_id(user_id)
+            if not user:
+                return []
+            email = user["email"]
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT m.id, m.title, m.topic, m.start_time, m.end_time,
+                       m.status, m.meeting_type
+                FROM meetings m
+                WHERE m.status IN ('pending', 'recording', 'transcribing', 'analyzing')
+                  AND m.start_time > NOW() - interval '2 hours'
+                  AND (
+                    EXISTS (SELECT 1 FROM calendar_meeting_links cml
+                            WHERE cml.meeting_id = m.id AND cml.user_id = $1)
+                    OR EXISTS (SELECT 1 FROM calendar_meeting_links cml
+                               WHERE cml.meeting_id = m.id AND $2 = ANY(cml.attendee_emails))
+                    OR EXISTS (SELECT 1 FROM meeting_access_grants g
+                               WHERE g.meeting_id = m.id AND g.user_id = $1)
+                  )
+                ORDER BY m.start_time ASC
+                LIMIT 100
+                """,
+                user_id, email,
+            )
+    return [dict(r) for r in rows]
+
+
 async def get_meetings_this_week(user_id: int, is_admin: bool) -> list[dict]:
     """Meetings from last 7 days (done + summary) accessible to this user."""
     pool = await get_pool()
