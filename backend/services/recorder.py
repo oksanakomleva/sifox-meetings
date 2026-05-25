@@ -111,7 +111,7 @@ async def _record_pipeline(meeting_id: str) -> None:
         tracker = asyncio.create_task(track_speakers())
 
         # 6. Wait for meeting end
-        await _wait_for_meeting_end(page, participants)
+        await _wait_for_meeting_end(page, participants, meeting.get("start_time"))
         tracker.cancel()
 
         # 7. Stop recording
@@ -370,13 +370,13 @@ async def _get_active_speakers(page) -> list[str]:
         return []
 
 
-async def _wait_for_meeting_end(page, initial_participants: set[str]) -> None:
+async def _wait_for_meeting_end(page, initial_participants: set[str], scheduled_start=None) -> None:
     meeting_started = len(initial_participants) > 0
     empty_polls = 0
     deadline = time.monotonic() + config.MAX_RECORDING_HOURS * 3600
-    # If started with no real participants, count empty polls from the start
-    if not meeting_started:
-        empty_polls = 0
+    # Grace period after scheduled start — wait this long for someone to arrive
+    # before giving up on a meeting that never started
+    GRACE_MINUTES = 10
 
     while True:
         await asyncio.sleep(config.PARTICIPANT_POLL_INTERVAL)
@@ -401,13 +401,25 @@ async def _wait_for_meeting_end(page, initial_participants: set[str]) -> None:
         if others:
             meeting_started = True
             empty_polls = 0
-        else:
-            empty_polls += 1
-            logger.info("Empty poll %d/%d (started=%s)", empty_polls, config.EMPTY_POLLS_TO_END, meeting_started)
-            # End if: meeting was started and now empty, OR never started after 3 polls
-            if empty_polls >= config.EMPTY_POLLS_TO_END:
-                logger.info("Meeting ended (no participants)")
-                return
+            continue
+
+        # No one present. Decide whether to end or keep waiting.
+        if not meeting_started and scheduled_start is not None:
+            now = datetime.now(timezone.utc)
+            # If we're still before scheduled start + grace, keep waiting
+            grace_until = scheduled_start + timedelta(minutes=GRACE_MINUTES)
+            if now < grace_until:
+                logger.info(
+                    "Empty but within grace period (until %s, now %s) — waiting",
+                    grace_until.isoformat(), now.isoformat(),
+                )
+                continue
+
+        empty_polls += 1
+        logger.info("Empty poll %d/%d (started=%s)", empty_polls, config.EMPTY_POLLS_TO_END, meeting_started)
+        if empty_polls >= config.EMPTY_POLLS_TO_END:
+            logger.info("Meeting ended (no participants)")
+            return
 
 
 # ── Audio capture ─────────────────────────────────────────────────────────────
