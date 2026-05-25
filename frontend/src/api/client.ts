@@ -58,6 +58,8 @@ export const api = {
     syncCalendars: () => request<void>('/admin/calendars/sync', { method: 'POST' }),
     allMeetings: (limit = 100, offset = 0) =>
       request<{ meetings: import('../types').Meeting[] }>(`/admin/meetings?limit=${limit}&offset=${offset}`),
+    reanalyzeMeeting: (meetingId: string) =>
+      request<void>(`/admin/meetings/${meetingId}/reanalyze`, { method: 'POST' }),
     grantAccess: (userId: number, meetingId: string) =>
       request<void>('/admin/grant-access', {
         method: 'POST',

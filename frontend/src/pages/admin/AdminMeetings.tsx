@@ -10,8 +10,22 @@ export default function AdminMeetings() {
   const navigate = useNavigate()
 
   useEffect(() => {
-    api.admin.allMeetings().then(r => setMeetings(r.meetings)).finally(() => setLoading(false))
+    load()
   }, [])
+
+  const load = () => {
+    api.admin.allMeetings().then(r => setMeetings(r.meetings)).finally(() => setLoading(false))
+  }
+
+  const reanalyze = async (e: React.MouseEvent, meetingId: string) => {
+    e.stopPropagation()
+    try {
+      await api.admin.reanalyzeMeeting(meetingId)
+      setTimeout(load, 1500)
+    } catch (err: any) {
+      alert('Не удалось запустить повторный анализ: ' + err.message)
+    }
+  }
 
   const fmt = (iso: string | null) => {
     if (!iso) return '—'
@@ -41,7 +55,7 @@ export default function AdminMeetings() {
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                  {['Тема', 'Дата', 'Тип', 'Статус', 'Аудио'].map(h => (
+                  {['Тема', 'Дата', 'Тип', 'Статус', 'Аудио', ''].map(h => (
                     <th key={h} style={{
                       padding: 'var(--space-3) var(--space-4)',
                       textAlign: 'left',
@@ -88,6 +102,18 @@ export default function AdminMeetings() {
                     </td>
                     <td style={{ padding: 'var(--space-3) var(--space-4)', fontSize: 'var(--font-size-xs)', color: 'var(--color-text-muted)' }}>
                       {m.audio_size ? `${(m.audio_size / 1_000_000).toFixed(0)} МБ` : '—'}
+                    </td>
+                    <td style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right' }}>
+                      {m.status === 'error' && m.audio_path && (
+                        <button
+                          className="btn btn-secondary"
+                          style={{ fontSize: 'var(--font-size-xs)', padding: '4px 10px', height: 'auto' }}
+                          onClick={(e) => reanalyze(e, m.id)}
+                          title="Повторить анализ из сохранённого транскрипта"
+                        >
+                          🔄 Повторить
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}

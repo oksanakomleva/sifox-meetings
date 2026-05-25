@@ -72,6 +72,39 @@ async def list_all_meetings(admin: AdminUser, limit: int = 100, offset: int = 0)
     return {"meetings": meetings}
 
 
+@router.post("/meetings/{meeting_id}/reanalyze")
+async def reanalyze_meeting(meeting_id: str, admin: AdminUser):
+    """Re-run analysis on a meeting that already has a transcript."""
+    import asyncio
+    from services.analyzer import analyze_meeting
+
+    meeting = await models.get_meeting(meeting_id)
+    if not meeting:
+        raise HTTPException(404, "Meeting not found")
+    transcript = meeting.get("transcript")
+    if not transcript:
+        raise HTTPException(400, "No transcript to analyze")
+
+    async def _run():
+        try:
+            await models.update_meeting_status(meeting_id, "analyzing")
+            analysis = await analyze_meeting(transcript)
+            await models.save_analysis(
+                meeting_id,
+                summary=analysis["summary"],
+                tags=analysis["tags"],
+                topic=analysis["topic"],
+                meeting_type=analysis["meeting_type"],
+            )
+            await models.update_meeting_status(meeting_id, "done")
+        except Exception as e:
+            logger.exception("Reanalyze failed for %s", meeting_id)
+            await models.update_meeting_status(meeting_id, "error", str(e)[:500])
+
+    asyncio.create_task(_run())
+    return {"ok": True, "message": "Re-analysis started"}
+
+
 class GrantAccessRequest(BaseModel):
     user_id: int
     meeting_id: str
