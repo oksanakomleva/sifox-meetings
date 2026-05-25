@@ -7,15 +7,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Annotated
 
-from auth.deps import get_admin_user, get_test_or_admin_user
+from auth.deps import get_test_or_admin_user
 from database import models
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
-TestOrAdminUser = Annotated[dict, Depends(get_test_or_admin_user)]
-
-AdminUser = Annotated[dict, Depends(get_admin_user)]
+# Accepts both session cookie (browser) and X-Test-Api-Key header (automated E2E)
+AdminUser = Annotated[dict, Depends(get_test_or_admin_user)]
+TestOrAdminUser = AdminUser  # alias kept for clarity in test endpoints
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
