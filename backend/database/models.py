@@ -426,7 +426,7 @@ async def get_all_meetings(limit: int = 100, offset: int = 0) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, title, start_time, end_time, status, tags, topic,
+            SELECT id, title, start_time, end_time, status, summary, tags, topic,
                    meeting_type, audio_path, audio_size, error_message, created_at
             FROM meetings
             ORDER BY start_time DESC NULLS LAST
