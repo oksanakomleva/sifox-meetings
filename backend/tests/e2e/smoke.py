@@ -259,9 +259,17 @@ class SmokeTest:
         print(f"\n⏳ Waiting up to {timeout_minutes} min for pipeline to complete...")
         deadline = time.time() + timeout_minutes * 60
         last_status = None
+        speaker_launched = False
+        meeting_url = e2e_data.get("meeting_url", "")
 
         while time.time() < deadline:
-            r = self._get("/api/admin/meetings?limit=20")
+            try:
+                r = self._get("/api/admin/meetings?limit=20")
+            except Exception as e:
+                # Railway may be temporarily busy (Playwright + PulseAudio)
+                print(f"  [polling] connection error, retrying in 20s: {type(e).__name__}")
+                time.sleep(20)
+                continue
             if r.status_code != 200:
                 time.sleep(15)
                 continue
@@ -282,6 +290,22 @@ class SmokeTest:
                 if status != last_status:
                     print(f"  → {target['id'][:8]} status: {status}")
                     last_status = status
+
+                # Launch Test Speaker as soon as recorder is confirmed recording
+                if status == "recording" and not speaker_launched and meeting_url:
+                    print("  [speaker] Recorder is recording — launching Test Speaker now...")
+                    try:
+                        sr = self._post(
+                            "/api/admin/test/launch-speaker",
+                            json={"meeting_url": meeting_url, "duration_minutes": 5},
+                        )
+                        if sr.status_code == 200:
+                            print("  [speaker] Test Speaker launched OK")
+                            speaker_launched = True
+                        else:
+                            print(f"  [speaker] WARNING: launch returned {sr.status_code}: {sr.text[:100]}")
+                    except Exception as se:
+                        print(f"  [speaker] WARNING: could not launch speaker: {se}")
 
                 if status == "done" and target.get("summary"):
                     self._check("Pipeline reached status=done", True, f"meeting {target['id'][:8]}")

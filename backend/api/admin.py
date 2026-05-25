@@ -225,9 +225,9 @@ async def _start_e2e_test_impl(caller: dict) -> dict:
     # Sync immediately so the bot sees the new event right away
     await sync_all_users()
 
-    # Schedule test speaker: join 3 min after event start (= 6 min from now),
-    # so the recorder bot has time to arrive first
-    asyncio.create_task(_launch_speaker_after_delay(meeting_url, delay_seconds=210, duration_minutes=5))
+    # NOTE: Test Speaker is NOT auto-scheduled here anymore.
+    # The smoke test polls for status=recording and then calls POST /test/launch-speaker.
+    # This avoids long-lived asyncio tasks that get killed on Railway redeploy.
 
     # Look up the meeting record so we can return its ID to the smoke test
     meeting = await models.get_meeting_by_url(meeting_url)
@@ -243,10 +243,23 @@ async def _start_e2e_test_impl(caller: dict) -> dict:
     }
 
 
-async def _launch_speaker_after_delay(meeting_url: str, delay_seconds: int, duration_minutes: int) -> None:
-    """Wait, then launch test_speaker.py as a subprocess on Railway."""
-    await asyncio.sleep(delay_seconds)
+class LaunchSpeakerRequest(BaseModel):
+    meeting_url: str
+    duration_minutes: int = 5
 
+
+@router.post("/test/launch-speaker")
+async def launch_test_speaker(req: LaunchSpeakerRequest, caller: TestOrAdminUser):
+    """
+    Launch Test Speaker immediately (called by smoke test when it detects status=recording).
+    Returns immediately — speaker runs in background.
+    """
+    asyncio.create_task(_launch_speaker(req.meeting_url, req.duration_minutes))
+    return {"ok": True, "message": f"Test Speaker launching for {req.duration_minutes} min"}
+
+
+async def _launch_speaker(meeting_url: str, duration_minutes: int) -> None:
+    """Launch test_speaker.py as a subprocess — no delay."""
     speaker_script = os.path.join(
         os.path.dirname(__file__), "..", "tests", "e2e", "test_speaker.py"
     )
