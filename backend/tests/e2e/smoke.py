@@ -1,34 +1,52 @@
 """
 E2E smoke test against deployed Railway instance.
 
-Usage:
-    BASE_URL=https://sifox-meetings.up.railway.app \
-    SESSION_COOKIE=<your-session-token> \
-    python backend/tests/e2e/smoke.py
+Usage — with session cookie (browser login):
+    SESSION_COOKIE=<value> python backend/tests/e2e/smoke.py
+
+Usage — with test API key (fully automated, no browser):
+    python backend/tests/e2e/smoke.py   # reads .env.test automatically
+
+Usage — full automated E2E pipeline (~20 min):
+    python backend/tests/e2e/smoke.py --full-e2e
+
+.env.test file (gitignored, create once):
+    TEST_API_KEY=your-secret-key   # must match Railway TEST_API_KEY variable
+    BASE_URL=https://sifox-meetings.up.railway.app
 
 What it checks:
 1. /health returns 200
 2. Login required pages return 401 without cookie
-3. With cookie: /api/auth/me returns user
-4. /api/admin/calendars returns calendars
-5. /api/admin/meetings returns meetings
-6. Calendar sync trigger works
-7. Latest 'done' meeting has all artifacts (transcript, summary, audio)
-
-What it does NOT check (requires manual setup):
-- Actually recording a real Telemost meeting (no Yandex API to create meetings)
-- The recorder.py pipeline end-to-end (use Railway logs for that)
-
-To do a full recorder E2E:
-1. Create event in Google Calendar with Telemost link, start_time = now + 3 min
-2. Run this smoke test — it will wait for the meeting to appear, get recorded, and verify result
-3. Pass --record flag to enable this mode
+3. Admin endpoints: /api/auth/me, /api/admin/calendars, /api/admin/meetings
+4. Calendar sync trigger works
+5. Latest done meeting has full artifacts (transcript, summary, audio, tags)
+6. --full-e2e: creates calendar event + launches Test Speaker, waits for done
 """
 import os
 import sys
 import time
 import argparse
 from datetime import datetime, timezone
+from pathlib import Path
+
+
+def _load_env_test() -> None:
+    """Load .env.test from project root if it exists (silently skip if not)."""
+    for candidate in [
+        Path(__file__).parent.parent.parent.parent / ".env.test",  # project root
+        Path(__file__).parent / ".env.test",                       # e2e dir
+    ]:
+        if candidate.exists():
+            with open(candidate) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        key, _, val = line.partition("=")
+                        os.environ.setdefault(key.strip(), val.strip())
+            break
+
+
+_load_env_test()
 
 
 def _import_requests():
@@ -41,11 +59,18 @@ def _import_requests():
 
 
 class SmokeTest:
-    def __init__(self, base_url: str, session_cookie: str | None):
+    def __init__(self, base_url: str, session_cookie: str | None, test_api_key: str | None = None):
         self.base_url = base_url.rstrip("/")
         self.cookies = {"session": session_cookie} if session_cookie else {}
+        self.test_api_key = test_api_key
+        # Headers sent on every request when using test API key
+        self._auth_headers = {"X-Test-Api-Key": test_api_key} if test_api_key else {}
         self.results: list[tuple[str, bool, str]] = []
         self.requests = _import_requests()
+
+    @property
+    def has_auth(self) -> bool:
+        return bool(self.cookies or self.test_api_key)
 
     def _check(self, name: str, ok: bool, detail: str = ""):
         self.results.append((name, ok, detail))
@@ -53,10 +78,22 @@ class SmokeTest:
         print(f"{symbol} {name}" + (f" — {detail}" if detail else ""))
 
     def _get(self, path: str, **kwargs):
-        return self.requests.get(f"{self.base_url}{path}", cookies=self.cookies, timeout=15, **kwargs)
+        return self.requests.get(
+            f"{self.base_url}{path}",
+            cookies=self.cookies,
+            headers=self._auth_headers,
+            timeout=15,
+            **kwargs,
+        )
 
     def _post(self, path: str, **kwargs):
-        return self.requests.post(f"{self.base_url}{path}", cookies=self.cookies, timeout=15, **kwargs)
+        return self.requests.post(
+            f"{self.base_url}{path}",
+            cookies=self.cookies,
+            headers=self._auth_headers,
+            timeout=15,
+            **kwargs,
+        )
 
     # ── Tests ────────────────────────────────────────────────────────────────
 
@@ -72,6 +109,12 @@ class SmokeTest:
         self._check("/api/auth/me returns 401 without session", r.status_code == 401)
 
     def test_me(self):
+        # When using test API key, /api/auth/me won't work (no real session),
+        # but we know we have admin access — skip the /me check gracefully
+        if self.test_api_key and not self.cookies:
+            self._check("/api/auth/me", True, "skipped — using TEST_API_KEY (no session cookie)")
+            return True
+
         if not self.cookies:
             self._check("/api/auth/me with session", False, "no SESSION_COOKIE provided — skipping")
             return False
@@ -304,23 +347,26 @@ def main():
     ap.add_argument("--full-e2e", action="store_true", help="Fully automated E2E: creates calendar event + launches Test Speaker on Railway (~20min)")
     ap.add_argument("--url", default=os.environ.get("BASE_URL", "https://sifox-meetings.up.railway.app"))
     ap.add_argument("--cookie", default=os.environ.get("SESSION_COOKIE"))
+    ap.add_argument("--api-key", default=os.environ.get("TEST_API_KEY"), help="Test API key (alternative to session cookie)")
     args = ap.parse_args()
 
-    if not args.cookie:
-        print("⚠️  No SESSION_COOKIE — auth-required tests will be skipped.")
-        print("   Get cookie from browser DevTools → Application → Cookies → 'session' value")
+    if not args.cookie and not args.api_key:
+        print("⚠️  No auth — running public checks only.")
+        print("   Option 1: create .env.test with TEST_API_KEY=<key from Railway>")
+        print("   Option 2: SESSION_COOKIE=<value from browser DevTools>")
         print()
+    elif args.api_key and not args.cookie:
+        print(f"🔑 Using TEST_API_KEY for authentication\n")
 
-    smoke = SmokeTest(args.url, args.cookie)
+    smoke = SmokeTest(args.url, args.cookie, test_api_key=args.api_key)
 
     if args.full_e2e:
-        # Full automated E2E — runs standard checks first, then full pipeline
         print(f"🔍 Pre-checks against {args.url}\n")
         smoke.test_health()
         smoke.test_auth_required()
         is_admin = smoke.test_me()
         if not is_admin:
-            print("\n❌ Need admin session for full E2E")
+            print("\n❌ Need admin auth for full E2E (set TEST_API_KEY in .env.test)")
             sys.exit(1)
         ok = smoke.run_full_e2e()
     else:

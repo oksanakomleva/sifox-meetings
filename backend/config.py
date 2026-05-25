@@ -45,6 +45,10 @@ class Config(BaseSettings):
     # ── Session ───────────────────────────────────────────────────────────
     SESSION_TTL_DAYS: int = 30
 
+    # ── E2E Testing ───────────────────────────────────────────────────────
+    TEST_API_KEY: str | None = None          # static key for automated E2E tests
+    TEST_MEETING_URL: str | None = None      # permanent Telemost room URL
+
     @property
     def admin_email_list(self) -> list[str]:
         return [e.strip().lower() for e in self.ADMIN_EMAILS.split(",")]

@@ -73,34 +73,49 @@ If pytest is not installed: `pip install pytest`. If imports fail: check `backen
 ### TIER 3 — E2E smoke test (run conditionally — see decision rules below)
 
 ```bash
-# Needs SESSION_COOKIE env var — user must provide from browser DevTools
+# Auth via .env.test (TEST_API_KEY) — fully automated, no browser needed
 python backend/tests/e2e/smoke.py
 ```
 
 Smoke test (`backend/tests/e2e/smoke.py`) checks against the deployed Railway URL:
 - `/health` responds 200
 - Auth-required endpoints return 401 without cookie
-- `/api/auth/me`, `/api/admin/calendars`, `/api/admin/meetings` work
+- `/api/admin/calendars`, `/api/admin/meetings` work
 - Latest `done` meeting has full artifacts (summary, transcript, audio, tags)
+
+**Auth methods (in priority order):**
+1. `.env.test` file in project root with `TEST_API_KEY=xxx` — **preferred for automation**
+2. `SESSION_COOKIE=xxx` env var — manual fallback
+3. Neither — only public checks run (/health, 401 check)
 
 **Three sub-modes:**
 
+Read-only smoke (default, ~10s):
+```bash
+python backend/tests/e2e/smoke.py
+```
+
 `--record` — manual E2E (user must create calendar event with Telemost link first):
 ```bash
-SESSION_COOKIE=xxx python backend/tests/e2e/smoke.py --record
+python backend/tests/e2e/smoke.py --record
 ```
 
 `--full-e2e` — **fully automated, no human needed** (~20 min):
 ```bash
-SESSION_COOKIE=xxx python backend/tests/e2e/smoke.py --full-e2e
+python backend/tests/e2e/smoke.py --full-e2e
 ```
 Pipeline:
-1. Calls `POST /api/admin/test/start-e2e` → Railway creates Google Calendar event (now +3 min) using `TEST_MEETING_URL`
-2. Calendar sync picks up the event, recorder bot joins at scheduled time
-3. `test_speaker.py` launches on Railway (+6 min), joins with fake mic streaming `test_audio.wav`
-4. Recorder captures audio, Whisper transcribes, OpenAI analyzes
-5. Smoke test polls until `status=done`, verifies transcript length + artifacts
-6. Deletes test calendar event (cleanup)
+1. Reads TEST_API_KEY from `.env.test` → authenticates via `X-Test-Api-Key` header
+2. Calls `POST /api/admin/test/start-e2e` → Railway creates Google Calendar event (now +3 min) using `TEST_MEETING_URL`
+3. Calendar sync picks up the event, recorder bot joins at scheduled time
+4. `test_speaker.py` launches on Railway (+6 min), joins with fake mic streaming `test_audio.wav`
+5. Recorder captures audio, Whisper transcribes, OpenAI analyzes
+6. Smoke test polls until `status=done`, verifies transcript length + artifacts
+7. Deletes test calendar event (cleanup)
+
+**One-time setup required:**
+- Add `TEST_API_KEY=<secret>` and `TEST_MEETING_URL=<telemost-url>` to Railway Variables
+- Create `.env.test` in project root: `TEST_API_KEY=<same secret>`
 
 **Requires** `TEST_MEETING_URL` env var in Railway Variables (permanent Telemost room link).
 `test_audio.wav` is generated during Docker build via `espeak-ng` (Russian TTS).

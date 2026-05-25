@@ -7,11 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Annotated
 
-from auth.deps import get_admin_user
+from auth.deps import get_admin_user, get_test_or_admin_user
 from database import models
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+TestOrAdminUser = Annotated[dict, Depends(get_test_or_admin_user)]
 
 AdminUser = Annotated[dict, Depends(get_admin_user)]
 
@@ -128,26 +130,37 @@ async def revoke_access(req: GrantAccessRequest, admin: AdminUser):
 # ── E2E Testing ───────────────────────────────────────────────────────────────
 
 @router.post("/test/start-e2e")
-async def start_e2e_test(admin: AdminUser):
+async def start_e2e_test(caller: TestOrAdminUser):
     """
     Start a fully automated E2E test:
     1. Creates a Google Calendar event (now + 3 min) with TEST_MEETING_URL
     2. Triggers calendar sync so the bot picks it up
     3. Schedules test_speaker.py to join the meeting and stream test_audio.wav
 
+    Auth: session cookie (admin) OR X-Test-Api-Key header (automated tests).
     Requires TEST_MEETING_URL env var (permanent Telemost room link).
     """
+    from config import config
     from services.calendar_sync import _create_test_event_sync, sync_all_users
 
-    meeting_url = os.environ.get("TEST_MEETING_URL")
+    meeting_url = config.TEST_MEETING_URL
     if not meeting_url:
         raise HTTPException(400, "TEST_MEETING_URL not set in Railway Variables")
 
-    token_row = await models.get_google_token(admin["user_id"])
+    # When called via test API key, user_id=0 — find first admin with a google token
+    user_id = caller["user_id"]
+    if user_id == 0:
+        all_users = await models.get_all_users_with_tokens()
+        admin_users = [u for u in all_users if u.get("is_admin")]
+        if not admin_users:
+            raise HTTPException(400, "No admin users with Google Calendar connected")
+        user_id = admin_users[0]["id"]
+
+    token_row = await models.get_google_token(user_id)
     if not token_row:
         raise HTTPException(400, "Admin must have Google Calendar connected (/api/auth/google)")
 
-    user_cals = await models.get_calendars(owner_user_id=admin["user_id"])
+    user_cals = await models.get_calendars(owner_user_id=user_id)
     enabled_cals = [c for c in user_cals if c.get("record_enabled")]
     primary_cal = next((c for c in user_cals if c.get("is_primary")), None)
     cal = enabled_cals[0] if enabled_cals else primary_cal
@@ -206,11 +219,19 @@ async def _launch_speaker_after_delay(meeting_url: str, delay_seconds: int, dura
 
 
 @router.delete("/test/calendar-event/{event_id}")
-async def delete_test_calendar_event(event_id: str, calendar_id: str, admin: AdminUser):
+async def delete_test_calendar_event(event_id: str, calendar_id: str, caller: TestOrAdminUser):
     """Delete the test calendar event created by start_e2e_test (cleanup)."""
     from services.calendar_sync import _delete_event_sync
 
-    token_row = await models.get_google_token(admin["user_id"])
+    user_id = caller["user_id"]
+    if user_id == 0:
+        all_users = await models.get_all_users_with_tokens()
+        admin_users = [u for u in all_users if u.get("is_admin")]
+        if not admin_users:
+            raise HTTPException(400, "No admin users with Google token")
+        user_id = admin_users[0]["id"]
+
+    token_row = await models.get_google_token(user_id)
     if not token_row:
         raise HTTPException(400, "No Google token for admin")
 
