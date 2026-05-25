@@ -243,6 +243,47 @@ async def _start_e2e_test_impl(caller: dict) -> dict:
     }
 
 
+class InjectAudioRequest(BaseModel):
+    meeting_id: str   # to derive sink_name = meet_{meeting_id[:8]}
+
+
+@router.post("/test/inject-audio")
+async def inject_test_audio(req: InjectAudioRequest, caller: TestOrAdminUser):
+    """
+    Play test_audio.wav directly into the PulseAudio sink of a running recording.
+    No second Chromium needed — zero extra memory cost.
+    The recorder's parec captures it as if it were real meeting audio.
+    """
+    import shutil
+    sink_name = f"meet_{req.meeting_id[:8]}"
+    audio_file = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "tests", "e2e", "test_audio.wav")
+    )
+    if not os.path.exists(audio_file):
+        raise HTTPException(400, f"test_audio.wav not found at {audio_file}")
+
+    paplay = shutil.which("paplay")
+    if not paplay:
+        raise HTTPException(500, "paplay not found — PulseAudio utils not installed")
+
+    # Run paplay in background — returns immediately, audio plays asynchronously
+    asyncio.create_task(_play_audio_to_sink(paplay, audio_file, sink_name))
+    return {"ok": True, "sink": sink_name, "audio": audio_file}
+
+
+async def _play_audio_to_sink(paplay: str, audio_file: str, sink_name: str) -> None:
+    logger.info("Injecting test audio into sink %s via paplay", sink_name)
+    proc = await asyncio.create_subprocess_exec(
+        paplay, "--device", sink_name, audio_file,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if stderr:
+        logger.warning("paplay stderr: %s", stderr.decode(errors="replace")[:500])
+    logger.info("paplay finished with code %d", proc.returncode)
+
+
 class LaunchSpeakerRequest(BaseModel):
     meeting_url: str
     duration_minutes: int = 5

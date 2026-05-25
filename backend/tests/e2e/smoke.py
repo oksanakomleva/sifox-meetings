@@ -291,21 +291,23 @@ class SmokeTest:
                     print(f"  → {target['id'][:8]} status: {status}")
                     last_status = status
 
-                # Launch Test Speaker as soon as recorder is confirmed recording
-                if status == "recording" and not speaker_launched and meeting_url:
-                    print("  [speaker] Recorder is recording — launching Test Speaker now...")
+                # Inject test audio directly into PulseAudio sink when recorder is running.
+                # This avoids launching a second Chromium (OOM) — zero extra memory cost.
+                if status == "recording" and not speaker_launched and meeting_id:
+                    print("  [audio] Injecting test_audio.wav into recorder sink...")
                     try:
                         sr = self._post(
-                            "/api/admin/test/launch-speaker",
-                            json={"meeting_url": meeting_url, "duration_minutes": 5},
+                            "/api/admin/test/inject-audio",
+                            json={"meeting_id": meeting_id},
                         )
                         if sr.status_code == 200:
-                            print("  [speaker] Test Speaker launched OK")
+                            data = sr.json()
+                            print(f"  [audio] Injection started — sink={data.get('sink')}")
                             speaker_launched = True
                         else:
-                            print(f"  [speaker] WARNING: launch returned {sr.status_code}: {sr.text[:100]}")
+                            print(f"  [audio] WARNING: inject returned {sr.status_code}: {sr.text[:100]}")
                     except Exception as se:
-                        print(f"  [speaker] WARNING: could not launch speaker: {se}")
+                        print(f"  [audio] WARNING: could not inject audio: {se}")
 
                 if status == "done" and target.get("summary"):
                     self._check("Pipeline reached status=done", True, f"meeting {target['id'][:8]}")
