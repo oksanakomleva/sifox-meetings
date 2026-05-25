@@ -164,7 +164,7 @@ async def get_all_users_with_tokens() -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT u.id, u.email, u.name, gt.calendar_sync_enabled
+            SELECT u.id, u.email, u.name, u.is_admin, gt.calendar_sync_enabled
             FROM users u
             JOIN google_tokens gt ON gt.user_id = u.id
             WHERE u.is_active = TRUE AND gt.calendar_sync_enabled = TRUE
