@@ -512,7 +512,8 @@ async def get_all_meetings(limit: int = 100, offset: int = 0) -> list[dict]:
         rows = await conn.fetch(
             """
             SELECT id, title, start_time, end_time, status, summary, tags, topic,
-                   meeting_type, audio_path, audio_size, error_message, created_at
+                   meeting_type, audio_path, audio_size, error_message, created_at,
+                   char_length(transcript) AS transcript_length
             FROM meetings
             ORDER BY start_time DESC NULLS LAST
             LIMIT $1 OFFSET $2

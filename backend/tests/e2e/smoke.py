@@ -311,15 +311,15 @@ class SmokeTest:
 
                 if status == "done" and target.get("summary"):
                     self._check("Pipeline reached status=done", True, f"meeting {target['id'][:8]}")
-                    self._check("Transcript not empty", bool(target.get("transcript")), "")
+                    tlen = target.get("transcript_length") or 0
+                    self._check("Transcript not empty", tlen > 0, f"{tlen} chars")
                     self._check("Summary generated", bool(target.get("summary")), "")
                     self._check("Tags assigned", bool(target.get("tags")), "")
                     self._check("Meeting type classified", bool(target.get("meeting_type")), target.get("meeting_type", ""))
-                    transcript = target.get("transcript", "")
                     self._check(
                         "Transcript has content (>50 chars)",
-                        len(transcript) > 50,
-                        f"{len(transcript)} chars",
+                        tlen > 50,
+                        f"{tlen} chars",
                     )
                     break
                 elif status == "error":
