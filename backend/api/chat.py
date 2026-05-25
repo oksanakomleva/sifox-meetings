@@ -55,6 +55,9 @@ async def chat_stream(req: ChatRequest, user: CurrentUser):
 
     context = "\n\n---\n\n".join(context_parts) if context_parts else "Нет доступных данных о встречах."
 
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%d %B %Y")
+
     history = await models.get_chat_history(user_id, req.meeting_id, limit=10)
     messages = [
         {
@@ -63,6 +66,7 @@ async def chat_stream(req: ChatRequest, user: CurrentUser):
                 "Ты помощник, отвечающий на вопросы о рабочих встречах компании Sifox. "
                 "Отвечай на русском языке, кратко и по делу. "
                 "Используй только информацию из предоставленного контекста.\n\n"
+                f"Сегодня: {today}.\n\n"
                 f"Контекст встреч:\n{context}"
             ),
         }
