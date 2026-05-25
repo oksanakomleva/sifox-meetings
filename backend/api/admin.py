@@ -261,9 +261,15 @@ async def _launch_speaker_after_delay(meeting_url: str, delay_seconds: int, dura
         sys.executable, speaker_script,
         "--url", meeting_url,
         "--duration", str(duration_minutes),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
-    returncode = await proc.wait()
-    logger.info("Test Speaker finished with exit code %d", returncode)
+    stdout, stderr = await proc.communicate()
+    if stdout:
+        logger.info("Test Speaker stdout:\n%s", stdout.decode(errors="replace"))
+    if stderr:
+        logger.warning("Test Speaker stderr:\n%s", stderr.decode(errors="replace"))
+    logger.info("Test Speaker finished with exit code %d", proc.returncode)
 
 
 @router.delete("/test/calendar-event/{event_id}")

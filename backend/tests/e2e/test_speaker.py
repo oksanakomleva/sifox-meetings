@@ -32,6 +32,10 @@ async def speak_in_meeting(meeting_url: str, duration_minutes: int = 5) -> bool:
     logger.info("Test Speaker starting: url=%s duration=%dmin", meeting_url, duration_minutes)
 
     async with async_playwright() as p:
+        # Inherit all env vars from the process (DISPLAY, PULSE_SERVER already set by Railway),
+        # but ensure HOME=/tmp so Chromium doesn't try to write to /root
+        launch_env = {**os.environ, "HOME": "/tmp"}
+
         browser = await p.chromium.launch(
             headless=False,
             args=[
@@ -46,11 +50,7 @@ async def speak_in_meeting(meeting_url: str, duration_minutes: int = 5) -> bool:
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
             ],
-            env={
-                "DISPLAY": DISPLAY,
-                "HOME": "/tmp",
-                "PULSE_SERVER": PULSE_SERVER,
-            },
+            env=launch_env,
         )
 
         context = await browser.new_context(
