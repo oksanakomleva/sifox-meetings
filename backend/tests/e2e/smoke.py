@@ -29,6 +29,12 @@ import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Force UTF-8 output on Windows so emoji/Unicode in print() don't crash
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stdout = open(sys.stdout.fileno(), mode="w", encoding="utf-8", buffering=1)
+if sys.stderr.encoding and sys.stderr.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stderr = open(sys.stderr.fileno(), mode="w", encoding="utf-8", buffering=1)
+
 
 def _load_env_test() -> None:
     """Load .env.test from project root if it exists (silently skip if not)."""
@@ -356,12 +362,12 @@ def main():
         print("   Option 2: SESSION_COOKIE=<value from browser DevTools>")
         print()
     elif args.api_key and not args.cookie:
-        print(f"🔑 Using TEST_API_KEY for authentication\n")
+        print(f"[KEY] Using TEST_API_KEY for authentication\n")
 
     smoke = SmokeTest(args.url, args.cookie, test_api_key=args.api_key)
 
     if args.full_e2e:
-        print(f"🔍 Pre-checks against {args.url}\n")
+        print(f"[>>] Pre-checks against {args.url}\n")
         smoke.test_health()
         smoke.test_auth_required()
         is_admin = smoke.test_me()

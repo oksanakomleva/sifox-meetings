@@ -165,6 +165,16 @@ async def start_e2e_test(caller: TestOrAdminUser):
     Auth: session cookie (admin) OR X-Test-Api-Key header (automated tests).
     Requires TEST_MEETING_URL env var (permanent Telemost room link).
     """
+    try:
+        return await _start_e2e_test_impl(caller)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("start_e2e_test unhandled error")
+        raise HTTPException(500, f"Internal error: {type(exc).__name__}: {exc}") from exc
+
+
+async def _start_e2e_test_impl(caller: dict) -> dict:
     from config import config
     from services.calendar_sync import _create_test_event_sync, sync_all_users
 
