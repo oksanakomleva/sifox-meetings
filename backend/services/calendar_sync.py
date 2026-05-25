@@ -141,6 +141,72 @@ def _fetch_calendar_list_sync(token_row: dict) -> list[dict]:
     ]
 
 
+def _create_test_event_sync(
+    token_row: dict,
+    calendar_id: str,
+    meeting_url: str,
+    title: str = "[E2E Test] Тестовая встреча",
+    start_minutes_from_now: int = 3,
+    duration_minutes: int = 10,
+) -> str:
+    """Create a Google Calendar event for E2E testing. Returns event ID."""
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+
+    creds = Credentials(
+        token=token_row["access_token"],
+        refresh_token=token_row.get("refresh_token"),
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=config.GOOGLE_CLIENT_ID,
+        client_secret=config.GOOGLE_CLIENT_SECRET,
+        expiry=_naive_expiry(token_row.get("token_expiry")),
+    )
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+
+    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+
+    start = datetime.now(timezone.utc) + timedelta(minutes=start_minutes_from_now)
+    end = start + timedelta(minutes=duration_minutes)
+
+    event = service.events().insert(
+        calendarId=calendar_id,
+        body={
+            "summary": title,
+            "description": f"Автоматический E2E тест системы записи.\n{meeting_url}",
+            "location": meeting_url,
+            "start": {"dateTime": start.isoformat()},
+            "end": {"dateTime": end.isoformat()},
+        },
+    ).execute()
+
+    logger.info("Created test calendar event %s at %s", event["id"], start.isoformat())
+    return event["id"]
+
+
+def _delete_event_sync(token_row: dict, calendar_id: str, event_id: str) -> None:
+    """Delete a Google Calendar event (cleanup after E2E test)."""
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+
+    creds = Credentials(
+        token=token_row["access_token"],
+        refresh_token=token_row.get("refresh_token"),
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=config.GOOGLE_CLIENT_ID,
+        client_secret=config.GOOGLE_CLIENT_SECRET,
+        expiry=_naive_expiry(token_row.get("token_expiry")),
+    )
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+
+    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
+    logger.info("Deleted test calendar event %s", event_id)
+
+
 async def sync_user_calendars(user_id: int) -> None:
     """Sync calendar list for a user (for admin display)."""
     token_row = await models.get_google_token(user_id)

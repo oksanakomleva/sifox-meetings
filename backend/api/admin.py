@@ -1,5 +1,8 @@
 """Admin routes: users, calendars, meetings management."""
+import asyncio
 import logging
+import os
+import sys
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Annotated
@@ -120,3 +123,97 @@ async def grant_access(req: GrantAccessRequest, admin: AdminUser):
 async def revoke_access(req: GrantAccessRequest, admin: AdminUser):
     await models.revoke_meeting_access(req.user_id, req.meeting_id)
     return {"ok": True}
+
+
+# ── E2E Testing ───────────────────────────────────────────────────────────────
+
+@router.post("/test/start-e2e")
+async def start_e2e_test(admin: AdminUser):
+    """
+    Start a fully automated E2E test:
+    1. Creates a Google Calendar event (now + 3 min) with TEST_MEETING_URL
+    2. Triggers calendar sync so the bot picks it up
+    3. Schedules test_speaker.py to join the meeting and stream test_audio.wav
+
+    Requires TEST_MEETING_URL env var (permanent Telemost room link).
+    """
+    from services.calendar_sync import _create_test_event_sync, sync_all_users
+
+    meeting_url = os.environ.get("TEST_MEETING_URL")
+    if not meeting_url:
+        raise HTTPException(400, "TEST_MEETING_URL not set in Railway Variables")
+
+    token_row = await models.get_google_token(admin["user_id"])
+    if not token_row:
+        raise HTTPException(400, "Admin must have Google Calendar connected (/api/auth/google)")
+
+    user_cals = await models.get_calendars(owner_user_id=admin["user_id"])
+    enabled_cals = [c for c in user_cals if c.get("record_enabled")]
+    primary_cal = next((c for c in user_cals if c.get("is_primary")), None)
+    cal = enabled_cals[0] if enabled_cals else primary_cal
+    if not cal:
+        raise HTTPException(400, "No calendars found — connect Google Calendar first")
+
+    loop = asyncio.get_running_loop()
+    event_id = await loop.run_in_executor(
+        None,
+        _create_test_event_sync,
+        token_row,
+        cal["google_calendar_id"],
+        meeting_url,
+        "[E2E Test] Тестовая встреча",
+        3,   # start_minutes_from_now
+        10,  # duration_minutes
+    )
+
+    # Immediately sync so bot sees the new event
+    asyncio.create_task(sync_all_users())
+
+    # Schedule test speaker: join 3 min after event start (= 6 min from now),
+    # so the recorder bot has time to arrive first
+    asyncio.create_task(_launch_speaker_after_delay(meeting_url, delay_seconds=210, duration_minutes=5))
+
+    return {
+        "status": "started",
+        "meeting_url": meeting_url,
+        "calendar_event_id": event_id,
+        "calendar_id": cal["google_calendar_id"],
+        "message": "Calendar event created for +3 min, sync triggered, Test Speaker will join at +6 min",
+    }
+
+
+async def _launch_speaker_after_delay(meeting_url: str, delay_seconds: int, duration_minutes: int) -> None:
+    """Wait, then launch test_speaker.py as a subprocess on Railway."""
+    await asyncio.sleep(delay_seconds)
+
+    speaker_script = os.path.join(
+        os.path.dirname(__file__), "..", "tests", "e2e", "test_speaker.py"
+    )
+    speaker_script = os.path.abspath(speaker_script)
+
+    if not os.path.exists(speaker_script):
+        logger.error("test_speaker.py not found at %s", speaker_script)
+        return
+
+    logger.info("Launching Test Speaker: %s --url %s --duration %d", speaker_script, meeting_url, duration_minutes)
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, speaker_script,
+        "--url", meeting_url,
+        "--duration", str(duration_minutes),
+    )
+    returncode = await proc.wait()
+    logger.info("Test Speaker finished with exit code %d", returncode)
+
+
+@router.delete("/test/calendar-event/{event_id}")
+async def delete_test_calendar_event(event_id: str, calendar_id: str, admin: AdminUser):
+    """Delete the test calendar event created by start_e2e_test (cleanup)."""
+    from services.calendar_sync import _delete_event_sync
+
+    token_row = await models.get_google_token(admin["user_id"])
+    if not token_row:
+        raise HTTPException(400, "No Google token for admin")
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _delete_event_sync, token_row, calendar_id, event_id)
+    return {"ok": True, "deleted_event_id": event_id}

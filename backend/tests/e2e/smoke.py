@@ -146,6 +146,124 @@ class SmokeTest:
         self._check("recorded meeting reached 'done' with summary", False, f"timeout after {timeout_minutes} min")
         return False
 
+    # ── Full E2E (automated, no human needed) ────────────────────────────────
+
+    def start_e2e_test(self) -> dict | None:
+        """Call Railway to create calendar event + launch Test Speaker."""
+        r = self._post("/api/admin/test/start-e2e")
+        if r.status_code != 200:
+            self._check(
+                "POST /api/admin/test/start-e2e",
+                False,
+                f"got {r.status_code}: {r.text[:200]}",
+            )
+            return None
+        data = r.json()
+        self._check(
+            "E2E test triggered",
+            True,
+            f"event_id={data.get('calendar_event_id', '')[:12]}  speaker launches in ~6 min",
+        )
+        return data
+
+    def cleanup_e2e_event(self, calendar_id: str, event_id: str) -> None:
+        r = self.requests.delete(
+            f"{self.base_url}/api/admin/test/calendar-event/{event_id}",
+            cookies=self.cookies,
+            params={"calendar_id": calendar_id},
+            timeout=15,
+        )
+        self._check("Delete test calendar event", r.status_code == 200, f"got {r.status_code}")
+
+    def run_full_e2e(self, timeout_minutes: int = 20) -> bool:
+        """
+        Fully automated E2E:
+        1. Trigger Railway to create calendar event + schedule Test Speaker
+        2. Wait for meeting to reach status=done
+        3. Verify transcript, summary, tags
+        4. Cleanup calendar event
+        """
+        print(f"\n🤖 FULL E2E MODE — fully automated, no human needed\n")
+        print("Timeline:")
+        print("  +0 min  — calendar event created, sync triggered")
+        print("  +3 min  — recorder bot joins the meeting")
+        print("  +6 min  — Test Speaker joins, streams test_audio.wav")
+        print("  +11 min — Test Speaker leaves, bot detects empty meeting")
+        print("  +13 min — Whisper transcribes, OpenAI analyzes")
+        print("  +15 min — status=done, artifacts ready\n")
+
+        e2e_data = self.start_e2e_test()
+        if not e2e_data:
+            return self._summary()
+
+        calendar_id = e2e_data.get("calendar_id", "")
+        event_id = e2e_data.get("calendar_event_id", "")
+
+        # Wait for the pipeline to complete
+        print(f"\n⏳ Waiting up to {timeout_minutes} min for pipeline to complete...")
+        deadline = time.time() + timeout_minutes * 60
+        last_status = None
+
+        while time.time() < deadline:
+            r = self._get("/api/admin/meetings?limit=5")
+            if r.status_code != 200:
+                time.sleep(15)
+                continue
+
+            meetings = r.json().get("meetings", [])
+
+            # Find the E2E test meeting (most recent with our URL)
+            active = next(
+                (
+                    m for m in meetings
+                    if m.get("status") in ("pending", "recording", "transcribing", "analyzing")
+                ),
+                None,
+            )
+            if active and active["status"] != last_status:
+                print(f"  → {active['id'][:8]} status: {active['status']}")
+                last_status = active["status"]
+
+            done = next(
+                (m for m in meetings if m.get("status") == "done"),
+                None,
+            )
+            if done and done.get("summary"):
+                self._check("Pipeline reached status=done", True, f"meeting {done['id'][:8]}")
+                # Verify artifacts
+                self._check("Transcript not empty", bool(done.get("transcript")), "")
+                self._check("Summary generated", bool(done.get("summary")), "")
+                self._check("Tags assigned", bool(done.get("tags")), "")
+                self._check("Meeting type classified", bool(done.get("meeting_type")), done.get("meeting_type", ""))
+                # Verify transcript contains actual speech (not empty transcription)
+                transcript = done.get("transcript", "")
+                self._check(
+                    "Transcript has content (>50 chars)",
+                    len(transcript) > 50,
+                    f"{len(transcript)} chars",
+                )
+                break
+
+            error = next((m for m in meetings if m.get("status") == "error"), None)
+            if error:
+                self._check(
+                    "Pipeline reached status=done",
+                    False,
+                    f"error: {error.get('error_message', 'unknown')[:100]}",
+                )
+                break
+
+            time.sleep(20)
+        else:
+            self._check("Pipeline reached status=done", False, f"timeout after {timeout_minutes} min")
+
+        # Cleanup: delete the test calendar event
+        if calendar_id and event_id:
+            print("\n🧹 Cleaning up test calendar event...")
+            self.cleanup_e2e_event(calendar_id, event_id)
+
+        return self._summary()
+
     # ── Runner ───────────────────────────────────────────────────────────────
 
     def run(self, record_mode: bool = False) -> bool:
@@ -183,6 +301,7 @@ class SmokeTest:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--record", action="store_true", help="Wait for a pending meeting to be recorded (15min timeout)")
+    ap.add_argument("--full-e2e", action="store_true", help="Fully automated E2E: creates calendar event + launches Test Speaker on Railway (~20min)")
     ap.add_argument("--url", default=os.environ.get("BASE_URL", "https://sifox-meetings.up.railway.app"))
     ap.add_argument("--cookie", default=os.environ.get("SESSION_COOKIE"))
     args = ap.parse_args()
@@ -193,7 +312,20 @@ def main():
         print()
 
     smoke = SmokeTest(args.url, args.cookie)
-    ok = smoke.run(record_mode=args.record)
+
+    if args.full_e2e:
+        # Full automated E2E — runs standard checks first, then full pipeline
+        print(f"🔍 Pre-checks against {args.url}\n")
+        smoke.test_health()
+        smoke.test_auth_required()
+        is_admin = smoke.test_me()
+        if not is_admin:
+            print("\n❌ Need admin session for full E2E")
+            sys.exit(1)
+        ok = smoke.run_full_e2e()
+    else:
+        ok = smoke.run(record_mode=args.record)
+
     sys.exit(0 if ok else 1)
 
 

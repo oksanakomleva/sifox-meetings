@@ -14,6 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libasound2t64 \
     # Audio capture — ffmpeg only; parec is part of pulseaudio-utils
     ffmpeg \
+    # TTS engine for E2E test audio generation
+    espeak-ng \
     # Build tools
     curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -46,6 +48,13 @@ RUN npm run build
 # ── Backend ───────────────────────────────────────────────────────────────────
 WORKDIR /app
 COPY backend/ backend/
+
+# Generate test audio for E2E tests (espeak-ng Russian TTS → WAV)
+# The Test Speaker bot streams this file as a fake microphone in Telemost meetings
+RUN espeak-ng -v ru -s 120 -p 50 \
+    "Добрый день. Это автоматический тест системы записи встреч. Пункт первый: техническая готовность. Пункт второй: проверка качества звука. Пункт третий: интеграция с искусственным интеллектом. Тест успешно пройден. Запись завершена." \
+    -w /app/backend/tests/e2e/test_audio.wav \
+    && echo "✅ test_audio.wav generated"
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 COPY entrypoint.sh ./entrypoint.sh

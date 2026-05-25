@@ -82,25 +82,45 @@ Smoke test (`backend/tests/e2e/smoke.py`) checks against the deployed Railway UR
 - Auth-required endpoints return 401 without cookie
 - `/api/auth/me`, `/api/admin/calendars`, `/api/admin/meetings` work
 - Latest `done` meeting has full artifacts (summary, transcript, audio, tags)
-- Optional `--record` flag: waits 15min for a pending meeting to complete the pipeline
 
-**For full recording E2E** the user must manually create a Google Calendar event with a Telemost link starting in ~3min. The smoke test with `--record` will then poll until the meeting reaches `done` or `error`.
+**Three sub-modes:**
+
+`--record` — manual E2E (user must create calendar event with Telemost link first):
+```bash
+SESSION_COOKIE=xxx python backend/tests/e2e/smoke.py --record
+```
+
+`--full-e2e` — **fully automated, no human needed** (~20 min):
+```bash
+SESSION_COOKIE=xxx python backend/tests/e2e/smoke.py --full-e2e
+```
+Pipeline:
+1. Calls `POST /api/admin/test/start-e2e` → Railway creates Google Calendar event (now +3 min) using `TEST_MEETING_URL`
+2. Calendar sync picks up the event, recorder bot joins at scheduled time
+3. `test_speaker.py` launches on Railway (+6 min), joins with fake mic streaming `test_audio.wav`
+4. Recorder captures audio, Whisper transcribes, OpenAI analyzes
+5. Smoke test polls until `status=done`, verifies transcript length + artifacts
+6. Deletes test calendar event (cleanup)
+
+**Requires** `TEST_MEETING_URL` env var in Railway Variables (permanent Telemost room link).
+`test_audio.wav` is generated during Docker build via `espeak-ng` (Russian TTS).
 
 ---
 
 ## When to run E2E (Tier 3)
 
-Run **E2E without `--record`** (read-only checks, ~10s) when these change:
+Run **E2E without flags** (read-only checks, ~10s) when these change:
 - `backend/api/*.py` — any API endpoint
 - `frontend/src/api/client.ts` — API client
 - `backend/auth/*.py` — OAuth or session logic
 - `backend/database/models.py` — DB queries
 - `backend/main.py` — app wiring
 
-Run **E2E with `--record`** (full pipeline, ~15min) only when:
+Run **E2E `--full-e2e`** (full automated pipeline, ~20min) only when:
 - `backend/services/recorder.py` — Playwright/PulseAudio changes
 - `backend/services/analyzer.py` — OpenAI prompts
 - `backend/services/transcriber.py` — Whisper config
+- `backend/tests/e2e/test_speaker.py` — speaker bot changes
 - `entrypoint.sh` — startup script
 - `Dockerfile` — system deps
 - `backend/database/schema.sql` — schema changes
