@@ -8,7 +8,7 @@ export default function Login() {
   const navigate = useNavigate()
 
   useEffect(() => {
-    if (!loading && user) navigate('/meetings', { replace: true })
+    if (!loading && user) navigate('/', { replace: true })
   }, [user, loading, navigate])
 
   const error = new URLSearchParams(window.location.search).get('error')
@@ -55,7 +55,7 @@ export default function Login() {
           Записи встреч и протоколы команды
         </p>
 
-        {error === 'domain_not_allowed' && (
+        {(error === 'domain_not_allowed' || error === 'invite_invalid' || error === 'invite_used') && (
           <div style={{
             background: 'var(--color-error-bg)',
             color: 'var(--color-error)',
@@ -64,7 +64,9 @@ export default function Login() {
             fontSize: 'var(--font-size-sm)',
             marginBottom: 'var(--space-6)',
           }}>
-            Доступ только для аккаунтов @sifox.com
+            {error === 'domain_not_allowed' && 'Доступ только для аккаунтов @sifox.com или по приглашению'}
+            {error === 'invite_invalid' && 'Ссылка приглашения недействительна или истекла'}
+            {error === 'invite_used' && 'Это приглашение уже было использовано'}
           </div>
         )}
 

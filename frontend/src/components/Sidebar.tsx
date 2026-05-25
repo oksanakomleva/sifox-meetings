@@ -1,6 +1,12 @@
 import { NavLink, useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 
+const IconHome = () => (
+  <svg className="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
+    <path d="M3 9.5L10 3l7 6.5"/>
+    <path d="M5 8.5V17h4v-4h2v4h4V8.5"/>
+  </svg>
+)
 const IconMeetings = () => (
   <svg className="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
     <rect x="2" y="4" width="16" height="13" rx="2"/>
@@ -38,6 +44,9 @@ export default function Sidebar() {
       </div>
 
       <nav className="sidebar-nav">
+        <NavLink to="/" end className={({ isActive }) => isActive ? 'active' : ''}>
+          <IconHome /> Главная
+        </NavLink>
         <NavLink to="/meetings" className={({ isActive }) => isActive ? 'active' : ''}>
           <IconMeetings /> Встречи
         </NavLink>

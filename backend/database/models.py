@@ -704,3 +704,117 @@ async def revoke_meeting_access(user_id: int, meeting_id: str) -> None:
             "DELETE FROM meeting_access_grants WHERE user_id = $1 AND meeting_id = $2",
             user_id, meeting_id,
         )
+
+
+# ── Invitations ───────────────────────────────────────────────────────────────
+
+async def create_invitation(email: str, created_by: int, ttl_days: int = 7) -> dict[str, Any]:
+    import secrets
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=ttl_days)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO invitations (token, email, created_by, expires_at)
+            VALUES ($1, $2, $3, $4)
+            RETURNING *
+            """,
+            token, email.lower().strip(), created_by, expires_at,
+        )
+    return dict(row)
+
+
+async def get_invitation_by_token(token: str) -> dict[str, Any] | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM invitations WHERE token = $1 AND expires_at > NOW()",
+            token,
+        )
+    return dict(row) if row else None
+
+
+async def accept_invitation(token: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE invitations SET accepted_at = NOW() WHERE token = $1",
+            token,
+        )
+
+
+async def list_invitations(limit: int = 100) -> list[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT i.id, i.token, i.email, i.expires_at, i.accepted_at, i.created_at,
+                   u.name AS created_by_name
+            FROM invitations i
+            LEFT JOIN users u ON u.id = i.created_by
+            ORDER BY i.created_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
+async def delete_invitation(invitation_id: int) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM invitations WHERE id = $1", invitation_id)
+
+
+# ── Weekly meetings (for Dashboard) ──────────────────────────────────────────
+
+async def get_meetings_this_week(user_id: int, is_admin: bool) -> list[dict]:
+    """Meetings from last 7 days (done + summary) accessible to this user."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if is_admin:
+            rows = await conn.fetch(
+                """
+                SELECT id, title, topic, start_time, end_time, summary, tags, meeting_type
+                FROM meetings
+                WHERE status = 'done'
+                  AND summary IS NOT NULL
+                  AND start_time >= NOW() - interval '7 days'
+                ORDER BY start_time DESC
+                LIMIT 20
+                """,
+            )
+        else:
+            user = await get_user_by_id(user_id)
+            if not user:
+                return []
+            email = user["email"]
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT m.id, m.title, m.topic, m.start_time, m.end_time,
+                       m.summary, m.tags, m.meeting_type
+                FROM meetings m
+                WHERE m.status = 'done'
+                  AND m.summary IS NOT NULL
+                  AND m.start_time >= NOW() - interval '7 days'
+                  AND (
+                    EXISTS (
+                        SELECT 1 FROM meeting_participants mp
+                        WHERE mp.meeting_id = m.id AND mp.user_id = $1
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM calendar_meeting_links cml
+                        WHERE cml.meeting_id = m.id AND $2 = ANY(cml.attendee_emails)
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM meeting_access_grants g
+                        WHERE g.meeting_id = m.id AND g.user_id = $1
+                    )
+                  )
+                ORDER BY m.start_time DESC
+                LIMIT 20
+                """,
+                user_id, email,
+            )
+    return [dict(r) for r in rows]

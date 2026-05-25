@@ -54,3 +54,14 @@ export interface ChatMessage {
   content: string
   created_at: string
 }
+
+export interface Invitation {
+  id: number
+  email: string
+  token: string
+  expires_at: string
+  accepted_at: string | null
+  created_at: string
+  created_by_name: string | null
+  url?: string
+}

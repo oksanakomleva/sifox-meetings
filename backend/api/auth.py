@@ -20,8 +20,40 @@ async def login():
     return RedirectResponse(url)
 
 
+@router.get("/invite/{token}")
+async def accept_invite(token: str):
+    """
+    User clicks invitation link → validates token, sets cookie, redirects to Google login.
+    After OAuth the callback reads the cookie and bypasses the domain check for invited emails.
+    """
+    invitation = await models.get_invitation_by_token(token)
+    if not invitation:
+        return RedirectResponse(f"{config.BASE_URL}/login?error=invite_invalid")
+    if invitation.get("accepted_at"):
+        return RedirectResponse(f"{config.BASE_URL}/login?error=invite_used")
+
+    # Set short-lived invite_token cookie, then redirect to Google OAuth
+    login_url = google_oauth.get_login_url()
+    redirect = RedirectResponse(login_url)
+    redirect.set_cookie(
+        key="invite_token",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=config.BASE_URL.startswith("https"),
+        max_age=600,   # 10 min — enough to complete OAuth flow
+        path="/",
+    )
+    return redirect
+
+
 @router.get("/callback")
-async def callback(code: str, state: str, response: Response):
+async def callback(
+    code: str,
+    state: str,
+    response: Response,
+    invite_token: Annotated[str | None, Cookie(alias="invite_token")] = None,
+):
     """Google OAuth callback — handles both login and calendar flows."""
     result = await google_oauth.handle_callback(code, state)
     if not result:
@@ -33,9 +65,18 @@ async def callback(code: str, state: str, response: Response):
 
     if result["purpose"] == "login":
         # ── Login flow ────────────────────────────────────────────────────
-        if domain != config.ALLOWED_DOMAIN:
+        allowed = domain == config.ALLOWED_DOMAIN
+
+        # Check invitation bypass for users outside the allowed domain
+        invitation = None
+        if not allowed and invite_token:
+            invitation = await models.get_invitation_by_token(invite_token)
+            if invitation and invitation["email"] == email and not invitation.get("accepted_at"):
+                allowed = True
+
+        if not allowed:
             return RedirectResponse(
-                f"{config.BASE_URL}/?error=domain_not_allowed"
+                f"{config.BASE_URL}/login?error=domain_not_allowed"
             )
 
         is_admin_default = email in config.admin_email_list
@@ -51,18 +92,24 @@ async def callback(code: str, state: str, response: Response):
         if is_admin_default and not user.get("is_admin"):
             await models.set_user_admin(user["id"], True)
 
-        token = await models.create_session(user["id"], config.SESSION_TTL_DAYS)
+        # Mark invitation as accepted
+        if invitation:
+            await models.accept_invitation(invite_token)
 
-        redirect = RedirectResponse(f"{config.BASE_URL}/meetings")
+        token_session = await models.create_session(user["id"], config.SESSION_TTL_DAYS)
+
+        redirect = RedirectResponse(f"{config.BASE_URL}/")
         redirect.set_cookie(
             key="session",
-            value=token,
+            value=token_session,
             httponly=True,
             samesite="lax",
             secure=config.BASE_URL.startswith("https"),
             max_age=config.SESSION_TTL_DAYS * 86400,
             path="/",
         )
+        # Clear invite cookie after use
+        redirect.delete_cookie("invite_token", path="/")
         return redirect
 
     elif result["purpose"] == "calendar":

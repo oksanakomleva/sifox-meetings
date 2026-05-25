@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, useAuth } from './hooks/useAuth'
 import Sidebar from './components/Sidebar'
 import Login from './pages/Login'
+import Dashboard from './pages/Dashboard'
 import Meetings from './pages/Meetings'
 import MeetingDetail from './pages/MeetingDetail'
 import AdminCalendars from './pages/admin/AdminCalendars'
@@ -30,6 +31,7 @@ function ProtectedLayout() {
     <div className="app-layout">
       <Sidebar />
       <Routes>
+        <Route path="/" element={<Dashboard />} />
         <Route path="/meetings" element={<Meetings />} />
         <Route path="/meetings/:id" element={<MeetingDetail />} />
         {user.is_admin && (
@@ -39,7 +41,7 @@ function ProtectedLayout() {
             <Route path="/admin/meetings" element={<AdminMeetings />} />
           </>
         )}
-        <Route path="*" element={<Navigate to="/meetings" replace />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </div>
   )

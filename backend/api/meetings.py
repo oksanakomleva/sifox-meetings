@@ -15,6 +15,13 @@ router = APIRouter(prefix="/api/meetings", tags=["meetings"])
 CurrentUser = Annotated[dict, Depends(get_current_user)]
 
 
+@router.get("/week")
+async def meetings_this_week(user: CurrentUser):
+    """Last 7 days of completed meetings with summaries (for Dashboard)."""
+    meetings = await models.get_meetings_this_week(user["user_id"], user["is_admin"])
+    return {"meetings": meetings}
+
+
 @router.get("")
 async def list_meetings(
     user: CurrentUser,

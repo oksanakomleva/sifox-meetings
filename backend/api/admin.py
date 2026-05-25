@@ -152,6 +152,45 @@ async def revoke_access(req: GrantAccessRequest, admin: AdminUser):
     return {"ok": True}
 
 
+# ── Invitations ───────────────────────────────────────────────────────────────
+
+class InviteRequest(BaseModel):
+    email: str
+
+
+@router.get("/invitations")
+async def list_invitations(admin: AdminUser):
+    invitations = await models.list_invitations()
+    return {"invitations": invitations}
+
+
+@router.post("/invitations")
+async def create_invitation(req: InviteRequest, admin: AdminUser):
+    from config import config as app_config
+    email = req.email.strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(400, "Некорректный email")
+    invitation = await models.create_invitation(email, admin["user_id"])
+    invite_url = f"{app_config.BASE_URL}/api/auth/invite/{invitation['token']}"
+    return {
+        "ok": True,
+        "invitation": {
+            "id": invitation["id"],
+            "email": invitation["email"],
+            "token": invitation["token"],
+            "expires_at": str(invitation["expires_at"]),
+            "created_at": str(invitation["created_at"]),
+            "url": invite_url,
+        },
+    }
+
+
+@router.delete("/invitations/{invitation_id}")
+async def delete_invitation(invitation_id: int, admin: AdminUser):
+    await models.delete_invitation(invitation_id)
+    return {"ok": True}
+
+
 # ── E2E Testing ───────────────────────────────────────────────────────────────
 
 @router.post("/test/start-e2e")

@@ -113,6 +113,19 @@ CREATE TABLE IF NOT EXISTS meeting_access_grants (
     PRIMARY KEY (user_id, meeting_id)
 );
 
+-- ── Invitations (admin invites users by email) ───────────────────────────────
+CREATE TABLE IF NOT EXISTS invitations (
+    id          BIGSERIAL PRIMARY KEY,
+    token       TEXT UNIQUE NOT NULL,
+    email       TEXT NOT NULL,
+    created_by  BIGINT REFERENCES users(id) ON DELETE SET NULL,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    accepted_at TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_invitations_token ON invitations(token);
+CREATE INDEX IF NOT EXISTS idx_invitations_email ON invitations(email);
+
 -- ── Migrations: convert TIMESTAMP → TIMESTAMPTZ for existing tables ───────────
 DO $$
 DECLARE

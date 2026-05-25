@@ -30,7 +30,7 @@ export const api = {
     connectCalendarUrl: () => '/api/auth/connect-calendar',
   },
 
-  // ── Meetings ────────────────────────────────────────────────────────────────
+  // ── Meetings ──────────────────────────────────────────────────────────────────
   meetings: {
     list: (limit = 20, offset = 0) =>
       request<{ meetings: import('../types').Meeting[] }>(`/meetings?limit=${limit}&offset=${offset}`),
@@ -39,9 +39,11 @@ export const api = {
     transcript: (id: string) =>
       request<{ transcript: string }>(`/meetings/${id}/transcript`),
     audioUrl: (id: string) => `/api/meetings/${id}/audio`,
+    week: () =>
+      request<{ meetings: import('../types').Meeting[] }>('/meetings/week'),
   },
 
-  // ── Admin ────────────────────────────────────────────────────────────────────
+  // ── Admin ──────────────────────────────────────────────────────────────────────
   admin: {
     users: () => request<{ users: import('../types').User[] }>('/admin/users'),
     setAdmin: (userId: number, isAdmin: boolean) =>
@@ -65,9 +67,19 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ user_id: userId, meeting_id: meetingId }),
       }),
+    // Invitations
+    listInvitations: () =>
+      request<{ invitations: import('../types').Invitation[] }>('/admin/invitations'),
+    createInvitation: (email: string) =>
+      request<{ ok: boolean; invitation: import('../types').Invitation }>('/admin/invitations', {
+        method: 'POST',
+        body: JSON.stringify({ email }),
+      }),
+    deleteInvitation: (id: number) =>
+      request<void>(`/admin/invitations/${id}`, { method: 'DELETE' }),
   },
 
-  // ── Chat ─────────────────────────────────────────────────────────────────────
+  // ── Chat ──────────────────────────────────────────────────────────────────────
   chat: {
     history: (meetingId?: string) =>
       request<{ messages: import('../types').ChatMessage[] }>(
