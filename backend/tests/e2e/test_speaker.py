@@ -37,7 +37,10 @@ async def speak_in_meeting(meeting_url: str, duration_minutes: int = 5) -> bool:
         launch_env = {**os.environ, "HOME": "/tmp"}
 
         browser = await p.chromium.launch(
-            headless=False,
+            # headless=True saves ~300MB RAM vs headless=False.
+            # Two Chromium instances (recorder + speaker) running simultaneously would OOM.
+            # Fake mic (--use-file-for-fake-audio-capture) works fine in headless mode.
+            headless=True,
             args=[
                 # Fake microphone — loops test_audio.wav as mic input
                 "--use-fake-device-for-media-stream",
@@ -45,10 +48,17 @@ async def speak_in_meeting(meeting_url: str, duration_minutes: int = 5) -> bool:
                 "--allow-file-access-from-files",
                 # Don't play meeting audio locally (we're the speaker, not the listener)
                 "--mute-audio",
-                # Standard flags for headless-ish environment
+                # Memory saving flags
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
+                "--disable-background-networking",
+                "--disable-default-apps",
+                "--disable-extensions",
+                "--disable-sync",
+                "--disable-translate",
+                "--no-first-run",
+                "--js-flags=--max-old-space-size=128",
             ],
             env=launch_env,
         )
