@@ -258,16 +258,24 @@ async def upsert_meeting(
               SET title = COALESCE(EXCLUDED.title, meetings.title),
                   start_time = COALESCE(EXCLUDED.start_time, meetings.start_time),
                   updated_at = NOW(),
-                  -- Reset error/done meetings to pending if rescheduled in the future
+                  -- Reset error/done meetings to pending for new/current occurrences.
+                  -- Handles permanent Telemost rooms reused across multiple calendar events:
+                  -- reset if the new start_time is on a different day OR in the future.
                   status = CASE
                     WHEN meetings.status IN ('error', 'done')
-                         AND EXCLUDED.start_time > NOW() + INTERVAL '2 minutes'
+                         AND (
+                           EXCLUDED.start_time::date != meetings.start_time::date
+                           OR EXCLUDED.start_time > NOW()
+                         )
                     THEN 'pending'
                     ELSE meetings.status
                   END,
                   error_message = CASE
                     WHEN meetings.status IN ('error', 'done')
-                         AND EXCLUDED.start_time > NOW() + INTERVAL '2 minutes'
+                         AND (
+                           EXCLUDED.start_time::date != meetings.start_time::date
+                           OR EXCLUDED.start_time > NOW()
+                         )
                     THEN NULL
                     ELSE meetings.error_message
                   END
