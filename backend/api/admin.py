@@ -182,18 +182,26 @@ async def _start_e2e_test_impl(caller: dict) -> dict:
     if not meeting_url:
         raise HTTPException(400, "TEST_MEETING_URL not set in Railway Variables")
 
-    # When called via test API key, user_id=0 — find first admin with a google token
+    # Find admin user with calendar WRITE scope (required for creating test events)
     user_id = caller["user_id"]
     if user_id == 0:
-        all_users = await models.get_all_users_with_tokens()
-        admin_users = [u for u in all_users if u.get("is_admin")]
-        if not admin_users:
-            raise HTTPException(400, "No admin users with Google Calendar connected")
-        user_id = admin_users[0]["id"]
-
-    token_row = await models.get_google_token(user_id)
-    if not token_row:
-        raise HTTPException(400, "Admin must have Google Calendar connected (/api/auth/google)")
+        # Called via TEST_API_KEY — find any admin with write token
+        write = await models.get_any_admin_write_token()
+        if not write:
+            raise HTTPException(
+                400,
+                "No admin has E2E calendar write access. "
+                "Open /api/auth/connect-calendar-write in browser as admin first.",
+            )
+        user_id, token_row = write
+    else:
+        token_row = await models.get_google_write_token(user_id)
+        if not token_row:
+            raise HTTPException(
+                400,
+                "Your Google token lacks calendar write scope. "
+                "Visit /api/auth/connect-calendar-write to authorize.",
+            )
 
     user_cals = await models.get_calendars(owner_user_id=user_id)
     enabled_cals = [c for c in user_cals if c.get("record_enabled")]

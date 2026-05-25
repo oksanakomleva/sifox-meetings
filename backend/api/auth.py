@@ -66,7 +66,7 @@ async def callback(code: str, state: str, response: Response):
         return redirect
 
     elif result["purpose"] == "calendar":
-        # ── Calendar connect flow ─────────────────────────────────────────
+        # ── Calendar connect flow (read-only) ─────────────────────────────
         user_id = result["existing_user_id"]
         tokens = result["tokens"]
         await models.save_google_token(
@@ -83,6 +83,18 @@ async def callback(code: str, state: str, response: Response):
             logger.warning("Calendar sync after connect failed: %s", e)
 
         return RedirectResponse(f"{config.BASE_URL}/admin/calendars?connected=1")
+
+    elif result["purpose"] == "calendar_write":
+        # ── Calendar write connect (E2E admin only) ───────────────────────
+        user_id = result["existing_user_id"]
+        tokens = result["tokens"]
+        await models.save_google_write_token(
+            user_id,
+            tokens["token"],
+            tokens.get("refresh_token"),
+            tokens.get("expiry"),
+        )
+        return RedirectResponse(f"{config.BASE_URL}/admin/calendars?write_connected=1")
 
     raise HTTPException(400, "Unknown OAuth purpose")
 
@@ -120,11 +132,27 @@ async def me(
 async def connect_calendar(
     session_token: Annotated[str | None, Cookie(alias="session")] = None,
 ):
-    """Start Google Calendar OAuth for current user."""
+    """Start Google Calendar OAuth for current user (read-only)."""
     if not session_token:
         raise HTTPException(401, "Not authenticated")
     session = await models.get_session(session_token)
     if not session:
         raise HTTPException(401, "Session expired")
     url = google_oauth.get_calendar_url(session["user_id"])
+    return RedirectResponse(url)
+
+
+@router.get("/connect-calendar-write")
+async def connect_calendar_write(
+    session_token: Annotated[str | None, Cookie(alias="session")] = None,
+):
+    """Start Google Calendar OAuth with write scope (admin only, for E2E tests)."""
+    if not session_token:
+        raise HTTPException(401, "Not authenticated")
+    session = await models.get_session(session_token)
+    if not session:
+        raise HTTPException(401, "Session expired")
+    if not session.get("is_admin"):
+        raise HTTPException(403, "Admin only")
+    url = google_oauth.get_calendar_write_url(session["user_id"])
     return RedirectResponse(url)

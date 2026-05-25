@@ -16,12 +16,20 @@ _LOGIN_SCOPES = [
     "https://www.googleapis.com/auth/userinfo.profile",
 ]
 
-# Scopes for calendar access (requested separately, on admin demand)
+# Scopes for calendar access (all users — read only)
 _CALENDAR_SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
     "https://www.googleapis.com/auth/calendar.readonly",
+]
+
+# Scopes for E2E test calendar management (admin only — needs write to create test events)
+_CALENDAR_WRITE_SCOPES = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/calendar",
 ]
 
 # In-memory state store: state -> (purpose, user_id|None, expires_at)
@@ -61,13 +69,27 @@ def get_login_url() -> str:
 
 
 def get_calendar_url(user_id: int) -> str:
-    """Generate Google OAuth URL for calendar access."""
+    """Generate Google OAuth URL for calendar read access (all users)."""
     state = secrets.token_urlsafe(16)
     _states[state] = ("calendar", user_id, time.monotonic() + 600)
     flow = _make_flow(_CALENDAR_SCOPES)
     url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
+        state=state,
+        prompt="consent",
+    )
+    return url
+
+
+def get_calendar_write_url(user_id: int) -> str:
+    """Generate Google OAuth URL for calendar write access (admin E2E only)."""
+    state = secrets.token_urlsafe(16)
+    _states[state] = ("calendar_write", user_id, time.monotonic() + 600)
+    flow = _make_flow(_CALENDAR_WRITE_SCOPES)
+    url, _ = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="false",
         state=state,
         prompt="consent",
     )
@@ -120,7 +142,12 @@ async def handle_callback(
         return None
 
     purpose, existing_user_id = entry
-    scopes = _CALENDAR_SCOPES if purpose == "calendar" else _LOGIN_SCOPES
+    if purpose == "calendar_write":
+        scopes = _CALENDAR_WRITE_SCOPES
+    elif purpose == "calendar":
+        scopes = _CALENDAR_SCOPES
+    else:
+        scopes = _LOGIN_SCOPES
 
     loop = asyncio.get_running_loop()
     tokens = await loop.run_in_executor(None, _exchange_code_sync, code, scopes)

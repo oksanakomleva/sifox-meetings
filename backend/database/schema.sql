@@ -28,8 +28,11 @@ CREATE TABLE IF NOT EXISTS google_tokens (
     refresh_token TEXT,                  -- Fernet-encrypted
     token_expiry  TIMESTAMP,
     calendar_sync_enabled BOOLEAN DEFAULT TRUE,
+    has_write_scope BOOLEAN DEFAULT FALSE,  -- TRUE only for E2E test admin (calendar write)
     updated_at    TIMESTAMP DEFAULT NOW()
 );
+-- Migration: add has_write_scope if missing
+ALTER TABLE google_tokens ADD COLUMN IF NOT EXISTS has_write_scope BOOLEAN DEFAULT FALSE;
 
 -- ── Calendars available for recording ────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS calendars (

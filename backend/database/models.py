@@ -152,6 +152,74 @@ async def get_google_token(user_id: int) -> dict[str, Any] | None:
     return result
 
 
+async def save_google_write_token(
+    user_id: int,
+    access_token: str,
+    refresh_token: str | None,
+    token_expiry: datetime | None,
+) -> None:
+    """Save a Google token with full calendar write scope (E2E test admin only)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO google_tokens
+              (user_id, access_token, refresh_token, token_expiry, has_write_scope, updated_at)
+            VALUES ($1, $2, $3, $4, TRUE, NOW())
+            ON CONFLICT (user_id) DO UPDATE
+              SET access_token    = EXCLUDED.access_token,
+                  refresh_token   = COALESCE(EXCLUDED.refresh_token, google_tokens.refresh_token),
+                  token_expiry    = EXCLUDED.token_expiry,
+                  has_write_scope = TRUE,
+                  updated_at      = NOW()
+            """,
+            user_id,
+            encrypt(access_token),
+            encrypt(refresh_token) if refresh_token else None,
+            token_expiry,
+        )
+
+
+async def get_google_write_token(user_id: int) -> dict[str, Any] | None:
+    """Return Google token only if it has calendar write scope (for E2E test creation)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM google_tokens WHERE user_id = $1 AND has_write_scope = TRUE",
+            user_id,
+        )
+    if not row:
+        return None
+    result = dict(row)
+    result["access_token"] = decrypt(result["access_token"])
+    if result.get("refresh_token"):
+        result["refresh_token"] = decrypt(result["refresh_token"])
+    return result
+
+
+async def get_any_admin_write_token() -> tuple[int, dict] | None:
+    """Return (user_id, token) for any admin user who has calendar write scope."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT gt.*, u.id AS uid
+            FROM google_tokens gt
+            JOIN users u ON u.id = gt.user_id
+            WHERE u.is_admin = TRUE AND gt.has_write_scope = TRUE AND u.is_active = TRUE
+            LIMIT 1
+            """
+        )
+    if not row:
+        return None
+    result = dict(row)
+    uid = result.pop("uid")
+    result["access_token"] = decrypt(result["access_token"])
+    if result.get("refresh_token"):
+        result["refresh_token"] = decrypt(result["refresh_token"])
+    return uid, result
+
+
 async def delete_google_token(user_id: int) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
