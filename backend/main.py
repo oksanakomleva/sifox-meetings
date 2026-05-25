@@ -102,6 +102,11 @@ if os.path.exists(_frontend_dist):
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
+        # Serve static files from dist root (SVGs, favicon, etc.) before falling back to SPA
+        if full_path:
+            candidate = os.path.join(_frontend_dist, full_path)
+            if os.path.isfile(candidate):
+                return FileResponse(candidate)
         index = os.path.join(_frontend_dist, "index.html")
         return FileResponse(index)
 else:
