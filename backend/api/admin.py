@@ -122,7 +122,7 @@ async def restart_meeting(meeting_id: str, admin: AdminUser):
             """
             UPDATE meetings
                SET status        = 'pending',
-                   start_time    = GREATEST(start_time, NOW()),
+                   start_time    = NOW(),
                    error_message = NULL,
                    updated_at    = NOW()
              WHERE id = $1
