@@ -175,6 +175,29 @@ async def me(
     }
 
 
+@router.get("/preview/{token}")
+async def preview_session(token: str):
+    """
+    Admin-generated preview link — sets a session cookie for the test user
+    and redirects to the homepage. Open in incognito to see the UI as a regular user.
+    """
+    session = await models.get_session(token)
+    if not session or session["email"] != "preview@sifox.local":
+        raise HTTPException(400, "Invalid or expired preview link")
+
+    redirect = RedirectResponse(f"{config.BASE_URL}/")
+    redirect.set_cookie(
+        key="session",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=config.BASE_URL.startswith("https"),
+        max_age=3600,
+        path="/",
+    )
+    return redirect
+
+
 @router.get("/connect-calendar")
 async def connect_calendar(
     session_token: Annotated[str | None, Cookie(alias="session")] = None,

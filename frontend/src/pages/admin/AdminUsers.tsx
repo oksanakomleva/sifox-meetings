@@ -12,6 +12,8 @@ export default function AdminUsers() {
   const [inviting, setInviting] = useState(false)
   const [newInviteUrl, setNewInviteUrl] = useState<string | null>(null)
   const [copyDone, setCopyDone] = useState(false)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
 
   useEffect(() => { load() }, [])
 
@@ -66,6 +68,19 @@ export default function AdminUsers() {
       day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
     })
 
+  const createPreview = async () => {
+    setPreviewLoading(true)
+    setPreviewUrl(null)
+    try {
+      const res = await api.admin.createPreviewSession()
+      setPreviewUrl(res.url)
+    } catch (e: any) {
+      alert(e.message || 'Ошибка')
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
+
   const pendingInvites = invitations.filter(i => !i.accepted_at)
   const acceptedInvites = invitations.filter(i => !!i.accepted_at)
 
@@ -77,6 +92,38 @@ export default function AdminUsers() {
       </div>
 
       <div className="page-body" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+
+        {/* ── Preview as regular user ── */}
+        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)', flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div style={{ fontWeight: 'var(--font-weight-semibold)', marginBottom: 2 }}>Предпросмотр как пользователь</div>
+            <div style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>
+              Откройте ссылку в инкогнито — увидите интерфейс без прав администратора
+            </div>
+          </div>
+          <button className="btn btn-secondary" onClick={createPreview} disabled={previewLoading}>
+            {previewLoading ? 'Создаём…' : '👁 Открыть как пользователь'}
+          </button>
+          {previewUrl && (
+            <div style={{
+              width: '100%', display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
+              background: 'var(--color-accent-6)', borderRadius: 'var(--radius-md)',
+              padding: 'var(--space-3) var(--space-4)', marginTop: 'var(--space-2)',
+            }}>
+              <span style={{ flex: 1, fontSize: 'var(--font-size-sm)', wordBreak: 'break-all', color: 'var(--color-accent)' }}>
+                {previewUrl}
+              </span>
+              <button className="btn btn-secondary" style={{ flexShrink: 0 }}
+                onClick={() => navigator.clipboard.writeText(previewUrl)}>
+                Скопировать
+              </button>
+              <a href={previewUrl} target="_blank" rel="noopener noreferrer"
+                className="btn btn-primary" style={{ flexShrink: 0 }}>
+                Открыть
+              </a>
+            </div>
+          )}
+        </div>
 
         {/* ── Users table ── */}
         <section>

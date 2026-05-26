@@ -217,6 +217,44 @@ async def delete_invitation(invitation_id: int, admin: AdminUser):
     return {"ok": True}
 
 
+# ── Preview as regular user ───────────────────────────────────────────────────
+
+@router.post("/preview-session")
+async def create_preview_session(admin: AdminUser):
+    """
+    Create a short-lived session for a non-admin test account.
+    Returns a one-time URL — open in incognito to see the UI as a regular user.
+    """
+    from database.connection import get_pool
+    from config import config as app_config
+    import secrets
+
+    pool = await get_pool()
+
+    # Upsert a persistent test user (not admin, no Google account needed)
+    async with pool.acquire() as conn:
+        test_user = await conn.fetchrow(
+            """
+            INSERT INTO users (google_id, email, name, avatar_url, is_admin, last_login)
+            VALUES ('__preview__', 'preview@sifox.local', 'Тестовый пользователь', NULL, FALSE, NOW())
+            ON CONFLICT (google_id) DO UPDATE
+              SET last_login = NOW()
+            RETURNING id
+            """
+        )
+        user_id = test_user["id"]
+
+        # Short-lived session: 1 hour
+        token = secrets.token_urlsafe(32)
+        await conn.execute(
+            "INSERT INTO sessions (id, user_id, expires_at) VALUES ($1, $2, NOW() + interval '1 hour')",
+            token, user_id,
+        )
+
+    url = f"{app_config.BASE_URL}/api/auth/preview/{token}"
+    return {"ok": True, "url": url, "expires_in": "1 hour"}
+
+
 # ── Maintenance ───────────────────────────────────────────────────────────────
 
 @router.get("/meetings/{meeting_id}/url")

@@ -81,6 +81,8 @@ export const api = {
       }),
     deleteInvitation: (id: number) =>
       request<void>(`/admin/invitations/${id}`, { method: 'DELETE' }),
+    createPreviewSession: () =>
+      request<{ ok: boolean; url: string; expires_in: string }>('/admin/preview-session', { method: 'POST' }),
   },
 
   // ── Chat ──────────────────────────────────────────────────────────────────────
