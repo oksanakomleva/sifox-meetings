@@ -68,20 +68,44 @@ async def _record_pipeline(meeting_id: str) -> None:
         await asyncio.sleep(0.5)
         await _set_default_sink(sink_name)
 
-        # 2. Browser
+        # 2. Browser — check Xvfb is alive, then launch with timeout
+        display = os.environ.get("DISPLAY", ":99")
+        pulse = os.environ.get("PULSE_SERVER", "unix:/tmp/pulse.sock")
+        logger.info("Launching browser: DISPLAY=%s PULSE_SERVER=%s", display, pulse)
+
+        # Quick Xvfb sanity check
+        xdpy = await asyncio.create_subprocess_exec(
+            "xdpyinfo", "-display", display,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            ret = await asyncio.wait_for(xdpy.wait(), timeout=5)
+            if ret != 0:
+                raise RuntimeError(f"Xvfb display {display} not responding (xdpyinfo exit {ret})")
+        except asyncio.TimeoutError:
+            xdpy.kill()
+            raise RuntimeError(f"Xvfb check timed out — display {display} unavailable")
+
         from playwright.async_api import async_playwright
         pw = await async_playwright().start()
-        browser = await pw.chromium.launch(
-            headless=False,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--autoplay-policy=no-user-gesture-required",
-                "--use-fake-ui-for-media-stream",
-            ],
-            env={**os.environ, "DISPLAY": ":99", "PULSE_SERVER": "unix:/tmp/pulse.sock"},
-        )
+        try:
+            browser = await asyncio.wait_for(
+                pw.chromium.launch(
+                    headless=False,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--autoplay-policy=no-user-gesture-required",
+                        "--use-fake-ui-for-media-stream",
+                    ],
+                    env={**os.environ, "DISPLAY": display, "PULSE_SERVER": pulse},
+                ),
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError("chromium.launch() timed out after 30s — Xvfb/Chromium issue")
+        logger.info("Browser launched OK")
         page = await browser.new_page()
 
         # 3. Join meeting
