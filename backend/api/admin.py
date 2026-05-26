@@ -237,6 +237,16 @@ class PatchMeetingUrlRequest(BaseModel):
 @router.patch("/meetings/{meeting_id}/url")
 async def patch_meeting_url(meeting_id: str, req: PatchMeetingUrlRequest, admin: AdminUser):
     """Fix a corrupted meeting_url directly in DB."""
+    return await _do_fix_url(meeting_id, req)
+
+
+@router.post("/meetings/{meeting_id}/fix-url")
+async def fix_meeting_url(meeting_id: str, req: PatchMeetingUrlRequest, admin: AdminUser):
+    """Fix a corrupted meeting_url directly in DB (POST alternative to PATCH)."""
+    return await _do_fix_url(meeting_id, req)
+
+
+async def _do_fix_url(meeting_id: str, req: PatchMeetingUrlRequest) -> dict:
     from database.connection import get_pool
     url = req.meeting_url.strip()
     if not url.startswith("https://telemost.yandex.ru/"):
