@@ -15,7 +15,6 @@ from fastapi.responses import FileResponse
 
 from config import config
 from database.connection import init_db, close_db
-from database import models
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,16 +28,20 @@ async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────
     await init_db(config.DATABASE_URL)
 
-    stuck = await models.reset_stuck_meetings()
-    if stuck:
-        logger.warning("Reset %d stuck meetings on startup", stuck)
-
     # Ensure audio dir exists
     os.makedirs(config.AUDIO_DIR, exist_ok=True)
 
+    # Recover meetings that were interrupted by the previous deploy
+    from services.recorder import (
+        recover_interrupted_meetings,
+        run_recording_scheduler,
+        request_shutdown,
+        wait_for_idle,
+    )
+    await recover_interrupted_meetings()
+
     # Background tasks
     from services.calendar_sync import run_sync_loop
-    from services.recorder import run_recording_scheduler
 
     sync_task = asyncio.create_task(run_sync_loop(), name="calendar-sync")
     scheduler_task = asyncio.create_task(run_recording_scheduler(), name="rec-scheduler")
@@ -47,8 +50,16 @@ async def lifespan(app: FastAPI):
     yield
 
     # ── Shutdown ─────────────────────────────────────────────────────────
+    # 1. Tell the scheduler to stop launching new recordings
+    request_shutdown()
     sync_task.cancel()
     scheduler_task.cancel()
+
+    # 2. Wait for any in-progress recordings to finish gracefully.
+    #    railway.toml stopSec must be >= this timeout + a small buffer.
+    #    55 min covers: longest meeting (45 min) + transcription (10 min).
+    await wait_for_idle(timeout=3300)
+
     await close_db()
     logger.info("telemost-web stopped")
 
@@ -78,7 +89,12 @@ app.include_router(admin_router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    from services.recorder import _active, _shutdown_requested
+    return {
+        "status": "ok",
+        "active_recordings": len(_active),
+        "shutdown_requested": _shutdown_requested,
+    }
 
 
 # Debug screenshots from recorder (admin only via existing protected static files endpoint

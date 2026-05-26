@@ -7,3 +7,6 @@ healthcheckPath = "/health"
 healthcheckTimeout = 180
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5
+# Allow up to 1 hour for active recordings to finish before force-kill.
+# Matches wait_for_idle(timeout=3300) in main.py lifespan shutdown.
+stopSec = 3600

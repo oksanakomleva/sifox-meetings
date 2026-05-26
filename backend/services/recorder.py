@@ -23,6 +23,133 @@ logger = logging.getLogger(__name__)
 # In-memory registry of active recordings: meeting_id -> task
 _active: dict[str, asyncio.Task] = {}
 
+# Set to True on SIGTERM — scheduler stops launching new recordings
+_shutdown_requested: bool = False
+
+
+def request_shutdown() -> None:
+    """Signal that the service is shutting down — no new recordings will start."""
+    global _shutdown_requested
+    _shutdown_requested = True
+    logger.info("Shutdown requested — recorder will not start new recordings (%d active)", len(_active))
+
+
+async def wait_for_idle(timeout: float = 3300) -> bool:
+    """
+    Wait for all active recordings to finish.
+    Returns True if finished cleanly, False if timed out.
+    Called during graceful shutdown before the event loop closes.
+    """
+    if not _active:
+        return True
+    tasks = list(_active.values())
+    logger.info("Graceful shutdown: waiting for %d recording(s) to finish (timeout=%.0fs)…", len(tasks), timeout)
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=timeout,
+        )
+        logger.info("All recordings finished cleanly")
+        return True
+    except asyncio.TimeoutError:
+        logger.warning("Graceful shutdown timed out — %d recording(s) still active", len(_active))
+        return False
+
+
+async def recover_interrupted_meetings() -> None:
+    """
+    Called on startup: re-queue recordings that were interrupted by a previous deploy.
+    - status='recording' → reset to 'pending' (bot will re-join if meeting still ongoing)
+    - status='transcribing' → re-run transcription if audio file exists
+    - status='analyzing' → re-run analysis if transcript exists in DB
+    """
+    from database.connection import get_pool
+    from config import config as _config
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        # Reset stuck recordings to pending
+        rec_result = await conn.execute(
+            """
+            UPDATE meetings
+               SET status = 'pending', start_time = NOW(), error_message = NULL, updated_at = NOW()
+             WHERE status = 'recording'
+            """
+        )
+        rec_count = int(rec_result.split()[-1])
+
+        # Find meetings stuck mid-processing
+        stuck = await conn.fetch(
+            "SELECT id, title, status, audio_path, transcript FROM meetings WHERE status IN ('transcribing', 'analyzing')"
+        )
+
+    if rec_count:
+        logger.warning("Reset %d interrupted recordings back to pending", rec_count)
+
+    for row in stuck:
+        mid = str(row["id"])
+        title = row["title"] or mid[:8]
+        status = row["status"]
+        audio_path = row["audio_path"]
+        transcript = row["transcript"]
+
+        if status == "transcribing" and audio_path:
+            full_path = Path(_config.AUDIO_DIR) / audio_path
+            if full_path.exists() and full_path.stat().st_size > 10_000:
+                logger.info("Recovering transcription for '%s' (%s)", title, mid[:8])
+                asyncio.create_task(_recover_transcribe(mid, str(full_path)), name=f"recover-{mid[:8]}")
+                continue
+        if status == "analyzing" and transcript:
+            logger.info("Recovering analysis for '%s' (%s)", title, mid[:8])
+            asyncio.create_task(_recover_analyze(mid, transcript), name=f"reanalyze-{mid[:8]}")
+            continue
+
+        # Audio/transcript missing — reset to error
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE meetings SET status='error', error_message='Прервано при деплое, данные не сохранились', updated_at=NOW() WHERE id=$1",
+                mid,
+            )
+        logger.warning("Meeting '%s' (%s) stuck in %s without data — marked error", title, mid[:8], status)
+
+
+async def _recover_transcribe(meeting_id: str, audio_file: str) -> None:
+    """Resume pipeline from transcription step after interrupted deploy."""
+    try:
+        await models.update_meeting_status(meeting_id, "transcribing")
+        segments = await transcribe_audio(audio_file)
+        if not segments:
+            raise RuntimeError("Empty transcription on recovery")
+        transcript_text = _build_transcript(segments, [])
+        audio_filename = Path(audio_file).name
+        audio_size = Path(audio_file).stat().st_size
+        await models.save_transcript(meeting_id, transcript_text)
+        await models.save_meeting_audio(meeting_id, audio_filename, audio_size)
+        await models.resolve_participants_by_email(meeting_id)
+        await _recover_analyze(meeting_id, transcript_text)
+    except Exception as e:
+        logger.error("Recovery transcription failed for %s: %s", meeting_id[:8], e)
+        await models.update_meeting_status(meeting_id, "error", f"Ошибка при восстановлении: {str(e)[:400]}")
+
+
+async def _recover_analyze(meeting_id: str, transcript_text: str) -> None:
+    """Resume pipeline from analysis step after interrupted deploy."""
+    try:
+        await models.update_meeting_status(meeting_id, "analyzing")
+        analysis = await analyze_meeting(transcript_text)
+        await models.save_analysis(
+            meeting_id,
+            summary=analysis["summary"],
+            tags=analysis["tags"],
+            topic=analysis["topic"],
+            meeting_type=analysis["meeting_type"],
+        )
+        await models.update_meeting_status(meeting_id, "done")
+        logger.info("Recovery analysis complete for %s", meeting_id[:8])
+    except Exception as e:
+        logger.error("Recovery analysis failed for %s: %s", meeting_id[:8], e)
+        await models.update_meeting_status(meeting_id, "error", f"Ошибка анализа при восстановлении: {str(e)[:400]}")
+
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -551,18 +678,19 @@ def _fmt_time(seconds: float) -> str:
 async def run_recording_scheduler() -> None:
     """Background loop: pick up pending meetings and start recording."""
     while True:
-        try:
-            pending = await models.get_pending_meetings_to_start(
-                within_minutes=config.JOIN_BEFORE_MINUTES + 1
-            )
-            for meeting in pending:
-                mid = str(meeting["id"])
-                if mid not in _active:
-                    logger.info(
-                        "Scheduling recording for meeting %s at %s",
-                        mid[:8], meeting.get("start_time"),
-                    )
-                    await start_recording(mid)
-        except Exception as e:
-            logger.error("Scheduler error: %s", e)
+        if not _shutdown_requested:
+            try:
+                pending = await models.get_pending_meetings_to_start(
+                    within_minutes=config.JOIN_BEFORE_MINUTES + 1
+                )
+                for meeting in pending:
+                    mid = str(meeting["id"])
+                    if mid not in _active:
+                        logger.info(
+                            "Scheduling recording for meeting %s at %s",
+                            mid[:8], meeting.get("start_time"),
+                        )
+                        await start_recording(mid)
+            except Exception as e:
+                logger.error("Scheduler error: %s", e)
         await asyncio.sleep(30)
