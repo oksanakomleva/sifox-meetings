@@ -685,6 +685,8 @@ async def get_chat_history(
 async def grant_meeting_access(
     user_id: int, meeting_id: str, granted_by: int
 ) -> None:
+    # granted_by=0 means system/API-key — store as NULL to avoid FK violation
+    granted_by_val = granted_by if granted_by > 0 else None
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -693,7 +695,7 @@ async def grant_meeting_access(
             VALUES ($1, $2, $3)
             ON CONFLICT DO NOTHING
             """,
-            user_id, meeting_id, granted_by,
+            user_id, meeting_id, granted_by_val,
         )
 
 
