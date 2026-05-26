@@ -240,7 +240,7 @@ async def patch_meeting_url(meeting_id: str, req: PatchMeetingUrlRequest, admin:
     return await _do_fix_url(meeting_id, req)
 
 
-@router.post("/meetings/{meeting_id}/fix-url")
+@router.post("/meetings/{meeting_id}/fixurl")
 async def fix_meeting_url(meeting_id: str, req: PatchMeetingUrlRequest, admin: AdminUser):
     """Fix a corrupted meeting_url directly in DB (POST alternative to PATCH)."""
     return await _do_fix_url(meeting_id, req)
