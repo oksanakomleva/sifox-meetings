@@ -110,6 +110,28 @@ async def reanalyze_meeting(meeting_id: str, admin: AdminUser):
     return {"ok": True, "message": "Re-analysis started"}
 
 
+@router.post("/meetings/{meeting_id}/force-error")
+async def force_error_meeting(meeting_id: str, admin: AdminUser):
+    """Force a stuck recording/transcribing meeting into error state."""
+    from database.connection import get_pool
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE meetings
+               SET status = 'error',
+                   error_message = 'Принудительно сброшено администратором',
+                   updated_at = NOW()
+             WHERE id = $1
+            RETURNING id, status
+            """,
+            meeting_id,
+        )
+    if not row:
+        raise HTTPException(404, "Meeting not found")
+    return {"ok": True, "meeting_id": meeting_id, "status": row["status"]}
+
+
 @router.post("/meetings/{meeting_id}/restart")
 async def restart_meeting(meeting_id: str, admin: AdminUser):
     """Reset a done/error meeting back to pending so the recorder picks it up again."""
