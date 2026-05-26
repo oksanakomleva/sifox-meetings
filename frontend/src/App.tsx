@@ -27,9 +27,32 @@ function ProtectedLayout() {
     return <Navigate to="/login" replace />
   }
 
+  const { logout } = useAuth()
+
   return (
     <div className="app-layout">
       <Sidebar />
+      {user.email === 'preview@sifox.local' && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9999,
+          background: '#f59e0b', color: '#1c1917',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          gap: '1rem', padding: '8px 16px',
+          fontSize: '14px', fontWeight: 600,
+        }}>
+          👁 Предпросмотр — вы видите интерфейс как обычный пользователь
+          <button
+            onClick={() => logout().then(() => window.location.href = '/login')}
+            style={{
+              background: 'rgba(0,0,0,0.15)', border: 'none', borderRadius: 6,
+              padding: '4px 12px', cursor: 'pointer', fontWeight: 700,
+              color: '#1c1917', fontSize: '13px',
+            }}
+          >
+            ← Вернуться к своему аккаунту
+          </button>
+        </div>
+      )}
       <Routes>
         <Route path="/" element={<Dashboard />} />
         <Route path="/meetings" element={<Meetings />} />
