@@ -200,18 +200,21 @@ async def _record_pipeline(meeting_id: str) -> None:
         pulse = os.environ.get("PULSE_SERVER", "unix:/tmp/pulse.sock")
         logger.info("Launching browser: DISPLAY=%s PULSE_SERVER=%s", display, pulse)
 
-        # Quick Xvfb sanity check
-        xdpy = await asyncio.create_subprocess_exec(
-            "xdpyinfo", "-display", display,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-        )
+        # Quick Xvfb sanity check (non-fatal if xdpyinfo is missing)
         try:
-            ret = await asyncio.wait_for(xdpy.wait(), timeout=5)
-            if ret != 0:
-                raise RuntimeError(f"Xvfb display {display} not responding (xdpyinfo exit {ret})")
-        except asyncio.TimeoutError:
-            xdpy.kill()
-            raise RuntimeError(f"Xvfb check timed out — display {display} unavailable")
+            xdpy = await asyncio.create_subprocess_exec(
+                "xdpyinfo", "-display", display,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                ret = await asyncio.wait_for(xdpy.wait(), timeout=5)
+                if ret != 0:
+                    raise RuntimeError(f"Xvfb display {display} not responding (xdpyinfo exit {ret})")
+            except asyncio.TimeoutError:
+                xdpy.kill()
+                raise RuntimeError(f"Xvfb check timed out — display {display} unavailable")
+        except FileNotFoundError:
+            logger.warning("xdpyinfo not found — skipping Xvfb check (install x11-utils to enable)")
 
         from playwright.async_api import async_playwright
         pw = await async_playwright().start()

@@ -4,6 +4,7 @@ FROM python:3.11-slim AS base
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # Xvfb + PulseAudio for browser recording
     xvfb \
+    x11-utils \
     pulseaudio \
     pulseaudio-utils \
     # Chromium deps

@@ -75,7 +75,7 @@ def get_calendar_url(user_id: int) -> str:
     flow = _make_flow(_CALENDAR_SCOPES)
     url, _ = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes="true",
+        include_granted_scopes="false",
         state=state,
         prompt="consent",
     )
@@ -106,27 +106,40 @@ def _pop_state(state: str) -> tuple[str, int | None] | None:
     return purpose, user_id
 
 
+class OAuthError(Exception):
+    """Raised when Google OAuth code exchange or userinfo fetch fails."""
+    pass
+
+
 def _exchange_code_sync(code: str, scopes: list[str]) -> dict:
-    flow = _make_flow(scopes)
-    flow.fetch_token(code=code)
-    creds = flow.credentials
-    return {
-        "token": creds.token,
-        "refresh_token": creds.refresh_token,
-        "expiry": creds.expiry,
-        "id_token": creds.id_token,
-    }
+    try:
+        flow = _make_flow(scopes)
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        return {
+            "token": creds.token,
+            "refresh_token": creds.refresh_token,
+            "expiry": creds.expiry,
+            "id_token": creds.id_token,
+        }
+    except Exception as e:
+        logger.error("OAuth code exchange failed: %s: %s", type(e).__name__, e)
+        raise OAuthError(f"Code exchange failed: {e}") from e
 
 
 def _fetch_userinfo_sync(access_token: str) -> dict:
     import requests
-    resp = requests.get(
-        "https://www.googleapis.com/oauth2/v3/userinfo",
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        logger.error("Userinfo fetch failed: %s: %s", type(e).__name__, e)
+        raise OAuthError(f"Userinfo fetch failed: {e}") from e
 
 
 async def handle_callback(
@@ -135,6 +148,7 @@ async def handle_callback(
     """
     Handle OAuth callback.
     Returns dict with keys: purpose, user_info, tokens, user_id (for calendar flow).
+    Raises OAuthError if Google rejects the code.
     """
     entry = _pop_state(state)
     if not entry:

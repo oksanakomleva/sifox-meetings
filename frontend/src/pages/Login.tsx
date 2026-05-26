@@ -55,7 +55,7 @@ export default function Login() {
           Записи встреч и протоколы команды
         </p>
 
-        {(error === 'domain_not_allowed' || error === 'invite_invalid' || error === 'invite_used') && (
+        {error && (
           <div style={{
             background: 'var(--color-error-bg)',
             color: 'var(--color-error)',
@@ -67,6 +67,8 @@ export default function Login() {
             {error === 'domain_not_allowed' && 'Доступ только для аккаунтов @sifox.com или по приглашению'}
             {error === 'invite_invalid' && 'Ссылка приглашения недействительна или истекла'}
             {error === 'invite_used' && 'Это приглашение уже было использовано'}
+            {error === 'oauth_failed' && 'Ошибка авторизации Google. Попробуйте ещё раз.'}
+            {error === 'state_expired' && 'Сессия авторизации устарела. Попробуйте ещё раз.'}
           </div>
         )}
 

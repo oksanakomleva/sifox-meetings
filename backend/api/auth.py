@@ -5,6 +5,7 @@ from fastapi.responses import RedirectResponse
 from typing import Annotated
 
 from auth import google_oauth
+from auth.google_oauth import OAuthError
 from auth.deps import get_current_user
 from config import config
 from database import models
@@ -55,10 +56,28 @@ async def callback(
     invite_token: Annotated[str | None, Cookie(alias="invite_token")] = None,
 ):
     """Google OAuth callback — handles both login and calendar flows."""
-    result = await google_oauth.handle_callback(code, state)
-    if not result:
-        raise HTTPException(400, "Invalid or expired OAuth state")
+    try:
+        result = await google_oauth.handle_callback(code, state)
+    except OAuthError as e:
+        logger.error("OAuth callback failed: %s", e)
+        return RedirectResponse(f"{config.BASE_URL}/login?error=oauth_failed")
+    except Exception as e:
+        logger.exception("Unexpected error in OAuth callback: %s", e)
+        return RedirectResponse(f"{config.BASE_URL}/login?error=oauth_failed")
 
+    if not result:
+        return RedirectResponse(f"{config.BASE_URL}/login?error=state_expired")
+
+    try:
+        return await _process_callback(result, invite_token)
+    except Exception as e:
+        logger.exception("Error processing OAuth callback (purpose=%s, email=%s): %s",
+                         result.get("purpose"), result.get("user_info", {}).get("email"), e)
+        return RedirectResponse(f"{config.BASE_URL}/login?error=oauth_failed")
+
+
+async def _process_callback(result: dict, invite_token: str | None):
+    """Inner callback logic, separated for clean error handling."""
     user_info = result["user_info"]
     email: str = user_info.get("email", "").lower()
     domain = email.split("@")[-1] if "@" in email else ""
