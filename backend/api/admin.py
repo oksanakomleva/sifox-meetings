@@ -164,7 +164,11 @@ class GrantAccessRequest(BaseModel):
 
 @router.post("/grant-access")
 async def grant_access(req: GrantAccessRequest, admin: AdminUser):
-    await models.grant_meeting_access(req.user_id, req.meeting_id, admin["user_id"])
+    try:
+        await models.grant_meeting_access(req.user_id, req.meeting_id, admin["user_id"])
+    except Exception as e:
+        logger.exception("grant_meeting_access failed")
+        raise HTTPException(500, f"DB error: {type(e).__name__}: {e}")
     return {"ok": True}
 
 
