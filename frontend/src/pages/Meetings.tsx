@@ -175,7 +175,8 @@ export default function Meetings() {
       api.meetings.upcoming(),
     ])
       .then(([doneRes, upRes]) => {
-        setDoneMeetings(doneRes.meetings)
+        // Only show truly finished meetings in "Завершённые" tab
+        setDoneMeetings(doneRes.meetings.filter((m: import('../types').Meeting) => m.status === 'done'))
         setUpcomingMeetings(upRes.meetings)
       })
       .catch(e => setError(e.message))
