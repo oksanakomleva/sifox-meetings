@@ -15,6 +15,12 @@ router = APIRouter(prefix="/api/meetings", tags=["meetings"])
 CurrentUser = Annotated[dict, Depends(get_current_user)]
 
 
+@router.get("/calendar-status")
+async def calendar_status(user: CurrentUser):
+    """Return whether the current user has connected and enabled their Google Calendar."""
+    return await models.get_calendar_status(user["user_id"])
+
+
 @router.get("/week-summary")
 async def week_summary(user: CurrentUser):
     """AI-generated summary of the last 7 days for Dashboard."""

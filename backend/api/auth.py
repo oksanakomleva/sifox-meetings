@@ -122,14 +122,20 @@ async def callback(
             tokens.get("refresh_token"),
             tokens.get("expiry"),
         )
-        # Sync calendars immediately
-        from services.calendar_sync import sync_user_calendars
+        # Sync calendars list immediately so we can auto-enable
+        from services.calendar_sync import sync_user_calendars, sync_user_events
         try:
             await sync_user_calendars(user_id)
+            # Auto-enable primary calendar so recording starts right away
+            await models.auto_enable_primary_calendar(user_id)
+            # Kick off first events sync in background
+            import asyncio
+            asyncio.create_task(sync_user_events(user_id))
         except Exception as e:
             logger.warning("Calendar sync after connect failed: %s", e)
 
-        return RedirectResponse(f"{config.BASE_URL}/admin/calendars?connected=1")
+        # Redirect to dashboard with success flag (works for both admin and regular users)
+        return RedirectResponse(f"{config.BASE_URL}/?calendar_connected=1")
 
     elif result["purpose"] == "calendar_write":
         # ── Calendar write connect (E2E admin only) ───────────────────────

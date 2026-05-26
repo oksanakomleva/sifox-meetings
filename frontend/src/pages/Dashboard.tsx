@@ -1,16 +1,28 @@
 import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
+import { useAuth } from '../hooks/useAuth'
 import ChatWidget from '../components/ChatWidget'
 import type { ChatMessage } from '../types'
 
 export default function Dashboard() {
+  const { user } = useAuth()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [summary, setSummary] = useState<string | null>(null)
   const [meetingCount, setMeetingCount] = useState(0)
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([])
   const [loadingSummary, setLoadingSummary] = useState(true)
   const [loadingChat, setLoadingChat] = useState(true)
+  const [calStatus, setCalStatus] = useState<{ connected: boolean; has_enabled_calendar: boolean } | null>(null)
+  const [calendarJustConnected, setCalendarJustConnected] = useState(false)
 
   useEffect(() => {
+    // Check if redirected back after connecting calendar
+    if (searchParams.get('calendar_connected') === '1') {
+      setCalendarJustConnected(true)
+      setSearchParams({}, { replace: true })
+    }
+
     api.meetings.weekSummary()
       .then(r => { setSummary(r.summary); setMeetingCount(r.count) })
       .catch(() => setSummary(null))
@@ -20,6 +32,11 @@ export default function Dashboard() {
       .then(r => setChatHistory(r.messages))
       .catch(() => {})
       .finally(() => setLoadingChat(false))
+
+    // Check calendar connection status (for non-admins)
+    api.meetings.calendarStatus()
+      .then(s => setCalStatus(s))
+      .catch(() => {})
   }, [])
 
   return (
@@ -30,6 +47,53 @@ export default function Dashboard() {
       </div>
 
       <div className="page-body" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+
+        {/* ── Success: calendar just connected ── */}
+        {calendarJustConnected && (
+          <div style={{
+            display: 'flex', alignItems: 'flex-start', gap: 'var(--space-4)',
+            background: 'var(--color-success-bg)', border: '1px solid #bbf7d0',
+            borderRadius: 'var(--radius-lg)', padding: 'var(--space-5)',
+          }}>
+            <span style={{ fontSize: 24, lineHeight: 1 }}>✅</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 'var(--font-weight-semibold)', color: 'var(--color-success)', marginBottom: 4 }}>
+                Google Calendar подключён!
+              </div>
+              <div style={{ fontSize: 'var(--font-size-sm)', color: '#166534', lineHeight: 'var(--line-height-relaxed)' }}>
+                Ваш основной календарь включён для записи. Бот автоматически присоединится к вашим встречам в Яндекс Телемост
+                и после каждой встречи подготовит транскрипт и протокол. Встречи появятся в разделе «Встречи».
+              </div>
+            </div>
+            <button
+              onClick={() => setCalendarJustConnected(false)}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#166534', fontSize: 18, lineHeight: 1, padding: 0 }}
+            >×</button>
+          </div>
+        )}
+
+        {/* ── Onboarding: connect calendar (non-admins who haven't connected yet) ── */}
+        {!user?.is_admin && calStatus !== null && !calStatus.connected && !calendarJustConnected && (
+          <div style={{
+            display: 'flex', alignItems: 'flex-start', gap: 'var(--space-4)',
+            background: 'var(--color-accent-6)', border: '1px solid var(--color-accent-4)',
+            borderRadius: 'var(--radius-lg)', padding: 'var(--space-5)',
+          }}>
+            <span style={{ fontSize: 24, lineHeight: 1 }}>📅</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 'var(--font-weight-semibold)', marginBottom: 4 }}>
+                Подключите Google Calendar
+              </div>
+              <div style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)', marginBottom: 'var(--space-4)', lineHeight: 'var(--line-height-relaxed)' }}>
+                Чтобы бот автоматически записывал ваши встречи в Яндекс Телемост, нужно дать доступ к вашему Google Calendar.
+                Мы будем видеть только названия и время встреч.
+              </div>
+              <a href="/api/auth/connect-calendar">
+                <button className="btn btn-primary">Подключить Google Calendar</button>
+              </a>
+            </div>
+          </div>
+        )}
 
         {/* ── Weekly AI summary ── */}
         <section>

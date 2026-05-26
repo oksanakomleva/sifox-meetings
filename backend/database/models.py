@@ -284,6 +284,53 @@ async def get_calendars(owner_user_id: int | None = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_calendar_status(user_id: int) -> dict:
+    """Return whether the user has connected Google Calendar and enabled any calendar."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        has_token = await conn.fetchval(
+            "SELECT 1 FROM google_tokens WHERE user_id = $1", user_id
+        )
+        has_enabled = await conn.fetchval(
+            "SELECT 1 FROM calendars WHERE owner_user_id = $1 AND record_enabled = TRUE", user_id
+        )
+        cal_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM calendars WHERE owner_user_id = $1", user_id
+        ) or 0
+    return {
+        "connected": bool(has_token),
+        "has_enabled_calendar": bool(has_enabled),
+        "calendar_count": int(cal_count),
+    }
+
+
+async def auto_enable_primary_calendar(user_id: int) -> bool:
+    """
+    Enable record_enabled on the user's primary calendar (or first calendar).
+    Called automatically after a user connects their Google Calendar.
+    Returns True if a calendar was enabled.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # Enable primary first, fall back to first available
+        row = await conn.fetchrow(
+            """
+            UPDATE calendars
+               SET record_enabled = TRUE
+             WHERE owner_user_id = $1
+               AND id = (
+                   SELECT id FROM calendars
+                    WHERE owner_user_id = $1
+                    ORDER BY is_primary DESC, id
+                    LIMIT 1
+               )
+            RETURNING id, name, is_primary
+            """,
+            user_id,
+        )
+    return row is not None
+
+
 async def set_calendar_record_enabled(calendar_id: int, enabled: bool) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:

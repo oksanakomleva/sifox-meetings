@@ -39,6 +39,8 @@ export const api = {
     transcript: (id: string) =>
       request<{ transcript: string }>(`/meetings/${id}/transcript`),
     audioUrl: (id: string) => `/api/meetings/${id}/audio`,
+    calendarStatus: () =>
+      request<{ connected: boolean; has_enabled_calendar: boolean; calendar_count: number }>('/meetings/calendar-status'),
     week: () =>
       request<{ meetings: import('../types').Meeting[] }>('/meetings/week'),
     weekSummary: () =>
