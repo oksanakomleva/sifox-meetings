@@ -215,6 +215,21 @@ async def delete_invitation(invitation_id: int, admin: AdminUser):
 
 # ── Maintenance ───────────────────────────────────────────────────────────────
 
+@router.get("/meetings/{meeting_id}/url")
+async def get_meeting_url(meeting_id: str, admin: AdminUser):
+    """Return raw meeting_url stored in DB (for debugging URL extraction issues)."""
+    from database.connection import get_pool
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, title, meeting_url, status, error_message FROM meetings WHERE id = $1",
+            meeting_id,
+        )
+    if not row:
+        raise HTTPException(404, "Meeting not found")
+    return dict(row)
+
+
 @router.delete("/meetings/errors")
 async def delete_error_meetings(admin: AdminUser):
     """One-shot cleanup: delete all meetings with status=error."""
