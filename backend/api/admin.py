@@ -230,6 +230,28 @@ async def get_meeting_url(meeting_id: str, admin: AdminUser):
     return dict(row)
 
 
+class PatchMeetingUrlRequest(BaseModel):
+    meeting_url: str
+
+
+@router.patch("/meetings/{meeting_id}/url")
+async def patch_meeting_url(meeting_id: str, req: PatchMeetingUrlRequest, admin: AdminUser):
+    """Fix a corrupted meeting_url directly in DB."""
+    from database.connection import get_pool
+    url = req.meeting_url.strip()
+    if not url.startswith("https://telemost.yandex.ru/"):
+        raise HTTPException(400, "Not a valid Telemost URL")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE meetings SET meeting_url = $1, updated_at = NOW() WHERE id = $2 RETURNING id, meeting_url",
+            url, meeting_id,
+        )
+    if not row:
+        raise HTTPException(404, "Meeting not found")
+    return {"ok": True, "meeting_url": row["meeting_url"]}
+
+
 @router.delete("/meetings/errors")
 async def delete_error_meetings(admin: AdminUser):
     """One-shot cleanup: delete all meetings with status=error."""
