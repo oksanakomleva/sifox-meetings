@@ -95,7 +95,7 @@ export default function MeetingDetail() {
         </button>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--space-4)', flexWrap: 'wrap' }}>
           <div style={{ flex: 1 }}>
-            <h1 className="page-title">{meeting.topic || meeting.title || 'Встреча'}</h1>
+            <h1 className="page-title">{meeting.title || meeting.topic || 'Встреча'}</h1>
             <p className="page-subtitle">
               {fmt(meeting.start_time)}
               {meeting.end_time && (
@@ -217,7 +217,7 @@ export default function MeetingDetail() {
           <div style={{ maxWidth: 560 }}>
             <AudioPlayer
               src={api.meetings.audioUrl(meeting.id)}
-              title={meeting.topic || meeting.title || undefined}
+              title={meeting.title || meeting.topic || undefined}
             />
             {meeting.audio_size && (
               <p style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-text-muted)', marginTop: 8 }}>

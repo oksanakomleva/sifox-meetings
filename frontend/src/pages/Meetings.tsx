@@ -344,7 +344,7 @@ export default function Meetings() {
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--space-3)' }}>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontWeight: 'var(--font-weight-semibold)', marginBottom: 'var(--space-1)' }}>
-                            {m.topic || m.title || 'Без названия'}
+                            {m.title || m.topic || 'Без названия'}
                           </div>
                           <div style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>
                             {fmtDateTime(m.start_time)}
@@ -378,7 +378,7 @@ function MeetingCard({ meeting: m, onClick }: { meeting: Meeting; onClick: () =>
             marginBottom: 'var(--space-1)',
             whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
           }}>
-            {m.topic || m.title || 'Без названия'}
+            {m.title || m.topic || 'Без названия'}
           </div>
           <div style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>
             {fmtDateTime(m.start_time)}

@@ -651,18 +651,52 @@ def _effective_speaker_timeline(
 
 
 def _build_transcript(segments, speaker_timeline: list[tuple[float, str]]) -> str:
-    lines = []
-    current_speaker = "Участник"
+    """
+    Build transcript merging consecutive segments from the same speaker
+    if the gap between them is less than PAUSE_THRESHOLD seconds.
+    A new block starts when: speaker changes OR there is a long pause.
+    """
+    PAUSE_THRESHOLD = 4.0  # seconds — gap that starts a new paragraph
 
+    if not segments:
+        return ""
+
+    # Assign a speaker label to every Whisper segment
+    labeled: list[tuple[object, str]] = []
     for seg in segments:
-        # Find speaker at this timestamp
+        speaker = "Участник"
         for ts, name in reversed(speaker_timeline):
             if seg.start >= ts:
-                current_speaker = name
+                speaker = name
                 break
-        lines.append(f"[{_fmt_time(seg.start)}] {current_speaker}: {seg.text}")
+        labeled.append((seg, speaker))
 
-    return "\n".join(lines)
+    # Merge consecutive same-speaker segments with short gaps into one block
+    blocks: list[tuple[float, str, str]] = []  # (start_time, speaker, text)
+    curr_speaker = labeled[0][1]
+    curr_start   = labeled[0][0].start
+    curr_texts   = [labeled[0][0].text.strip()]
+    prev_end     = labeled[0][0].end
+
+    for seg, speaker in labeled[1:]:
+        gap = seg.start - prev_end
+        if speaker == curr_speaker and gap < PAUSE_THRESHOLD:
+            # Same speaker, short gap — append to current block
+            curr_texts.append(seg.text.strip())
+        else:
+            # Speaker changed or long pause — flush current block
+            blocks.append((curr_start, curr_speaker, " ".join(curr_texts)))
+            curr_speaker = speaker
+            curr_start   = seg.start
+            curr_texts   = [seg.text.strip()]
+        prev_end = seg.end
+
+    blocks.append((curr_start, curr_speaker, " ".join(curr_texts)))
+
+    return "\n".join(
+        f"[{_fmt_time(start)}] {speaker}: {text}"
+        for start, speaker, text in blocks
+    )
 
 
 def _fmt_time(seconds: float) -> str:

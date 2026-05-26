@@ -83,7 +83,7 @@ export default function AdminMeetings() {
                   >
                     <td style={{ padding: 'var(--space-3) var(--space-4)', maxWidth: 280 }}>
                       <div style={{ fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {m.topic || m.title || 'Без названия'}
+                        {m.title || m.topic || 'Без названия'}
                       </div>
                       {m.error_message && (
                         <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-error)', marginTop: 2 }}>
