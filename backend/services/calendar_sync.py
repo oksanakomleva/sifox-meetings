@@ -14,19 +14,38 @@ from database import models
 
 logger = logging.getLogger(__name__)
 
-_TELEMOST_RE = re.compile(r"https?://telemost\.yandex\.ru/\S+")
+_TELEMOST_RE = re.compile(r"https?://telemost\.yandex\.ru/[^\s\"'<>]+")
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_html(text: str) -> str:
+    """Remove HTML tags so regex doesn't capture href= or tag attributes."""
+    return _HTML_TAG_RE.sub(" ", text)
 
 
 def _extract_telemost_url(event: dict) -> str | None:
-    for field in [event.get("location", ""), event.get("description", "")]:
-        if field:
-            m = _TELEMOST_RE.search(field)
-            if m:
-                return m.group(0).rstrip(".,;)")
+    # 1. conferenceData — cleanest source, no HTML
     for ep in event.get("conferenceData", {}).get("entryPoints", []):
         uri = ep.get("uri", "")
         if "telemost" in uri:
-            return uri
+            return uri.rstrip(".,;)")
+
+    # 2. location field (usually plain text)
+    location = event.get("location", "") or ""
+    m = _TELEMOST_RE.search(_strip_html(location))
+    if m:
+        return m.group(0).rstrip(".,;)")
+
+    # 3. description (may be HTML — strip tags first)
+    description = event.get("description", "") or ""
+    # Also try extracting from href="..." before stripping
+    href_match = re.search(r'href="(https?://telemost\.yandex\.ru/[^"]+)"', description)
+    if href_match:
+        return href_match.group(1).rstrip(".,;)")
+    m = _TELEMOST_RE.search(_strip_html(description))
+    if m:
+        return m.group(0).rstrip(".,;)")
+
     return None
 
 
