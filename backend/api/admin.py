@@ -320,9 +320,10 @@ async def delete_error_meetings(admin: AdminUser):
 
 @router.get("/storage")
 async def list_storage(admin: AdminUser):
-    """List WAV files in AUDIO_DIR with sizes and modification times."""
+    """List WAV files in AUDIO_DIR enriched with meeting title and recorder."""
     from config import config
     from datetime import datetime
+    from database.connection import get_pool
 
     audio_dir = config.AUDIO_DIR
     files = []
@@ -333,13 +334,15 @@ async def list_storage(admin: AdminUser):
     except FileNotFoundError:
         return {"files": [], "total_bytes": 0, "audio_dir": audio_dir}
 
+    # Collect file metadata from disk first
+    raw_files = []
     for fname in entries:
         if not fname.endswith(".wav"):
             continue
         fpath = os.path.join(audio_dir, fname)
         try:
             stat = os.stat(fpath)
-            files.append({
+            raw_files.append({
                 "filename": fname,
                 "meeting_id": fname.replace(".wav", ""),
                 "size_bytes": stat.st_size,
@@ -348,6 +351,72 @@ async def list_storage(admin: AdminUser):
             total_bytes += stat.st_size
         except OSError:
             continue
+
+    # Enrich with meeting title + user info from DB (single query for all IDs)
+    meta_by_id: dict[str, dict] = {}
+    if raw_files:
+        meeting_ids = [f["meeting_id"] for f in raw_files]
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    m.id::text         AS meeting_id,
+                    m.title            AS title,
+                    m.status           AS status,
+                    m.start_time       AS start_time,
+                    u.id               AS user_id,
+                    u.name             AS user_name,
+                    u.email            AS user_email
+                FROM meetings m
+                LEFT JOIN users u ON u.id = m.recorder_user_id
+                WHERE m.id::text = ANY($1::text[])
+                """,
+                meeting_ids,
+            )
+            for r in rows:
+                meta_by_id[r["meeting_id"]] = {
+                    "title": r["title"],
+                    "status": r["status"],
+                    "start_time": r["start_time"].isoformat() if r["start_time"] else None,
+                    "user_name": r["user_name"],
+                    "user_email": r["user_email"],
+                }
+
+            # For meetings without recorder_user_id, fall back to the first user
+            # whose calendar produced this meeting (calendar_meeting_links).
+            missing_user_ids = [
+                f["meeting_id"] for f in raw_files
+                if not meta_by_id.get(f["meeting_id"], {}).get("user_name")
+                   and f["meeting_id"] in meta_by_id
+            ]
+            if missing_user_ids:
+                link_rows = await conn.fetch(
+                    """
+                    SELECT DISTINCT ON (l.meeting_id)
+                        l.meeting_id::text AS meeting_id,
+                        u.name             AS user_name,
+                        u.email            AS user_email
+                    FROM calendar_meeting_links l
+                    JOIN users u ON u.id = l.user_id
+                    WHERE l.meeting_id::text = ANY($1::text[])
+                    ORDER BY l.meeting_id, l.created_at ASC NULLS LAST
+                    """,
+                    missing_user_ids,
+                )
+                for r in link_rows:
+                    meta_by_id[r["meeting_id"]]["user_name"] = r["user_name"]
+                    meta_by_id[r["meeting_id"]]["user_email"] = r["user_email"]
+
+    # Merge file info with meeting metadata
+    for f in raw_files:
+        meta = meta_by_id.get(f["meeting_id"]) or {}
+        f["title"] = meta.get("title")
+        f["status"] = meta.get("status")
+        f["meeting_start_time"] = meta.get("start_time")
+        f["user_name"] = meta.get("user_name")
+        f["user_email"] = meta.get("user_email")
+        files.append(f)
 
     files.sort(key=lambda f: f["modified_at"], reverse=True)
     return {"files": files, "total_bytes": total_bytes, "audio_dir": audio_dir}

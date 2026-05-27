@@ -86,11 +86,11 @@ export default function AdminStorage() {
             <p className="empty-state-text">Директория {audioDir} пуста</p>
           </div>
         ) : (
-          <div className="card" style={{ padding: 0 }}>
+          <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                  {['Файл', 'Размер', 'Изменён', ''].map(h => (
+                  {['Встреча', 'Пользователь', 'Размер', 'Изменён', ''].map(h => (
                     <th key={h} style={{
                       padding: 'var(--space-3) var(--space-4)',
                       textAlign: 'left',
@@ -119,20 +119,41 @@ export default function AdminStorage() {
                         background: isLarge ? 'rgba(239,68,68,0.04)' : undefined,
                       }}
                     >
-                      <td style={{ padding: 'var(--space-3) var(--space-4)' }}>
+                      <td style={{ padding: 'var(--space-3) var(--space-4)', maxWidth: 320 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                           {isLarge && (
-                            <span title="Подозрительно большой файл — возможно зависшая запись" style={{ color: 'var(--color-error)', fontSize: 16 }}>⚠️</span>
+                            <span title="Подозрительно большой файл — возможно зависшая запись" style={{ color: 'var(--color-error)', fontSize: 16, flexShrink: 0 }}>⚠️</span>
                           )}
-                          <code style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>
-                            {short}.wav
-                          </code>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {f.title || <span style={{ color: 'var(--color-text-secondary)', fontStyle: 'italic' }}>Без названия</span>}
+                            </div>
+                            <code style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-text-secondary)' }}>
+                              {short}.wav
+                            </code>
+                          </div>
                         </div>
                       </td>
-                      <td style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: isLarge ? 700 : 400, color: isLarge ? 'var(--color-error)' : undefined }}>
+                      <td style={{ padding: 'var(--space-3) var(--space-4)', maxWidth: 220 }}>
+                        {f.user_name ? (
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {f.user_name}
+                            </div>
+                            {f.user_email && (
+                              <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {f.user_email}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <span style={{ color: 'var(--color-text-secondary)', fontStyle: 'italic', fontSize: 'var(--font-size-sm)' }}>—</span>
+                        )}
+                      </td>
+                      <td style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: isLarge ? 700 : 400, color: isLarge ? 'var(--color-error)' : undefined, whiteSpace: 'nowrap' }}>
                         {fmtSize(f.size_bytes)}
                       </td>
-                      <td style={{ padding: 'var(--space-3) var(--space-4)', color: 'var(--color-text-secondary)', fontSize: 'var(--font-size-sm)' }}>
+                      <td style={{ padding: 'var(--space-3) var(--space-4)', color: 'var(--color-text-secondary)', fontSize: 'var(--font-size-sm)', whiteSpace: 'nowrap' }}>
                         {fmtDate(f.modified_at)}
                       </td>
                       <td style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right', whiteSpace: 'nowrap' }}>

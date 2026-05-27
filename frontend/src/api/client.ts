@@ -3,6 +3,11 @@ export interface StorageFile {
   meeting_id: string
   size_bytes: number
   modified_at: string
+  title: string | null
+  status: string | null
+  meeting_start_time: string | null
+  user_name: string | null
+  user_email: string | null
 }
 
 const BASE = '/api'
