@@ -316,6 +316,62 @@ async def delete_error_meetings(admin: AdminUser):
     return {"ok": True, "deleted": count}
 
 
+# ── Storage ───────────────────────────────────────────────────────────────────
+
+@router.get("/storage")
+async def list_storage(admin: AdminUser):
+    """List WAV files in AUDIO_DIR with sizes and modification times."""
+    from config import config
+    from datetime import datetime
+
+    audio_dir = config.AUDIO_DIR
+    files = []
+    total_bytes = 0
+
+    try:
+        entries = os.listdir(audio_dir)
+    except FileNotFoundError:
+        return {"files": [], "total_bytes": 0, "audio_dir": audio_dir}
+
+    for fname in entries:
+        if not fname.endswith(".wav"):
+            continue
+        fpath = os.path.join(audio_dir, fname)
+        try:
+            stat = os.stat(fpath)
+            files.append({
+                "filename": fname,
+                "meeting_id": fname.replace(".wav", ""),
+                "size_bytes": stat.st_size,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            })
+            total_bytes += stat.st_size
+        except OSError:
+            continue
+
+    files.sort(key=lambda f: f["modified_at"], reverse=True)
+    return {"files": files, "total_bytes": total_bytes, "audio_dir": audio_dir}
+
+
+@router.delete("/storage/{meeting_id}")
+async def delete_audio_file(meeting_id: str, admin: AdminUser):
+    """Delete a WAV audio file by meeting_id."""
+    from config import config
+
+    # Basic safety: meeting_id should be a UUID-like string, no path traversal
+    if "/" in meeting_id or "\\" in meeting_id or ".." in meeting_id:
+        raise HTTPException(400, "Invalid meeting_id")
+
+    fpath = os.path.join(config.AUDIO_DIR, f"{meeting_id}.wav")
+    if not os.path.exists(fpath):
+        raise HTTPException(404, "File not found")
+
+    size = os.path.getsize(fpath)
+    os.remove(fpath)
+    logger.info("Admin %s deleted audio file %s (%d bytes)", admin["user_id"], fpath, size)
+    return {"ok": True, "deleted": f"{meeting_id}.wav", "freed_bytes": size}
+
+
 # ── E2E Testing ───────────────────────────────────────────────────────────────
 
 @router.post("/test/start-e2e")

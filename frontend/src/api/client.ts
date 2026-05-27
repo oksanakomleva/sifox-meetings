@@ -1,3 +1,10 @@
+export interface StorageFile {
+  filename: string
+  meeting_id: string
+  size_bytes: number
+  modified_at: string
+}
+
 const BASE = '/api'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -85,6 +92,10 @@ export const api = {
       request<void>(`/admin/invitations/${id}`, { method: 'DELETE' }),
     createPreviewSession: () =>
       request<{ ok: boolean; url: string; expires_in: string }>('/admin/preview-session', { method: 'POST' }),
+    storage: () =>
+      request<{ files: StorageFile[]; total_bytes: number; audio_dir: string }>('/admin/storage'),
+    deleteAudioFile: (meetingId: string) =>
+      request<{ ok: boolean; freed_bytes: number }>(`/admin/storage/${meetingId}`, { method: 'DELETE' }),
   },
 
   // ── Chat ──────────────────────────────────────────────────────────────────────

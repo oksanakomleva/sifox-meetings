@@ -8,6 +8,7 @@ import MeetingDetail from './pages/MeetingDetail'
 import AdminCalendars from './pages/admin/AdminCalendars'
 import AdminUsers from './pages/admin/AdminUsers'
 import AdminMeetings from './pages/admin/AdminMeetings'
+import AdminStorage from './pages/admin/AdminStorage'
 
 function ProtectedLayout() {
   const { user, loading } = useAuth()
@@ -62,6 +63,7 @@ function ProtectedLayout() {
             <Route path="/admin/calendars" element={<AdminCalendars />} />
             <Route path="/admin/users" element={<AdminUsers />} />
             <Route path="/admin/meetings" element={<AdminMeetings />} />
+            <Route path="/admin/storage" element={<AdminStorage />} />
           </>
         )}
         <Route path="*" element={<Navigate to="/" replace />} />

@@ -26,6 +26,13 @@ const IconCalendar = () => (
     <path d="M7 2v4M13 2v4M2 9h16"/>
   </svg>
 )
+const IconStorage = () => (
+  <svg className="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
+    <ellipse cx="10" cy="5" rx="7" ry="2.5"/>
+    <path d="M3 5v4c0 1.38 3.134 2.5 7 2.5S17 10.38 17 9V5"/>
+    <path d="M3 9v4c0 1.38 3.134 2.5 7 2.5S17 14.38 17 13V9"/>
+  </svg>
+)
 const IconLogout = () => (
   <svg className="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
     <path d="M13 15l4-5-4-5"/>
@@ -62,6 +69,9 @@ export default function Sidebar() {
             </NavLink>
             <NavLink to="/admin/meetings" className={({ isActive }) => isActive ? 'active' : ''}>
               <IconMeetings /> Все встречи
+            </NavLink>
+            <NavLink to="/admin/storage" className={({ isActive }) => isActive ? 'active' : ''}>
+              <IconStorage /> Хранилище
             </NavLink>
           </>
         )}
