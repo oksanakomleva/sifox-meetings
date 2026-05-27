@@ -185,7 +185,7 @@ async def _record_pipeline(meeting_id: str) -> None:
     audio_path.parent.mkdir(parents=True, exist_ok=True)
 
     sink_name = f"meet_{meeting_id[:8]}"
-    audio_proc: asyncio.subprocess.Process | None = None
+    audio_proc: AudioCapture | None = None
     browser = None
     pw = None
 
@@ -578,35 +578,124 @@ async def _wait_for_meeting_end(page, initial_participants: set[str], scheduled_
 
 # ── Audio capture ─────────────────────────────────────────────────────────────
 
-async def _start_audio_capture(
-    output_path: str, sink_name: str
-) -> asyncio.subprocess.Process:
+class AudioCapture:
+    """Holds parec and ffmpeg subprocesses so we can signal them directly.
+
+    Previously we used create_subprocess_shell("parec | ffmpeg"), which spawned
+    a shell that forwarded signals unreliably — ffmpeg often kept running after
+    the shell exited and wrote silence to the WAV file for days, filling the
+    volume. Running both processes ourselves lets us send SIGINT to each one.
+    """
+
+    def __init__(
+        self,
+        parec: asyncio.subprocess.Process,
+        ffmpeg: asyncio.subprocess.Process,
+        output_path: str,
+    ) -> None:
+        self.parec = parec
+        self.ffmpeg = ffmpeg
+        self.output_path = output_path
+
+    @property
+    def returncode(self) -> int | None:
+        """None while either process is still running — keeps API compatible
+        with the previous `asyncio.subprocess.Process` return type."""
+        if self.parec.returncode is None or self.ffmpeg.returncode is None:
+            return None
+        return self.ffmpeg.returncode
+
+
+async def _start_audio_capture(output_path: str, sink_name: str) -> AudioCapture:
     monitor = f"{sink_name}.monitor"
-    cmd = (
-        f"parec --device={monitor} --format=s16le --rate=16000 --channels=1 "
-        f"| ffmpeg -y -f s16le -ar 16000 -ac 1 -i pipe:0 "
-        f"-acodec pcm_s16le {output_path}"
+
+    # parec → stdout (raw PCM)
+    parec = await asyncio.create_subprocess_exec(
+        "parec",
+        f"--device={monitor}",
+        "--format=s16le",
+        "--rate=16000",
+        "--channels=1",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
     )
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
+
+    # ffmpeg ← stdin (raw PCM) → file (WAV)
+    ffmpeg = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-y",
+        "-f", "s16le",
+        "-ar", "16000",
+        "-ac", "1",
+        "-i", "pipe:0",
+        "-acodec", "pcm_s16le",
+        output_path,
+        stdin=parec.stdout,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
-    return proc
+
+    # Close our copy of parec's stdout so ffmpeg is the only reader —
+    # otherwise parec won't get EPIPE when ffmpeg dies, and vice versa
+    if parec.stdout is not None:
+        parec.stdout.close()
+
+    logger.info(
+        "Audio capture started: parec pid=%s → ffmpeg pid=%s → %s",
+        parec.pid, ffmpeg.pid, output_path,
+    )
+    return AudioCapture(parec, ffmpeg, output_path)
 
 
-async def _stop_audio_capture(proc: asyncio.subprocess.Process) -> None:
+async def _kill_if_alive(proc: asyncio.subprocess.Process, name: str) -> None:
     if proc.returncode is not None:
         return
     try:
-        proc.send_signal(signal.SIGINT)
-        await asyncio.wait_for(proc.wait(), timeout=8.0)
-    except (asyncio.TimeoutError, ProcessLookupError, OSError):
+        proc.kill()
+        await asyncio.wait_for(proc.wait(), timeout=3.0)
+        logger.warning("%s killed (pid=%s)", name, proc.pid)
+    except (ProcessLookupError, OSError):
+        pass
+    except asyncio.TimeoutError:
+        logger.error("%s did not die after SIGKILL (pid=%s)", name, proc.pid)
+
+
+async def _stop_audio_capture(cap: AudioCapture) -> None:
+    """Stop parec first so ffmpeg gets EOF on stdin and finalizes the WAV
+    header cleanly. Then wait for ffmpeg. Hard-kill anything still alive."""
+    # 1. SIGINT parec — it stops capturing and closes its stdout
+    if cap.parec.returncode is None:
         try:
-            proc.terminate()
-            await asyncio.wait_for(proc.wait(), timeout=3.0)
-        except Exception:
+            cap.parec.send_signal(signal.SIGINT)
+        except (ProcessLookupError, OSError):
             pass
+        try:
+            await asyncio.wait_for(cap.parec.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("parec didn't exit on SIGINT — killing (pid=%s)", cap.parec.pid)
+            await _kill_if_alive(cap.parec, "parec")
+
+    # 2. ffmpeg should now see EOF on stdin and exit on its own.
+    #    SIGINT as a hint, then wait, then SIGKILL.
+    if cap.ffmpeg.returncode is None:
+        try:
+            cap.ffmpeg.send_signal(signal.SIGINT)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            await asyncio.wait_for(cap.ffmpeg.wait(), timeout=8.0)
+        except asyncio.TimeoutError:
+            logger.warning("ffmpeg didn't exit on SIGINT — killing (pid=%s)", cap.ffmpeg.pid)
+            await _kill_if_alive(cap.ffmpeg, "ffmpeg")
+
+    # 3. Belt-and-suspenders: make sure neither is alive
+    await _kill_if_alive(cap.parec, "parec")
+    await _kill_if_alive(cap.ffmpeg, "ffmpeg")
+
+    logger.info(
+        "Audio capture stopped: parec rc=%s, ffmpeg rc=%s",
+        cap.parec.returncode, cap.ffmpeg.returncode,
+    )
 
 
 # ── PulseAudio ────────────────────────────────────────────────────────────────
