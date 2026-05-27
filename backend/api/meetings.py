@@ -115,11 +115,15 @@ async def get_audio(meeting_id: str, user: CurrentUser):
     if not os.path.exists(full_path):
         raise HTTPException(404, "Audio file not found on disk")
 
+    # New recordings are MP3; legacy ones may still be WAV.
+    ext = os.path.splitext(meeting["audio_path"])[1].lower() or ".mp3"
+    media_type = "audio/mpeg" if ext == ".mp3" else "audio/wav"
+    download_name = f"meeting-{meeting_id[:8]}{ext}"
     return FileResponse(
         full_path,
-        media_type="audio/wav",
-        filename=f"meeting-{meeting_id[:8]}.wav",
-        headers={"Content-Disposition": f'attachment; filename="meeting-{meeting_id[:8]}.wav"'},
+        media_type=media_type,
+        filename=download_name,
+        headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
     )
 
 

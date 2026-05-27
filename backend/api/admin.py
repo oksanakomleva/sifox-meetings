@@ -334,17 +334,18 @@ async def list_storage(admin: AdminUser):
     except FileNotFoundError:
         return {"files": [], "total_bytes": 0, "audio_dir": audio_dir}
 
-    # Collect file metadata from disk first
+    # Collect file metadata from disk first (both .wav and .mp3)
     raw_files = []
     for fname in entries:
-        if not fname.endswith(".wav"):
+        if not (fname.endswith(".wav") or fname.endswith(".mp3")):
             continue
         fpath = os.path.join(audio_dir, fname)
         try:
             stat = os.stat(fpath)
+            meeting_id = os.path.splitext(fname)[0]
             raw_files.append({
                 "filename": fname,
-                "meeting_id": fname.replace(".wav", ""),
+                "meeting_id": meeting_id,
                 "size_bytes": stat.st_size,
                 "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
             })
@@ -424,21 +425,28 @@ async def list_storage(admin: AdminUser):
 
 @router.delete("/storage/{meeting_id}")
 async def delete_audio_file(meeting_id: str, admin: AdminUser):
-    """Delete a WAV audio file by meeting_id."""
+    """Delete the audio file (.mp3 or .wav) for a meeting."""
     from config import config
 
     # Basic safety: meeting_id should be a UUID-like string, no path traversal
     if "/" in meeting_id or "\\" in meeting_id or ".." in meeting_id:
         raise HTTPException(400, "Invalid meeting_id")
 
-    fpath = os.path.join(config.AUDIO_DIR, f"{meeting_id}.wav")
-    if not os.path.exists(fpath):
+    deleted = []
+    freed = 0
+    for ext in (".mp3", ".wav"):
+        fpath = os.path.join(config.AUDIO_DIR, f"{meeting_id}{ext}")
+        if os.path.exists(fpath):
+            size = os.path.getsize(fpath)
+            os.remove(fpath)
+            deleted.append(f"{meeting_id}{ext}")
+            freed += size
+            logger.info("Admin %s deleted %s (%d bytes)", admin["user_id"], fpath, size)
+
+    if not deleted:
         raise HTTPException(404, "File not found")
 
-    size = os.path.getsize(fpath)
-    os.remove(fpath)
-    logger.info("Admin %s deleted audio file %s (%d bytes)", admin["user_id"], fpath, size)
-    return {"ok": True, "deleted": f"{meeting_id}.wav", "freed_bytes": size}
+    return {"ok": True, "deleted": deleted, "freed_bytes": freed}
 
 
 # ── E2E Testing ───────────────────────────────────────────────────────────────

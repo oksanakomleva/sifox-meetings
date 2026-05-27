@@ -284,7 +284,7 @@ async def _record_pipeline(meeting_id: str) -> None:
         if not audio_path.exists() or audio_path.stat().st_size < 10_000:
             raise RuntimeError(f"Audio file missing or too small: {audio_path}")
 
-        # 8. Transcribe
+        # 8. Transcribe (WAV — Whisper works best on lossless)
         segments = await transcribe_audio(str(audio_path))
         if not segments:
             raise RuntimeError("Empty transcription")
@@ -293,9 +293,32 @@ async def _record_pipeline(meeting_id: str) -> None:
         effective_tl = _effective_speaker_timeline(speaker_timeline, participants)
         transcript_text = _build_transcript(segments, effective_tl)
         await models.save_transcript(meeting_id, transcript_text)
-        await models.save_meeting_audio(
-            meeting_id, audio_filename, audio_path.stat().st_size
-        )
+
+        # 8b. Convert WAV → MP3 (5x smaller — keep for download, drop WAV)
+        mp3_filename = f"{meeting_id}.mp3"
+        mp3_path = Path(config.AUDIO_DIR) / mp3_filename
+        try:
+            wav_size = audio_path.stat().st_size
+            await _convert_wav_to_mp3(audio_path, mp3_path)
+            stored_filename = mp3_filename
+            stored_size = mp3_path.stat().st_size
+            try:
+                audio_path.unlink()
+            except FileNotFoundError:
+                pass
+            logger.info(
+                "Converted %s → %s (%d → %d bytes, %.0f%% smaller)",
+                audio_path.name, mp3_path.name,
+                wav_size, stored_size,
+                100 * (1 - stored_size / max(wav_size, 1)),
+            )
+        except Exception as e:
+            # Conversion failed — keep WAV so audio is at least preserved
+            logger.error("MP3 conversion failed for %s: %s — keeping WAV", meeting_id[:8], e)
+            stored_filename = audio_filename
+            stored_size = audio_path.stat().st_size
+
+        await models.save_meeting_audio(meeting_id, stored_filename, stored_size)
 
         # Save participants
         for p in participants:
@@ -696,6 +719,38 @@ async def _stop_audio_capture(cap: AudioCapture) -> None:
         "Audio capture stopped: parec rc=%s, ffmpeg rc=%s",
         cap.parec.returncode, cap.ffmpeg.returncode,
     )
+
+
+async def _convert_wav_to_mp3(wav_path: Path, mp3_path: Path) -> None:
+    """Convert WAV → MP3 (libmp3lame, 64 kbps mono — plenty for speech).
+
+    16 kHz mono speech at 64 kbps = ~28 MB/hour (vs ~115 MB/hour for WAV).
+    Raises RuntimeError if ffmpeg fails or the output is missing/empty.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-y",
+        "-i", str(wav_path),
+        "-codec:a", "libmp3lame",
+        "-b:a", "64k",
+        "-ac", "1",
+        str(mp3_path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError("ffmpeg wav→mp3 conversion timed out after 10 min")
+
+    if proc.returncode != 0:
+        tail = (stderr.decode(errors="replace") if stderr else "")[-500:]
+        raise RuntimeError(f"ffmpeg exited {proc.returncode}: {tail}")
+
+    if not mp3_path.exists() or mp3_path.stat().st_size < 1000:
+        raise RuntimeError(f"MP3 output missing or too small: {mp3_path}")
 
 
 # ── PulseAudio ────────────────────────────────────────────────────────────────

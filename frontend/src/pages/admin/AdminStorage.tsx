@@ -106,10 +106,12 @@ export default function AdminStorage() {
               </thead>
               <tbody>
                 {files.map((f, i) => {
-                  const short = f.meeting_id.slice(0, 8) + '…' + f.meeting_id.slice(-8)
+                  const ext = f.filename.endsWith('.mp3') ? '.mp3' : '.wav'
+                  const short = f.meeting_id.slice(0, 8) + '…' + f.meeting_id.slice(-8) + ext
                   const isConfirming = confirmId === f.meeting_id
                   const isDeleting = deleting === f.meeting_id
-                  const isLarge = f.size_bytes > 1024 ** 3  // > 1 ГБ — подозрительный
+                  // .wav > 1 ГБ — подозрительная зависшая запись; mp3 такого размера не бывает
+                  const isLarge = ext === '.wav' && f.size_bytes > 1024 ** 3
 
                   return (
                     <tr
@@ -129,7 +131,7 @@ export default function AdminStorage() {
                               {f.title || <span style={{ color: 'var(--color-text-secondary)', fontStyle: 'italic' }}>Без названия</span>}
                             </div>
                             <code style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-text-secondary)' }}>
-                              {short}.wav
+                              {short}
                             </code>
                           </div>
                         </div>
