@@ -267,11 +267,12 @@ async def sync_user_events(user_id: int) -> None:
         await models.save_google_token(user_id, r["access_token"], None, r["expiry"])
 
     for ev in events:
-        # Upsert meeting (dedup by URL)
+        # Upsert meeting (dedup by google_event_id — one row per occurrence)
         meeting = await models.upsert_meeting(
             meeting_url=ev["url"],
             title=ev["title"],
             start_time=ev["start"],
+            google_event_id=ev["google_id"],
         )
         # Link calendar event to meeting (with attendees)
         await models.link_calendar_event_to_meeting(

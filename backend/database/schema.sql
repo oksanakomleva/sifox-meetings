@@ -158,3 +158,37 @@ BEGIN
         END IF;
     END LOOP;
 END $$;
+
+-- ── Migration: per-occurrence meetings keyed by google_event_id ───────────────
+-- Previously meetings were deduped by meeting_url (UNIQUE). That broke recurring
+-- meetings and any case where several distinct events reuse one permanent Telemost
+-- room: occurrences collapsed into a single row and overwrote each other's
+-- recording/transcript/summary. We now key calendar meetings by google_event_id
+-- (each occurrence is a unique event via singleEvents=True), so every occurrence is
+-- its own row and nothing is overwritten.
+
+-- 1. Add the column (nullable: manual/non-calendar meetings keep it NULL).
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS google_event_id TEXT;
+
+-- 2. Backfill existing rows from their calendar link. A recurring meeting that was
+--    collapsed into one row has many links; take the most recent one so the row
+--    stays attached to its latest synced occurrence and is not duplicated on the
+--    next sync. Same google_event_id always maps to one meeting (old URL-dedup
+--    invariant), so this cannot create duplicate google_event_id values.
+UPDATE meetings m
+SET google_event_id = sub.google_event_id
+FROM (
+    SELECT DISTINCT ON (l.meeting_id) l.meeting_id, l.google_event_id
+    FROM calendar_meeting_links l
+    ORDER BY l.meeting_id, l.created_at DESC
+) sub
+WHERE sub.meeting_id = m.id AND m.google_event_id IS NULL;
+
+-- 3. Drop the UNIQUE constraint on meeting_url (auto-named meetings_meeting_url_key).
+--    A permanent Telemost room may now back many meetings. The non-unique
+--    idx_meetings_url index is kept for lookups.
+ALTER TABLE meetings DROP CONSTRAINT IF EXISTS meetings_meeting_url_key;
+
+-- 4. New dedup key: partial unique index on google_event_id (ON CONFLICT target).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_meetings_google_event_id
+    ON meetings(google_event_id) WHERE google_event_id IS NOT NULL;

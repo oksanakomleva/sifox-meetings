@@ -361,58 +361,67 @@ async def upsert_meeting(
     meeting_url: str,
     title: str,
     start_time: datetime,
+    google_event_id: str | None = None,
 ) -> dict[str, Any]:
-    """Insert or get existing meeting by URL. Returns meeting row."""
+    """Insert or update a meeting.
+
+    Calendar meetings are deduplicated by ``google_event_id`` — each calendar
+    occurrence (unique via singleEvents=True) gets its own row, so recurring
+    meetings and permanent Telemost rooms reused across events never overwrite
+    each other. Manual meetings (no calendar event) just insert a fresh row.
+
+    Returns the meeting row.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO meetings (meeting_url, title, start_time)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (meeting_url) DO UPDATE
-              SET title = COALESCE(EXCLUDED.title, meetings.title),
-                  updated_at = NOW(),
-                  -- Always update start_time for pending meetings so the bot picks up
-                  -- the new occurrence immediately (e.g. E2E test reusing a permanent URL).
-                  -- For recording/transcribing/analyzing, keep start_time as-is.
-                  start_time = CASE
-                    WHEN meetings.status IN ('pending', 'error', 'done')
-                    THEN EXCLUDED.start_time
-                    ELSE meetings.start_time
-                  END,
-                  -- Reset error/done meetings to pending for new/current occurrences.
-                  -- Also reset pending meetings whose start_time changed to a new day
-                  -- (handles permanent Telemost rooms reused across calendar events).
-                  status = CASE
-                    WHEN meetings.status IN ('error', 'done')
-                         AND (
-                           EXCLUDED.start_time::date != meetings.start_time::date
-                           OR EXCLUDED.start_time > NOW()
-                         )
-                    THEN 'pending'
-                    ELSE meetings.status
-                  END,
-                  error_message = CASE
-                    WHEN meetings.status IN ('error', 'done')
-                         AND (
-                           EXCLUDED.start_time::date != meetings.start_time::date
-                           OR EXCLUDED.start_time > NOW()
-                         )
-                    THEN NULL
-                    ELSE meetings.error_message
-                  END
-            RETURNING *
-            """,
-            meeting_url, title, start_time,
-        )
+        if google_event_id:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO meetings (meeting_url, title, start_time, google_event_id)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (google_event_id) WHERE google_event_id IS NOT NULL
+                DO UPDATE
+                  SET title = COALESCE(EXCLUDED.title, meetings.title),
+                      meeting_url = EXCLUDED.meeting_url,
+                      updated_at = NOW(),
+                      -- Keep the start_time fresh while still pending (event may be
+                      -- rescheduled). Once recording/done, freeze it so re-syncing
+                      -- the same occurrence never disturbs an in-flight or finished
+                      -- recording.
+                      start_time = CASE
+                        WHEN meetings.status = 'pending'
+                        THEN EXCLUDED.start_time
+                        ELSE meetings.start_time
+                      END
+                RETURNING *
+                """,
+                meeting_url, title, start_time, google_event_id,
+            )
+        else:
+            # Manual / non-calendar meeting: no dedup key, always a new row.
+            row = await conn.fetchrow(
+                """
+                INSERT INTO meetings (meeting_url, title, start_time)
+                VALUES ($1, $2, $3)
+                RETURNING *
+                """,
+                meeting_url, title, start_time,
+            )
     return dict(row)
 
 
 async def get_meeting_by_url(meeting_url: str) -> dict[str, Any] | None:
     pool = await get_pool()
     async with pool.acquire() as conn:
+        # meeting_url is no longer unique (one Telemost room can back many
+        # meetings), so return the most recently created match.
         row = await conn.fetchrow(
-            "SELECT id, title, status, start_time FROM meetings WHERE meeting_url = $1",
+            """
+            SELECT id, title, status, start_time FROM meetings
+            WHERE meeting_url = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
             meeting_url,
         )
     return dict(row) if row else None
