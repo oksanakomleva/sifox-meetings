@@ -630,38 +630,48 @@ class AudioCapture:
 
 
 async def _start_audio_capture(output_path: str, sink_name: str) -> AudioCapture:
+    """Spawn parec and ffmpeg connected by a raw OS pipe.
+
+    We can't pass parec.stdout (an asyncio StreamReader) to ffmpeg's stdin —
+    asyncio tries to fileno() it and fails. So we open the pipe ourselves with
+    os.pipe(), hand the write end to parec and the read end to ffmpeg, and
+    close our copies in the parent so the OS knows the pipe has exactly one
+    writer and one reader (clean EOF propagation when parec exits).
+    """
     monitor = f"{sink_name}.monitor"
+    read_fd, write_fd = os.pipe()
 
-    # parec → stdout (raw PCM)
-    parec = await asyncio.create_subprocess_exec(
-        "parec",
-        f"--device={monitor}",
-        "--format=s16le",
-        "--rate=16000",
-        "--channels=1",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
+    try:
+        parec = await asyncio.create_subprocess_exec(
+            "parec",
+            f"--device={monitor}",
+            "--format=s16le",
+            "--rate=16000",
+            "--channels=1",
+            stdout=write_fd,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    finally:
+        # Parent no longer needs the write end; parec inherited it
+        os.close(write_fd)
 
-    # ffmpeg ← stdin (raw PCM) → file (WAV)
-    ffmpeg = await asyncio.create_subprocess_exec(
-        "ffmpeg",
-        "-y",
-        "-f", "s16le",
-        "-ar", "16000",
-        "-ac", "1",
-        "-i", "pipe:0",
-        "-acodec", "pcm_s16le",
-        output_path,
-        stdin=parec.stdout,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-
-    # Close our copy of parec's stdout so ffmpeg is the only reader —
-    # otherwise parec won't get EPIPE when ffmpeg dies, and vice versa
-    if parec.stdout is not None:
-        parec.stdout.close()
+    try:
+        ffmpeg = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-y",
+            "-f", "s16le",
+            "-ar", "16000",
+            "-ac", "1",
+            "-i", "pipe:0",
+            "-acodec", "pcm_s16le",
+            output_path,
+            stdin=read_fd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    finally:
+        # Parent no longer needs the read end; ffmpeg inherited it
+        os.close(read_fd)
 
     logger.info(
         "Audio capture started: parec pid=%s → ffmpeg pid=%s → %s",
