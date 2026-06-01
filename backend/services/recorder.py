@@ -161,7 +161,16 @@ async def start_recording(meeting_id: str) -> None:
 
     claimed = await models.claim_meeting_for_recording(meeting_id)
     if not claimed:
-        logger.info("Meeting %s already claimed by another worker", meeting_id)
+        # Either claimed by another worker, or a duplicate calendar event for a
+        # Telemost room that is already being recorded. Mark duplicates so they
+        # don't linger as pending and later join an already-finished meeting.
+        if await models.mark_duplicate_if_sibling_active(meeting_id):
+            logger.info(
+                "Meeting %s is a duplicate of an active/recent recording for the "
+                "same Telemost room — skipped", meeting_id[:8],
+            )
+        else:
+            logger.info("Meeting %s already claimed by another worker", meeting_id)
         return
 
     task = asyncio.create_task(

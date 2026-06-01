@@ -431,6 +431,14 @@ async def claim_meeting_for_recording(meeting_id: str) -> bool:
     """
     Atomically claim a pending meeting for recording.
     Returns True if successfully claimed, False if already taken.
+
+    Refuses the claim if another meeting sharing the same Telemost URL is
+    already being recorded/processed (or was just recorded) within a 15-minute
+    window. This prevents sending several protocallers into the same room when
+    two calendar events point at one permanent Telemost link (e.g. a recurring
+    series plus a manually duplicated event). Genuinely different meetings that
+    reuse a room are normally scheduled far apart, so the window leaves them
+    untouched.
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -438,6 +446,43 @@ async def claim_meeting_for_recording(meeting_id: str) -> bool:
             """
             UPDATE meetings SET status = 'recording', updated_at = NOW()
             WHERE id = $1 AND status = 'pending'
+              AND NOT EXISTS (
+                  SELECT 1 FROM meetings o
+                  WHERE o.meeting_url = meetings.meeting_url
+                    AND o.id <> meetings.id
+                    AND o.status IN ('recording', 'transcribing', 'analyzing', 'done')
+                    AND abs(extract(epoch FROM (o.start_time - meetings.start_time))) < 900
+              )
+            """,
+            meeting_id,
+        )
+    return result == "UPDATE 1"
+
+
+async def mark_duplicate_if_sibling_active(meeting_id: str) -> bool:
+    """
+    Mark a pending meeting as a duplicate (status='error') if another meeting
+    with the same Telemost URL is already recording/processing/done within a
+    15-minute window. Keeps duplicate calendar events for one room from
+    lingering as pending and later sending a lone protocaller into an
+    already-finished meeting. Returns True if it was marked.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE meetings m
+            SET status = 'error',
+                error_message = 'Дубль звонка: запись для этой ссылки уже идёт или сделана',
+                updated_at = NOW()
+            WHERE m.id = $1 AND m.status = 'pending'
+              AND EXISTS (
+                  SELECT 1 FROM meetings o
+                  WHERE o.meeting_url = m.meeting_url
+                    AND o.id <> m.id
+                    AND o.status IN ('recording', 'transcribing', 'analyzing', 'done')
+                    AND abs(extract(epoch FROM (o.start_time - m.start_time))) < 900
+              )
             """,
             meeting_id,
         )
