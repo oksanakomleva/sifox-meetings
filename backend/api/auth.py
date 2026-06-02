@@ -223,14 +223,27 @@ async def preview_session(token: str):
 
 @router.get("/exit-preview")
 async def exit_preview(
+    session_token: Annotated[str | None, Cookie(alias="session")] = None,
     preview_token: Annotated[str | None, Cookie(alias="preview")] = None,
 ):
-    """Leave preview mode: drop the preview session/cookie and return to the
-    admin's own (still-active) session."""
+    """Leave preview mode.
+
+    New flow: the preview lives in a separate `preview` cookie — clear it and the
+    admin's real `session` cookie restores them with no re-login.
+
+    Legacy/edge: older builds put the preview session into the main `session`
+    cookie itself (overwriting the admin session). If we detect that, clear it too
+    so the user isn't stuck — they'll land on login and sign back in as themselves.
+    """
+    redirect = RedirectResponse(f"{config.BASE_URL}/")
     if preview_token:
         await models.delete_session(preview_token)
-    redirect = RedirectResponse(f"{config.BASE_URL}/")
-    redirect.delete_cookie("preview", path="/")
+        redirect.delete_cookie("preview", path="/")
+    if session_token:
+        s = await models.get_session(session_token)
+        if s and s.get("is_preview"):
+            await models.delete_session(session_token)
+            redirect.delete_cookie("session", path="/")
     return redirect
 
 
