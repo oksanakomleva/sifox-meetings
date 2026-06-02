@@ -203,11 +203,13 @@ async def me(
 @router.get("/preview/{token}")
 async def preview_session(token: str):
     """
-    Admin-generated preview link — sets a session cookie for the test user
-    and redirects to the homepage. Open in incognito to see the UI as a regular user.
+    Admin-generated preview link — sets a session cookie that impersonates a
+    real user and redirects to the homepage. Open in incognito to see the UI as
+    that user. Only sessions flagged is_preview can be activated this way, so a
+    leaked real login token can't be turned into a session via this endpoint.
     """
     session = await models.get_session(token)
-    if not session or session["email"] != "preview@sifox.local":
+    if not session or not session.get("is_preview"):
         raise HTTPException(400, "Invalid or expired preview link")
 
     redirect = RedirectResponse(f"{config.BASE_URL}/")

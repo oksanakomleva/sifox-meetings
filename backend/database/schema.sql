@@ -16,10 +16,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     id         TEXT PRIMARY KEY,         -- random token
     user_id    BIGINT REFERENCES users(id) ON DELETE CASCADE,
     expires_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    is_preview BOOLEAN NOT NULL DEFAULT FALSE  -- admin "view as user" impersonation
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+-- Migration: add is_preview to existing sessions tables
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_preview BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- ── Google Calendar tokens (per user, for calendar sync) ─────────────────────
 CREATE TABLE IF NOT EXISTS google_tokens (

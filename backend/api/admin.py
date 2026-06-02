@@ -219,40 +219,31 @@ async def delete_invitation(invitation_id: int, admin: AdminUser):
 
 # ── Preview as regular user ───────────────────────────────────────────────────
 
-@router.post("/preview-session")
-async def create_preview_session(admin: AdminUser):
+@router.post("/users/{user_id}/preview-session")
+async def create_preview_session(user_id: int, admin: AdminUser):
     """
-    Create a short-lived session for a non-admin test account.
-    Returns a one-time URL — open in incognito to see the UI as a regular user.
+    Create a short-lived session that impersonates a REAL user, to preview the
+    app exactly as they see it. Returns a one-time URL — open in incognito.
+
+    Restricted to non-admin users: a preview link for an admin would effectively
+    be an admin-access link, and admins already see everything anyway.
     """
-    from database.connection import get_pool
     from config import config as app_config
-    import secrets
 
-    pool = await get_pool()
+    target = await models.get_user_by_id(user_id)
+    if not target:
+        raise HTTPException(404, "User not found")
+    if target.get("is_admin"):
+        raise HTTPException(400, "Preview доступен только для не-админов")
 
-    # Upsert a persistent test user (not admin, no Google account needed)
-    async with pool.acquire() as conn:
-        test_user = await conn.fetchrow(
-            """
-            INSERT INTO users (google_id, email, name, avatar_url, is_admin, last_login)
-            VALUES ('__preview__', 'preview@sifox.local', 'Тестовый пользователь', NULL, FALSE, NOW())
-            ON CONFLICT (google_id) DO UPDATE
-              SET last_login = NOW()
-            RETURNING id
-            """
-        )
-        user_id = test_user["id"]
-
-        # Short-lived session: 1 hour
-        token = secrets.token_urlsafe(32)
-        await conn.execute(
-            "INSERT INTO sessions (id, user_id, expires_at) VALUES ($1, $2, NOW() + interval '1 hour')",
-            token, user_id,
-        )
-
+    token = await models.create_preview_session(user_id)
     url = f"{app_config.BASE_URL}/api/auth/preview/{token}"
-    return {"ok": True, "url": url, "expires_in": "1 hour"}
+    return {
+        "ok": True,
+        "url": url,
+        "user": {"id": target["id"], "name": target.get("name"), "email": target["email"]},
+        "expires_in": "1 hour",
+    }
 
 
 # ── Maintenance ───────────────────────────────────────────────────────────────

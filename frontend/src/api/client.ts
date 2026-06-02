@@ -102,8 +102,9 @@ export const api = {
       }),
     deleteInvitation: (id: number) =>
       request<void>(`/admin/invitations/${id}`, { method: 'DELETE' }),
-    createPreviewSession: () =>
-      request<{ ok: boolean; url: string; expires_in: string }>('/admin/preview-session', { method: 'POST' }),
+    previewAsUser: (userId: number) =>
+      request<{ ok: boolean; url: string; user: { id: number; name: string | null; email: string }; expires_in: string }>(
+        `/admin/users/${userId}/preview-session`, { method: 'POST' }),
     storage: () =>
       request<{ files: StorageFile[]; total_bytes: number; audio_dir: string }>('/admin/storage'),
     deleteAudioFile: (meetingId: string) =>

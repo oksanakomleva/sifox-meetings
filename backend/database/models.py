@@ -82,6 +82,22 @@ async def create_session(user_id: int, ttl_days: int = 30) -> str:
     return token
 
 
+async def create_preview_session(user_id: int, ttl_hours: int = 1) -> str:
+    """Short-lived session flagged as a preview (admin 'view as user'). The flag
+    lets the public /auth/preview activator accept it while refusing real
+    login sessions."""
+    import secrets
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO sessions (id, user_id, expires_at, is_preview) VALUES ($1, $2, $3, TRUE)",
+            token, user_id, expires_at,
+        )
+    return token
+
+
 async def get_session(token: str) -> dict[str, Any] | None:
     pool = await get_pool()
     async with pool.acquire() as conn:
