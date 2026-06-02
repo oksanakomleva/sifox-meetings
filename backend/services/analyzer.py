@@ -9,18 +9,44 @@ from config import config
 logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="analyzer")
 
-_TAGGING_PROMPT = """Ты — AI-ассистент для анализа рабочих встреч компании Sifox.
+def normalize_tags(tags) -> list[str]:
+    """Canonical form for tags from any source (AI or manual user input):
+    lowercase, trimmed, '#' stripped, de-duplicated, empties dropped. Internal
+    spaces are kept so multi-word customer/project names survive."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tags or []:
+        if not isinstance(t, str):
+            continue
+        norm = t.strip().lstrip("#").strip().lower()
+        norm = " ".join(norm.split())  # collapse internal whitespace
+        if norm and norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+    return out[:15]
 
-Определи:
-1. Тип встречи (одно из: sales / internal / planning / review / interview / partner / other)
-2. Краткую тему (1 строка)
-3. Список тегов (3–7 штук, строчными буквами, без # и пробелов, через запятую)
 
-Формат ответа — строго JSON:
-{"type": "...", "topic": "...", "tags": ["...", "..."]}
-
-Транскрипт:
-{transcript}"""
+def _build_tagging_prompt(transcript: str, title: str | None, known_tags: list[str]) -> str:
+    title_str = (title or "").strip() or "(без названия)"
+    known_block = ", ".join(known_tags) if known_tags else "(пока нет)"
+    return (
+        "Ты — AI-ассистент для анализа рабочих встреч компании Sifox.\n\n"
+        "На основе НАЗВАНИЯ встречи и транскрипта определи:\n"
+        "1. Тип встречи (одно из: sales / internal / planning / review / interview / partner / other)\n"
+        "2. Краткую тему (1 строка)\n"
+        "3. Теги (1–5 штук).\n\n"
+        "Правила для тегов:\n"
+        "- Тег — это В ПЕРВУЮ ОЧЕРЕДЬ заказчик/клиент, проект или продукт, о котором идёт речь. "
+        "Не добавляй мелкие детали, общие слова и обозначения процесса (например «звонок», «обсуждение», «работа»).\n"
+        "- Если заказчик/проект/продукт указан в НАЗВАНИИ встречи, но не назван вслух — всё равно поставь его тегом.\n"
+        "- Теги строчными буквами.\n"
+        f"- Уже использованные ранее теги: {known_block}.\n"
+        "  Если какой-то из них подходит по смыслу — используй ИМЕННО его (тот же текст), а не синоним. "
+        "Новый тег создавай, только если ни один существующий не подходит.\n\n"
+        f"Название встречи: {title_str}\n\n"
+        'Формат ответа — строго JSON: {"type": "...", "topic": "...", "tags": ["...", "..."]}\n\n'
+        f"Транскрипт:\n{transcript}"
+    )
 
 _PROTOCOL_PROMPTS = {
     "sales": """Ты — AI-ассистент. Составь протокол встречи с клиентом/партнёром по продажам.
@@ -88,36 +114,50 @@ _PROTOCOL_PROMPTS = {
 }
 
 
-def _analyze_sync(transcript: str) -> dict:
+def _analyze_sync(transcript: str, title: str | None, known_tags: list[str]) -> dict:
     from openai import OpenAI
 
     client = OpenAI(api_key=config.OPENAI_API_KEY)
 
-    # Step 1: tagging
+    # Cap transcript for both steps as a safety bound on the context window.
+    capped = transcript
+    if len(capped) > config.CHAT_MAX_CONTEXT_CHARS:
+        capped = capped[:config.CHAT_MAX_CONTEXT_CHARS]
+
+    # Step 1: tagging — sees the full transcript + the meeting title + the
+    # vocabulary of already-used tags (so it reuses them instead of inventing
+    # synonyms). Uses CHAT_MODEL for the large context window.
     tag_resp = client.chat.completions.create(
-        model=config.OPENAI_MODEL,
+        model=config.CHAT_MODEL,
         messages=[{
             "role": "user",
-            "content": _TAGGING_PROMPT.replace("{transcript}", transcript[:4000]),
+            "content": _build_tagging_prompt(capped, title, known_tags),
         }],
         response_format={"type": "json_object"},
-        max_tokens=200,
+        max_tokens=300,
         temperature=0.2,
     )
     meta = json.loads(tag_resp.choices[0].message.content)
     meeting_type = meta.get("type", "other")
     topic = meta.get("topic", "")
-    tags = meta.get("tags", [])
+    tags = normalize_tags(meta.get("tags", []))
 
-    # Step 2: protocol
+    if len(transcript) > config.CHAT_MAX_CONTEXT_CHARS:
+        logger.warning(
+            "analyzer: transcript %d chars > cap %d, truncating",
+            len(transcript), config.CHAT_MAX_CONTEXT_CHARS,
+        )
+
+    # Step 2: protocol — feed the FULL transcript (with speaker labels) via
+    # CHAT_MODEL (large context window) so long meetings fit.
     system_prompt = _PROTOCOL_PROMPTS.get(meeting_type, _PROTOCOL_PROMPTS["other"])
     proto_resp = client.chat.completions.create(
-        model=config.OPENAI_MODEL,
+        model=config.CHAT_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Транскрипт встречи:\n{transcript[:8000]}"},
+            {"role": "user", "content": f"Транскрипт встречи:\n{capped}"},
         ],
-        max_tokens=2000,
+        max_tokens=2500,
         temperature=0.3,
     )
     summary = proto_resp.choices[0].message.content.strip()
@@ -130,6 +170,11 @@ def _analyze_sync(transcript: str) -> dict:
     }
 
 
-async def analyze_meeting(transcript: str) -> dict:
+async def analyze_meeting(transcript: str, title: str | None = None) -> dict:
+    # Fetch the existing tag vocabulary here (async) so the model can reuse tags.
+    from database import models
+    known_tags = await models.get_known_tags()
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_executor, _analyze_sync, transcript)
+    return await loop.run_in_executor(
+        _executor, _analyze_sync, transcript, title, known_tags
+    )

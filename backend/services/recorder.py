@@ -136,7 +136,10 @@ async def _recover_analyze(meeting_id: str, transcript_text: str) -> None:
     """Resume pipeline from analysis step after interrupted deploy."""
     try:
         await models.update_meeting_status(meeting_id, "analyzing")
-        analysis = await analyze_meeting(transcript_text)
+        _m = await models.get_meeting(meeting_id)
+        analysis = await analyze_meeting(
+            transcript_text, _m.get("title") if _m else None
+        )
         await models.save_analysis(
             meeting_id,
             summary=analysis["summary"],
@@ -260,9 +263,24 @@ async def _record_pipeline(meeting_id: str) -> None:
         t0 = time.monotonic()
 
         async def track_speakers():
+            dumped = False
             while True:
                 await asyncio.sleep(1)
                 try:
+                    if not dumped:
+                        # One-shot: log a sample speaker tile so we can confirm the
+                        # (obfuscated) DOM structure and that avatar stripping works.
+                        try:
+                            sample = await page.evaluate(
+                                "() => { const e = document.querySelector("
+                                "\"div[class*='rootStroke'], div[class*='speaking']\");"
+                                " return e ? e.outerHTML.slice(0, 1500) : null; }"
+                            )
+                            if sample:
+                                dumped = True
+                                logger.info("Speaker tile DOM sample %s: %s", meeting_id[:8], sample)
+                        except Exception:
+                            pass
                     speakers = await _get_active_speakers(page)
                     for sp in speakers:
                         t = time.monotonic() - t0
@@ -337,7 +355,7 @@ async def _record_pipeline(meeting_id: str) -> None:
 
         # 9. Analyze
         await models.update_meeting_status(meeting_id, "analyzing")
-        analysis = await analyze_meeting(transcript_text)
+        analysis = await analyze_meeting(transcript_text, meeting.get("title"))
         await models.save_analysis(
             meeting_id,
             summary=analysis["summary"],
@@ -508,52 +526,70 @@ def _is_real_name(text: str) -> bool:
     return True
 
 
-async def _get_participant_names(page) -> set[str]:
-    try:
-        # Try specific participant list selectors first
-        for selector in [
-            "div[class*='ParticipantName']",
-            "div[class*='participant-name']",
-            "span[class*='participant-name']",
-            "div[class*='MemberName']",
-            "div[data-testid*='participant'] span",
-        ]:
-            elements = await page.locator(selector).all()
-            if elements:
-                names = set()
-                for el in elements:
-                    text = (await el.text_content() or "").strip()
-                    if _is_real_name(text) and text != "Protocaller":
-                        names.add(text)
-                if names:
-                    return names
+# Reads names straight from the DOM WITHOUT the avatar. A participant tile holds
+# an avatar (which, with no profile photo, renders the initials e.g. "АС") next
+# to the name label. Reading the tile's whole textContent glued them into
+# "АСАлександр Сажин". Here we instead prefer the clean data-name attribute and,
+# failing that, strip avatar/image subtrees before reading text — so only the
+# name label remains. Same extractor is used for participants and speakers so
+# their names stay consistent (the speaker timeline maps onto participants).
+_EXTRACT_NAMES_JS = r"""
+(selectors) => {
+  const DROP = 'img, svg, [aria-hidden="true"], [class*="avatar" i], '
+             + '[class*="initial" i], [class*="userpic" i], [class*="photo" i], '
+             + '[class*="picture" i]';
+  const seen = new Set();
+  const out = [];
+  function nameOf(el) {
+    const dn = (el.getAttribute && (el.getAttribute('data-name') || '')).trim();
+    if (dn) return dn;                       // clean attribute wins
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll(DROP).forEach(n => n.remove());  // drop the avatar
+    return (clone.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+  for (const sel of selectors) {
+    document.querySelectorAll(sel).forEach(el => {
+      const name = nameOf(el);
+      if (name && !seen.has(name)) { seen.add(name); out.push(name); }
+    });
+  }
+  return out;
+}
+"""
 
-        # Fallback: broader selector with strict filtering
-        elements = await page.locator(
-            "div[class*='participant'], div[class*='member']"
-        ).all()
-        names = set()
-        for el in elements:
-            text = (await el.text_content() or "").strip()
-            if _is_real_name(text) and text != "Protocaller":
-                names.add(text)
-        return names
+
+async def _extract_names(page, selectors: list[str]) -> list[str]:
+    try:
+        return await page.evaluate(_EXTRACT_NAMES_JS, selectors)
     except Exception:
-        return set()
+        return []
+
+
+async def _get_participant_names(page) -> set[str]:
+    primary = [
+        "div[class*='ParticipantName']",
+        "div[class*='participant-name']",
+        "span[class*='participant-name']",
+        "div[class*='MemberName']",
+        "div[data-testid*='participant'] span",
+    ]
+    names = {
+        n for n in await _extract_names(page, primary)
+        if _is_real_name(n) and n != "Protocaller"
+    }
+    if names:
+        return names
+    # Fallback: broader tile selector (includes avatar — extractor strips it)
+    fallback = ["div[class*='participant']", "div[class*='member']"]
+    return {
+        n for n in await _extract_names(page, fallback)
+        if _is_real_name(n) and n != "Protocaller"
+    }
 
 
 async def _get_active_speakers(page) -> list[str]:
-    try:
-        elements = await page.locator("div[class*='rootStroke'], div[class*='speaking']").all()
-        speakers = []
-        for el in elements:
-            name = await el.get_attribute("data-name") or await el.text_content() or ""
-            name = name.strip()
-            if name and name != "Protocaller":
-                speakers.append(name)
-        return speakers
-    except Exception:
-        return []
+    names = await _extract_names(page, ["div[class*='rootStroke']", "div[class*='speaking']"])
+    return [n for n in names if n and n != "Protocaller"]
 
 
 async def _wait_for_meeting_end(page, initial_participants: set[str], scheduled_start=None) -> None:
@@ -816,6 +852,47 @@ def _effective_speaker_timeline(
     return []
 
 
+def _speaker_for_segment(
+    start: float,
+    end: float,
+    timeline: list[tuple[float, str]],
+) -> str:
+    """Speaker covering the LARGEST share of [start, end] per the timeline.
+
+    The active-speaker timeline is polled ~once per second, so it lags reality
+    by up to ~1s; a Whisper segment can also span a real speaker change. Picking
+    the speaker with the most overlap over the whole segment is far more robust
+    than reading the instantaneous speaker at seg.start. Falls back to 'Участник'.
+    """
+    if not timeline:
+        return "Участник"
+
+    durations: dict[str, float] = {}
+    # Time before the first recorded speaker event has no known speaker.
+    first_ts = timeline[0][0]
+    if start < first_ts:
+        durations["Участник"] = max(0.0, min(end, first_ts) - start)
+
+    n = len(timeline)
+    for i in range(n):
+        ts, name = timeline[i]
+        seg_from = max(start, ts)
+        seg_to = end if i == n - 1 else min(end, timeline[i + 1][0])
+        if seg_to > seg_from:
+            durations[name] = durations.get(name, 0.0) + (seg_to - seg_from)
+
+    if not durations:
+        # Zero-length segment — fall back to the instantaneous speaker at start.
+        speaker = "Участник"
+        for ts, name in reversed(timeline):
+            if start >= ts:
+                speaker = name
+                break
+        return speaker
+
+    return max(durations, key=durations.get)
+
+
 def _build_transcript(segments, speaker_timeline: list[tuple[float, str]]) -> str:
     """
     Build transcript merging consecutive segments from the same speaker
@@ -827,15 +904,13 @@ def _build_transcript(segments, speaker_timeline: list[tuple[float, str]]) -> st
     if not segments:
         return ""
 
-    # Assign a speaker label to every Whisper segment
-    labeled: list[tuple[object, str]] = []
-    for seg in segments:
-        speaker = "Участник"
-        for ts, name in reversed(speaker_timeline):
-            if seg.start >= ts:
-                speaker = name
-                break
-        labeled.append((seg, speaker))
+    # Label every Whisper segment by majority overlap with the speaker timeline
+    # (robust to the ~1s polling lag and to segments spanning a speaker change),
+    # not by the instantaneous speaker at seg.start.
+    labeled: list[tuple[object, str]] = [
+        (seg, _speaker_for_segment(seg.start, seg.end, speaker_timeline))
+        for seg in segments
+    ]
 
     # Merge consecutive same-speaker segments with short gaps into one block
     blocks: list[tuple[float, str, str]] = []  # (start_time, speaker, text)

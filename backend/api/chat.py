@@ -27,31 +27,65 @@ async def chat_stream(req: ChatRequest, user: CurrentUser):
     """SSE streaming chat response."""
     user_id = user["user_id"]
 
-    # Build context from meetings
+    # Build context from FULL transcripts (with speaker labels), no protocols.
+    # Bounded by a character budget so we never blow the model's context window.
+    max_chars = config.CHAT_MAX_CONTEXT_CHARS
     context_parts = []
+    notice = ""
+
     if req.meeting_id:
+        # Per-meeting chat: the whole transcript; truncate only if it doesn't fit.
         meeting = await _get_accessible_meeting(req.meeting_id, user)
-        if meeting.get("transcript"):
+        transcript = meeting.get("transcript")
+        if transcript:
+            if len(transcript) > max_chars:
+                transcript = transcript[:max_chars]
+                notice = " (Транскрипт очень длинный — включена только его часть.)"
             context_parts.append(
                 f"Встреча: {meeting.get('title', 'Без названия')}\n"
                 f"Дата: {meeting.get('start_time', '')}\n"
-                f"Транскрипт:\n{meeting['transcript'][:8000]}"
+                f"Транскрипт (с разбивкой по участникам):\n{transcript}"
             )
-        if meeting.get("summary"):
-            context_parts.append(f"Протокол:\n{meeting['summary'][:3000]}")
     else:
-        # Global chat — use summaries of all accessible meetings
+        # Global chat: full transcripts of all accessible meetings in the last
+        # CHAT_CONTEXT_DAYS days, newest first, packed up to the char budget.
         if user["is_admin"]:
-            meetings = await models.get_all_meetings(limit=30)
+            meetings = await models.get_recent_meetings_with_transcripts(
+                days=config.CHAT_CONTEXT_DAYS
+            )
         else:
-            meetings = await models.get_meetings_for_user(user_id, limit=30)
+            meetings = await models.get_recent_meetings_with_transcripts_for_user(
+                user_id, days=config.CHAT_CONTEXT_DAYS
+            )
 
-        for m in meetings[:10]:
-            if m.get("summary"):
-                context_parts.append(
-                    f"Встреча «{m.get('topic') or m.get('title', 'Без названия')}» "
-                    f"({m.get('start_time', '')}):\n{m['summary'][:1000]}"
-                )
+        used = 0
+        included = 0
+        for m in meetings:
+            transcript = m.get("transcript")
+            if not transcript:
+                continue
+            block = (
+                f"Встреча «{m.get('topic') or m.get('title') or 'Без названия'}» "
+                f"({m.get('start_time', '')}):\n{transcript}"
+            )
+            if used + len(block) <= max_chars:
+                context_parts.append(block)
+                used += len(block)
+                included += 1
+            elif included == 0:
+                # Even the most recent meeting alone exceeds the budget — truncate it.
+                context_parts.append(block[:max_chars])
+                included += 1
+                break
+            else:
+                break  # newest-first; remaining meetings are older, stop here
+
+        dropped = len(meetings) - included
+        if dropped > 0:
+            notice = (
+                f" (За {config.CHAT_CONTEXT_DAYS} дн. транскриптов больше, чем помещается "
+                f"в контекст; {dropped} самых старых встреч не включено.)"
+            )
 
     context = "\n\n---\n\n".join(context_parts) if context_parts else "Нет доступных данных о встречах."
 
@@ -64,10 +98,12 @@ async def chat_stream(req: ChatRequest, user: CurrentUser):
             "role": "system",
             "content": (
                 "Ты помощник, отвечающий на вопросы о рабочих встречах компании Sifox. "
-                "Отвечай на русском языке, кратко и по делу. "
-                "Используй только информацию из предоставленного контекста.\n\n"
+                "В контексте — полные транскрипты встреч с разбивкой по участникам "
+                "(каждая реплика в формате «[ВРЕМЯ] Имя: текст»). "
+                "Отвечай на русском языке, кратко и по делу, опираясь только на этот "
+                "контекст. Если ответа в нём нет — так и скажи.\n\n"
                 f"Сегодня: {today}.\n\n"
-                f"Контекст встреч:\n{context}"
+                f"Контекст встреч:{notice}\n{context}"
             ),
         }
     ]
@@ -99,7 +135,7 @@ async def _stream_openai(
 
     try:
         stream = await client.chat.completions.create(
-            model=config.OPENAI_MODEL,
+            model=config.CHAT_MODEL,
             messages=messages,
             stream=True,
             max_tokens=1500,

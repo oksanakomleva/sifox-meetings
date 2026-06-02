@@ -25,7 +25,11 @@ class Config(BaseSettings):
 
     # ── OpenAI ────────────────────────────────────────────────────────────
     OPENAI_API_KEY: str
-    OPENAI_MODEL: str = "gpt-4o"
+    OPENAI_MODEL: str = "gpt-4o"             # used by analyzer (protocols, tags)
+    # Chat feeds full transcripts into context, so it needs a big window.
+    CHAT_MODEL: str = "gpt-4.1"              # ~1M-token context window
+    CHAT_CONTEXT_DAYS: int = 90              # global chat: how far back to pull transcripts
+    CHAT_MAX_CONTEXT_CHARS: int = 1_200_000  # safety cap on assembled transcript context
 
     # ── Whisper ───────────────────────────────────────────────────────────
     WHISPER_MODEL: str = "medium"

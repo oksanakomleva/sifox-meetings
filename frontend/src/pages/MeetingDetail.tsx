@@ -4,6 +4,7 @@ import { api } from '../api/client'
 import StatusBadge from '../components/StatusBadge'
 import AudioPlayer from '../components/AudioPlayer'
 import ChatWidget from '../components/ChatWidget'
+import TagEditor from '../components/TagEditor'
 import type { Meeting, ChatMessage } from '../types'
 
 type Tab = 'protocol' | 'transcript' | 'audio' | 'chat'
@@ -117,16 +118,6 @@ export default function MeetingDetail() {
               {meeting.meeting_type}
             </span>
           )}
-          {meeting.tags?.map(t => (
-            <span key={t} style={{
-              fontSize: 'var(--font-size-xs)',
-              background: 'var(--color-accent-6)',
-              color: 'var(--color-accent)',
-              padding: '2px 8px',
-              borderRadius: 'var(--radius-full)',
-              fontWeight: 500,
-            }}>#{t}</span>
-          ))}
           {meeting.participants?.filter(p => p.name !== 'Protocaller').map(p => (
             <span key={p.name} style={{
               fontSize: 'var(--font-size-xs)', color: 'var(--color-text-secondary)',
@@ -139,6 +130,22 @@ export default function MeetingDetail() {
               {p.name}
             </span>
           ))}
+        </div>
+
+        {/* Tags (editable) */}
+        <div style={{ marginTop: 'var(--space-3)', display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+          <span style={{
+            fontSize: 'var(--font-size-xs)', fontWeight: 600,
+            color: 'var(--color-text-secondary)',
+            textTransform: 'uppercase', letterSpacing: '0.06em',
+          }}>Теги</span>
+          {id && (
+            <TagEditor
+              meetingId={id}
+              tags={meeting.tags ?? []}
+              onChange={tags => setMeeting(m => (m ? { ...m, tags } : m))}
+            />
+          )}
         </div>
       </div>
 

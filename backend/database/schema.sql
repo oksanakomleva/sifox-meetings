@@ -104,6 +104,19 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_chat_user_meeting ON chat_messages(user_id, meeting_id);
 
+-- ── Weekly summary cache ──────────────────────────────────────────────────────
+-- "Итоги недели" used to be regenerated via OpenAI on every Dashboard load.
+-- We now cache one row per user and only regenerate when the set of in-window
+-- meetings changes. `signature` is a hash over (id, updated_at) of the meetings
+-- that fed the summary, so new/edited/expired meetings all invalidate the cache.
+CREATE TABLE IF NOT EXISTS week_summaries (
+    user_id       BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    signature     TEXT NOT NULL,
+    summary       TEXT,
+    meeting_count INT NOT NULL DEFAULT 0,
+    generated_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- ── Access grants (admin can grant access to specific meetings) ───────────────
 CREATE TABLE IF NOT EXISTS meeting_access_grants (
     user_id    BIGINT REFERENCES users(id) ON DELETE CASCADE,

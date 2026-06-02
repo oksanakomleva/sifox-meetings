@@ -163,6 +163,7 @@ export default function Meetings() {
   const [doneMeetings, setDoneMeetings] = useState<Meeting[]>([])
   const [upcomingMeetings, setUpcomingMeetings] = useState<Meeting[]>([])
   const [search, setSearch] = useState('')
+  const [selectedTags, setSelectedTags] = useState<string[]>([])
   const [selectedDay, setSelectedDay] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -183,17 +184,33 @@ export default function Meetings() {
       .finally(() => setLoading(false))
   }, [])
 
-  // Filtered done meetings
+  // Tags present in the loaded meetings, most frequent first — for the filter bar.
+  const availableTags = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const m of doneMeetings) {
+      for (const t of m.tags ?? []) counts.set(t, (counts.get(t) ?? 0) + 1)
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(e => e[0])
+  }, [doneMeetings])
+
+  const toggleTag = (t: string) =>
+    setSelectedTags(prev => (prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t]))
+
+  // Filtered done meetings: text search AND (any selected tag matches)
   const filteredDone = useMemo(() => {
-    if (!search.trim()) return doneMeetings
-    const q = search.toLowerCase()
-    return doneMeetings.filter(m =>
-      (m.topic ?? '').toLowerCase().includes(q) ||
-      (m.title ?? '').toLowerCase().includes(q) ||
-      (m.tags ?? []).some(t => t.toLowerCase().includes(q)) ||
-      (m.summary ?? '').toLowerCase().includes(q)
-    )
-  }, [doneMeetings, search])
+    const q = search.trim().toLowerCase()
+    return doneMeetings.filter(m => {
+      const matchesSearch = !q || (
+        (m.topic ?? '').toLowerCase().includes(q) ||
+        (m.title ?? '').toLowerCase().includes(q) ||
+        (m.tags ?? []).some(t => t.toLowerCase().includes(q)) ||
+        (m.summary ?? '').toLowerCase().includes(q)
+      )
+      const matchesTags = selectedTags.length === 0 ||
+        (m.tags ?? []).some(t => selectedTags.includes(t))
+      return matchesSearch && matchesTags
+    })
+  }, [doneMeetings, search, selectedTags])
 
   // Upcoming meetings filtered by selected calendar day
   const filteredUpcoming = useMemo(() => {
@@ -275,6 +292,42 @@ export default function Meetings() {
                 style={{ paddingLeft: 36 }}
               />
             </div>
+
+            {/* Tag filter */}
+            {availableTags.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)', marginBottom: 'var(--space-4)', alignItems: 'center' }}>
+                {availableTags.map(t => {
+                  const active = selectedTags.includes(t)
+                  return (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => toggleTag(t)}
+                      style={{
+                        fontSize: 'var(--font-size-xs)',
+                        padding: '2px 10px',
+                        borderRadius: 'var(--radius-full)',
+                        cursor: 'pointer',
+                        fontWeight: 500,
+                        border: active ? '1px solid var(--color-accent)' : '1px solid var(--color-border)',
+                        background: active ? 'var(--color-accent)' : 'transparent',
+                        color: active ? '#fff' : 'var(--color-text-secondary)',
+                      }}
+                    >#{t}</button>
+                  )
+                })}
+                {selectedTags.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedTags([])}
+                    style={{
+                      fontSize: 'var(--font-size-xs)', background: 'none', border: 'none',
+                      color: 'var(--color-accent)', cursor: 'pointer',
+                    }}
+                  >сбросить</button>
+                )}
+              </div>
+            )}
 
             {filteredDone.length === 0 ? (
               <div className="empty-state">

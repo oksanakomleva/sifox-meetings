@@ -93,7 +93,7 @@ async def reanalyze_meeting(meeting_id: str, admin: AdminUser):
     async def _run():
         try:
             await models.update_meeting_status(meeting_id, "analyzing")
-            analysis = await analyze_meeting(transcript)
+            analysis = await analyze_meeting(transcript, meeting.get("title"))
             await models.save_analysis(
                 meeting_id,
                 summary=analysis["summary"],

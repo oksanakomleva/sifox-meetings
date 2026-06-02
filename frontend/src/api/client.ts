@@ -59,6 +59,13 @@ export const api = {
       request<{ summary: string | null; count: number }>('/meetings/week-summary'),
     upcoming: () =>
       request<{ meetings: import('../types').Meeting[] }>('/meetings/upcoming'),
+    knownTags: () =>
+      request<{ tags: string[] }>('/meetings/tags'),
+    updateTags: (id: string, tags: string[]) =>
+      request<{ tags: string[] }>(`/meetings/${id}/tags`, {
+        method: 'PUT',
+        body: JSON.stringify({ tags }),
+      }),
   },
 
   // ── Admin ──────────────────────────────────────────────────────────────────────

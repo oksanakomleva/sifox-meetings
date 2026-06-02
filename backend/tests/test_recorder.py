@@ -7,9 +7,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from services.recorder import (
     _is_real_name,
     _effective_speaker_timeline,
+    _speaker_for_segment,
     _build_transcript,
     _fmt_time,
 )
+
+
+class _Seg:
+    """Minimal stand-in for a faster-whisper segment (has start/end/text)."""
+    def __init__(self, start, end, text):
+        self.start = start
+        self.end = end
+        self.text = text
 
 
 class TestIsRealName:
@@ -49,24 +58,34 @@ class TestEffectiveSpeakerTimeline:
         assert result == []
 
 
+class TestSpeakerForSegment:
+    def test_majority_overlap_wins(self):
+        # 8–14s: 2s under A (8–10), 4s under B (10–14) → B
+        tl = [(0.0, "Alice"), (10.0, "Bob")]
+        assert _speaker_for_segment(8.0, 14.0, tl) == "Bob"
+
+    def test_fully_inside_one_speaker(self):
+        tl = [(0.0, "Alice"), (10.0, "Bob")]
+        assert _speaker_for_segment(1.0, 4.0, tl) == "Alice"
+
+    def test_before_first_event_is_unknown(self):
+        assert _speaker_for_segment(0.0, 2.0, [(5.0, "Alice")]) == "Участник"
+
+    def test_empty_timeline_is_unknown(self):
+        assert _speaker_for_segment(0.0, 5.0, []) == "Участник"
+
+
 class TestBuildTranscript:
-    def test_basic(self):
-        class Seg:
-            def __init__(self, start, text):
-                self.start = start
-                self.text = text
-        segments = [Seg(0.0, "Hello"), Seg(2.0, "World")]
-        tl = [(0.0, "Alice")]
-        result = _build_transcript(segments, tl)
-        assert "Alice: Hello" in result
-        assert "Alice: World" in result
+    def test_same_speaker_short_gap_merges(self):
+        # Same speaker, gap 1s (<4s) → merged into a single block.
+        segments = [_Seg(0.0, 1.0, "Hello"), _Seg(2.0, 3.0, "World")]
+        result = _build_transcript(segments, [(0.0, "Alice")])
+        assert "Alice:" in result
+        assert "Hello" in result and "World" in result
+        assert result.count("Alice:") == 1
 
     def test_speaker_change(self):
-        class Seg:
-            def __init__(self, start, text):
-                self.start = start
-                self.text = text
-        segments = [Seg(0.0, "Hi"), Seg(10.0, "Reply")]
+        segments = [_Seg(0.0, 1.0, "Hi"), _Seg(10.0, 11.0, "Reply")]
         tl = [(0.0, "Alice"), (5.0, "Bob")]
         result = _build_transcript(segments, tl)
         assert "Alice: Hi" in result

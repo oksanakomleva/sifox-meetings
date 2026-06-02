@@ -548,6 +548,35 @@ async def save_analysis(
         )
 
 
+async def update_meeting_tags(meeting_id: str, tags: list[str]) -> None:
+    """Overwrite a meeting's tags (manual edit from the web UI)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE meetings SET tags = $2, updated_at = NOW() WHERE id = $1",
+            meeting_id, tags,
+        )
+
+
+async def get_known_tags(limit: int = 200) -> list[str]:
+    """Distinct tags ever used across meetings, most frequent first. Serves both
+    the AI tagging step (reuse existing tags) and the web UI autocomplete/filter."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT tag, COUNT(*) AS cnt
+            FROM meetings, unnest(tags) AS tag
+            WHERE tags IS NOT NULL
+            GROUP BY tag
+            ORDER BY cnt DESC, tag ASC
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [r["tag"] for r in rows]
+
+
 async def get_meeting(meeting_id: str) -> dict[str, Any] | None:
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -620,6 +649,71 @@ async def get_all_meetings(limit: int = 100, offset: int = 0) -> list[dict]:
             LIMIT $1 OFFSET $2
             """,
             limit, offset,
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_recent_meetings_with_transcripts(
+    days: int = 90,
+    limit: int = 1000,
+) -> list[dict]:
+    """Admin global chat: completed meetings within the last `days` that have a
+    transcript, newest first. Returns the FULL transcript text (not truncated)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, title, topic, start_time, end_time, transcript
+            FROM meetings
+            WHERE status = 'done'
+              AND transcript IS NOT NULL
+              AND start_time >= NOW() - make_interval(days => $1::int)
+            ORDER BY start_time DESC
+            LIMIT $2
+            """,
+            days, limit,
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_recent_meetings_with_transcripts_for_user(
+    user_id: int,
+    days: int = 90,
+    limit: int = 1000,
+) -> list[dict]:
+    """Non-admin global chat: same as above but restricted to meetings the user
+    can access (participant / calendar attendee / explicit grant)."""
+    pool = await get_pool()
+    user = await get_user_by_id(user_id)
+    if not user:
+        return []
+    email = user["email"]
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT m.id, m.title, m.topic, m.start_time, m.end_time, m.transcript
+            FROM meetings m
+            WHERE m.status = 'done'
+              AND m.transcript IS NOT NULL
+              AND m.start_time >= NOW() - make_interval(days => $3::int)
+              AND (
+                EXISTS (
+                    SELECT 1 FROM meeting_participants mp
+                    WHERE mp.meeting_id = m.id AND mp.user_id = $1
+                )
+                OR EXISTS (
+                    SELECT 1 FROM calendar_meeting_links cml
+                    WHERE cml.meeting_id = m.id AND $2 = ANY(cml.attendee_emails)
+                )
+                OR EXISTS (
+                    SELECT 1 FROM meeting_access_grants g
+                    WHERE g.meeting_id = m.id AND g.user_id = $1
+                )
+              )
+            ORDER BY m.start_time DESC
+            LIMIT $4
+            """,
+            user_id, email, days, limit,
         )
     return [dict(r) for r in rows]
 
@@ -922,10 +1016,11 @@ async def get_meetings_this_week(user_id: int, is_admin: bool) -> list[dict]:
         if is_admin:
             rows = await conn.fetch(
                 """
-                SELECT id, title, topic, start_time, end_time, summary, tags, meeting_type
+                SELECT id, title, topic, start_time, end_time, summary, tags,
+                       meeting_type, updated_at, transcript
                 FROM meetings
                 WHERE status = 'done'
-                  AND summary IS NOT NULL
+                  AND transcript IS NOT NULL
                   AND start_time >= NOW() - interval '7 days'
                 ORDER BY start_time DESC
                 LIMIT 20
@@ -939,10 +1034,10 @@ async def get_meetings_this_week(user_id: int, is_admin: bool) -> list[dict]:
             rows = await conn.fetch(
                 """
                 SELECT DISTINCT m.id, m.title, m.topic, m.start_time, m.end_time,
-                       m.summary, m.tags, m.meeting_type
+                       m.summary, m.tags, m.meeting_type, m.updated_at, m.transcript
                 FROM meetings m
                 WHERE m.status = 'done'
-                  AND m.summary IS NOT NULL
+                  AND m.transcript IS NOT NULL
                   AND m.start_time >= NOW() - interval '7 days'
                   AND (
                     EXISTS (
@@ -964,3 +1059,37 @@ async def get_meetings_this_week(user_id: int, is_admin: bool) -> list[dict]:
                 user_id, email,
             )
     return [dict(r) for r in rows]
+
+
+async def get_week_summary_cache(user_id: int) -> dict | None:
+    """Cached "итоги недели" for a user, or None if never generated."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT signature, summary, meeting_count FROM week_summaries WHERE user_id = $1",
+            user_id,
+        )
+    return dict(row) if row else None
+
+
+async def upsert_week_summary_cache(
+    user_id: int,
+    signature: str,
+    summary: str | None,
+    meeting_count: int,
+) -> None:
+    """Store/refresh the cached weekly summary for a user."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO week_summaries (user_id, signature, summary, meeting_count, generated_at)
+            VALUES ($1, $2, $3, $4, NOW())
+            ON CONFLICT (user_id) DO UPDATE
+            SET signature     = EXCLUDED.signature,
+                summary       = EXCLUDED.summary,
+                meeting_count = EXCLUDED.meeting_count,
+                generated_at  = NOW()
+            """,
+            user_id, signature, summary, meeting_count,
+        )
