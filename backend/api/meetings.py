@@ -22,16 +22,35 @@ async def calendar_status(user: CurrentUser):
     return await models.get_calendar_status(user["user_id"])
 
 
+# Skimmable-by-design weekly summary. Kept short on purpose: a one-glance recap
+# plus one line per topic/meeting. Length is bounded by both this format and a
+# small max_tokens below.
+_WEEK_SYSTEM_PROMPT = (
+    "Ты составляешь КОРОТКУЮ сводку по итогам рабочей недели на основе полных "
+    "транскриптов встреч (каждая — со своим заголовком и текстом с разбивкой по "
+    "участникам, формат реплики «[ВРЕМЯ] Имя: текст»).\n\n"
+    "Сводку должно быть видно одним взглядом, почти без прокрутки. Формат строго такой:\n"
+    "1) Первая строка — обзор недели в 1–2 предложениях.\n"
+    "2) Дальше маркированный список, по одному пункту на тему/встречу. Каждый пункт — "
+    "ОДНА короткая строка вида «‹заказчик/проект/тема› — суть и ключевое решение или итог».\n"
+    "3) Если несколько встреч по одной теме — объедини их в один пункт.\n\n"
+    "Ограничения: не больше 8 пунктов; никаких длинных абзацев, цитат и воды; "
+    "опирайся только на транскрипты, ничего не выдумывай; пиши на русском языке."
+)
+
+
 def _week_signature(meetings: list[dict]) -> str:
-    """Stable hash over (id, updated_at) of the in-window meetings. Changes when a
-    meeting is added, edited (updated_at moves), or drops out of the 7-day window."""
+    """Stable hash over (id, updated_at) of the in-window meetings, plus the
+    summary prompt. Changes when a meeting is added, edited (updated_at moves),
+    drops out of the 7-day window, OR the prompt/format itself changes — so a
+    prompt tweak transparently invalidates all cached summaries."""
     import hashlib
     items = []
     for m in meetings:
         upd = m.get("updated_at")
         upd_str = upd.isoformat() if hasattr(upd, "isoformat") else str(upd)
         items.append(f"{m['id']}:{upd_str}")
-    raw = "|".join(sorted(items))
+    raw = "|".join(sorted(items)) + "||" + _WEEK_SYSTEM_PROMPT
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -89,33 +108,16 @@ async def week_summary(user: CurrentUser):
     resp = await client.chat.completions.create(
         model=config.CHAT_MODEL,
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Ты составляешь деловую сводку по итогам рабочей недели на основе "
-                    "ПОЛНЫХ транскриптов встреч. Каждая встреча дана со своим заголовком, "
-                    "датой и полным текстом с разбивкой по участникам "
-                    "(формат реплики: «[ВРЕМЯ] Имя: текст»).\n\n"
-                    "Правила:\n"
-                    "- Опирайся только на текст транскриптов, ничего не придумывай и не путай факты.\n"
-                    "- Разделяй итоги по встречам: по каждой укажи, что обсуждалось и какие "
-                    "решения/договорённости были приняты. Не смешивай разные встречи в одно.\n"
-                    "- Если несколько встреч посвящены одной теме, объедини их: отметь, что тема "
-                    "поднималась несколько раз, и как менялись решения/прогресс от встречи к встрече.\n"
-                    "- Пиши на русском языке, по делу, без воды.\n\n"
-                    "Формат ответа: сначала 2–3 предложения общего резюме недели, затем разбивка "
-                    "по темам/встречам (можно списком)."
-                ),
-            },
+            {"role": "system", "content": _WEEK_SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": (
                     f"Встречи за последние 7 дней (полные транскрипты):\n\n{context}\n\n"
-                    "Составь сводку по правилам выше."
+                    "Составь короткую сводку по правилам выше."
                 ),
             },
         ],
-        max_tokens=1200,
+        max_tokens=600,
         temperature=0.3,
     )
     summary_text = resp.choices[0].message.content
