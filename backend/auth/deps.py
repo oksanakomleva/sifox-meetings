@@ -5,14 +5,27 @@ from typing import Annotated
 from database import models
 
 
+async def _effective_session(session_token: str | None, preview_token: str | None) -> dict | None:
+    """Resolve the active session. A valid preview cookie takes precedence over
+    the real `session` cookie, so an admin can view the app as a regular user
+    WITHOUT losing their real session (it stays under the `session` cookie and is
+    restored the moment the preview cookie is cleared)."""
+    if preview_token:
+        s = await models.get_session(preview_token)
+        if s and s.get("is_preview"):
+            return s
+    if session_token:
+        return await models.get_session(session_token)
+    return None
+
+
 async def get_current_user(
     session_token: Annotated[str | None, Cookie(alias="session")] = None,
+    preview_token: Annotated[str | None, Cookie(alias="preview")] = None,
 ) -> dict:
-    if not session_token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-    session = await models.get_session(session_token)
+    session = await _effective_session(session_token, preview_token)
     if not session:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     if not session.get("is_active", True):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
     return session
@@ -20,12 +33,13 @@ async def get_current_user(
 
 async def get_admin_user(
     session_token: Annotated[str | None, Cookie(alias="session")] = None,
+    preview_token: Annotated[str | None, Cookie(alias="preview")] = None,
 ) -> dict:
-    if not session_token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-    session = await models.get_session(session_token)
+    # Preview sessions are forced non-admin (see models.get_session), so while
+    # previewing, admin-only endpoints are correctly denied.
+    session = await _effective_session(session_token, preview_token)
     if not session:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     if not session.get("is_admin"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin only")
     return session

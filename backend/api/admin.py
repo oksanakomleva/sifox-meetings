@@ -219,31 +219,19 @@ async def delete_invitation(invitation_id: int, admin: AdminUser):
 
 # ── Preview as regular user ───────────────────────────────────────────────────
 
-@router.post("/users/{user_id}/preview-session")
-async def create_preview_session(user_id: int, admin: AdminUser):
+@router.post("/preview-self")
+async def create_preview_session(admin: AdminUser):
     """
-    Create a short-lived session that impersonates a REAL user, to preview the
-    app exactly as they see it. Returns a one-time URL — open in incognito.
-
-    Restricted to non-admin users: a preview link for an admin would effectively
-    be an admin-access link, and admins already see everything anyway.
+    Create a short-lived session that lets the admin view THEIR OWN account in
+    regular-user mode (admin rights stripped). The preview lives in a separate
+    `preview` cookie, so the admin's real session is untouched and is restored
+    by clearing the cookie ("exit preview"). Returns the activation URL.
     """
     from config import config as app_config
 
-    target = await models.get_user_by_id(user_id)
-    if not target:
-        raise HTTPException(404, "User not found")
-    if target.get("is_admin"):
-        raise HTTPException(400, "Preview доступен только для не-админов")
-
-    token = await models.create_preview_session(user_id)
+    token = await models.create_preview_session(admin["user_id"])
     url = f"{app_config.BASE_URL}/api/auth/preview/{token}"
-    return {
-        "ok": True,
-        "url": url,
-        "user": {"id": target["id"], "name": target.get("name"), "email": target["email"]},
-        "expires_in": "1 hour",
-    }
+    return {"ok": True, "url": url, "expires_in": "1 hour"}
 
 
 # ── Maintenance ───────────────────────────────────────────────────────────────

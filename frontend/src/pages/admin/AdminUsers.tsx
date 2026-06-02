@@ -12,8 +12,6 @@ export default function AdminUsers() {
   const [inviting, setInviting] = useState(false)
   const [newInviteUrl, setNewInviteUrl] = useState<string | null>(null)
   const [copyDone, setCopyDone] = useState(false)
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
-  const [previewUserId, setPreviewUserId] = useState<number | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
 
   useEffect(() => { load() }, [])
@@ -69,21 +67,18 @@ export default function AdminUsers() {
       day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
     })
 
-  const openAs = async (u: User) => {
+  const previewSelf = async () => {
     setPreviewLoading(true)
-    setPreviewUrl(null)
-    setPreviewUserId(u.id)
     try {
-      const res = await api.admin.previewAsUser(u.id)
-      setPreviewUrl(res.url)
+      const res = await api.admin.previewSelf()
+      // Navigate to the activation URL — it sets a separate `preview` cookie and
+      // lands on the dashboard in user mode. The admin session stays intact.
+      window.location.href = res.url
     } catch (e: any) {
       alert(e.message || 'Ошибка')
-    } finally {
       setPreviewLoading(false)
     }
   }
-
-  const previewUserName = users.find(u => u.id === previewUserId)?.name ?? ''
 
   const pendingInvites = invitations.filter(i => !i.accepted_at)
   const acceptedInvites = invitations.filter(i => !!i.accepted_at)
@@ -97,37 +92,18 @@ export default function AdminUsers() {
 
       <div className="page-body" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
 
-        {/* ── Preview as a real user ── */}
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-          <div>
-            <div style={{ fontWeight: 'var(--font-weight-semibold)', marginBottom: 2 }}>Предпросмотр от имени пользователя</div>
+        {/* ── Preview own account as a regular user ── */}
+        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)', flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div style={{ fontWeight: 'var(--font-weight-semibold)', marginBottom: 2 }}>Режим пользователя</div>
             <div style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>
-              Нажмите «Открыть как» у нужного пользователя в таблице ниже и откройте ссылку в инкогнито —
-              увидите интерфейс ровно так, как видит его этот пользователь (его встречи, доступы, права).
+              Посмотрите своё приложение так, как его видит обычный пользователь (без прав администратора).
+              Вернуться к админскому виду можно по кнопке в верхней плашке.
             </div>
           </div>
-          {previewUrl && (
-            <div style={{
-              display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap',
-              background: 'var(--color-accent-6)', borderRadius: 'var(--radius-md)',
-              padding: 'var(--space-3) var(--space-4)',
-            }}>
-              <span style={{ flexBasis: '100%', fontSize: 'var(--font-size-sm)', fontWeight: 600, color: 'var(--color-accent)' }}>
-                Ссылка для входа как «{previewUserName}» (действует 1 час):
-              </span>
-              <span style={{ flex: 1, minWidth: 160, fontSize: 'var(--font-size-sm)', wordBreak: 'break-all', color: 'var(--color-accent)' }}>
-                {previewUrl}
-              </span>
-              <button className="btn btn-secondary" style={{ flexShrink: 0 }}
-                onClick={() => navigator.clipboard.writeText(previewUrl)}>
-                Скопировать
-              </button>
-              <a href={previewUrl} target="_blank" rel="noopener noreferrer"
-                className="btn btn-primary" style={{ flexShrink: 0 }}>
-                Открыть
-              </a>
-            </div>
-          )}
+          <button className="btn btn-secondary" onClick={previewSelf} disabled={previewLoading}>
+            {previewLoading ? 'Открываем…' : '👁 Посмотреть как пользователь'}
+          </button>
         </div>
 
         {/* ── Users table ── */}
@@ -208,17 +184,6 @@ export default function AdminUsers() {
                               />
                               <span className="toggle-slider" />
                             </label>
-                          )}
-                          {!u.is_admin && (
-                            <button
-                              className="btn btn-secondary"
-                              style={{ fontSize: 'var(--font-size-xs)', padding: '4px 10px', flexShrink: 0 }}
-                              onClick={() => openAs(u)}
-                              disabled={previewLoading && previewUserId === u.id}
-                              title="Открыть приложение как этот пользователь"
-                            >
-                              {previewLoading && previewUserId === u.id ? '…' : '👁 Открыть как'}
-                            </button>
                           )}
                         </div>
                       </td>

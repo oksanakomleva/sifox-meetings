@@ -1,6 +1,6 @@
 """Auth routes: login, callback, logout, me, calendar connect."""
 import logging
-from fastapi import APIRouter, HTTPException, Response, Cookie
+from fastapi import APIRouter, HTTPException, Response, Cookie, Depends
 from fastapi.responses import RedirectResponse
 from typing import Annotated
 
@@ -183,20 +183,14 @@ async def logout(
 
 
 @router.get("/me")
-async def me(
-    session_token: Annotated[str | None, Cookie(alias="session")] = None,
-):
-    if not session_token:
-        raise HTTPException(401, "Not authenticated")
-    session = await models.get_session(session_token)
-    if not session:
-        raise HTTPException(401, "Session expired")
+async def me(user: Annotated[dict, Depends(get_current_user)]):
     return {
-        "id": session["user_id"],
-        "email": session["email"],
-        "name": session["name"],
-        "avatar_url": session["avatar_url"],
-        "is_admin": session["is_admin"],
+        "id": user["user_id"],
+        "email": user["email"],
+        "name": user["name"],
+        "avatar_url": user["avatar_url"],
+        "is_admin": user["is_admin"],
+        "is_preview": bool(user.get("is_preview")),
     }
 
 
@@ -212,9 +206,11 @@ async def preview_session(token: str):
     if not session or not session.get("is_preview"):
         raise HTTPException(400, "Invalid or expired preview link")
 
+    # Set a SEPARATE `preview` cookie — the admin's real `session` cookie is left
+    # intact, so exiting preview just clears this cookie and restores the admin.
     redirect = RedirectResponse(f"{config.BASE_URL}/")
     redirect.set_cookie(
-        key="session",
+        key="preview",
         value=token,
         httponly=True,
         samesite="lax",
@@ -222,6 +218,19 @@ async def preview_session(token: str):
         max_age=3600,
         path="/",
     )
+    return redirect
+
+
+@router.get("/exit-preview")
+async def exit_preview(
+    preview_token: Annotated[str | None, Cookie(alias="preview")] = None,
+):
+    """Leave preview mode: drop the preview session/cookie and return to the
+    admin's own (still-active) session."""
+    if preview_token:
+        await models.delete_session(preview_token)
+    redirect = RedirectResponse(f"{config.BASE_URL}/")
+    redirect.delete_cookie("preview", path="/")
     return redirect
 
 

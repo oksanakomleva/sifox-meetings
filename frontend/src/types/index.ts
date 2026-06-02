@@ -4,6 +4,7 @@ export interface User {
   name: string
   avatar_url: string | null
   is_admin: boolean
+  is_preview?: boolean
 }
 
 export interface Meeting {

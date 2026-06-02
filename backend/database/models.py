@@ -110,7 +110,14 @@ async def get_session(token: str) -> dict[str, Any] | None:
             """,
             token,
         )
-    return dict(row) if row else None
+    if not row:
+        return None
+    session = dict(row)
+    # A preview session always behaves as a regular (non-admin) user — that is the
+    # whole point of "view as user", even when the underlying account is an admin.
+    if session.get("is_preview"):
+        session["is_admin"] = False
+    return session
 
 
 async def delete_session(token: str) -> None:
