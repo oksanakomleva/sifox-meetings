@@ -2,7 +2,26 @@
 // in the offscreen document (service workers have no MediaRecorder/getUserMedia).
 
 const OFFSCREEN_PATH = 'offscreen.html'
-let recording = false
+
+// Recording state is persisted in chrome.storage — the MV3 service worker is
+// killed after ~30s idle, so an in-memory flag would be lost mid-meeting (then
+// the popup couldn't show "Stop"). The offscreen document keeps recording
+// independently of the SW; storage lets us recover the state on wake-up.
+async function setRecording(on) {
+  await chrome.storage.local.set({ recording: on })
+  chrome.action.setBadgeText({ text: on ? 'REC' : '' })
+  if (on) chrome.action.setBadgeBackgroundColor({ color: '#dc2626' })
+}
+
+async function isRecording() {
+  const { recording } = await chrome.storage.local.get('recording')
+  return !!recording
+}
+
+async function offscreenExists() {
+  if (chrome.offscreen.hasDocument) return await chrome.offscreen.hasDocument()
+  return true // older Chrome — assume yes
+}
 
 async function ensureOffscreen() {
   // hasDocument() may be undefined on older Chrome — guard it.
@@ -22,11 +41,6 @@ async function ensureOffscreen() {
   }
 }
 
-function setBadge(on) {
-  chrome.action.setBadgeText({ text: on ? 'REC' : '' })
-  if (on) chrome.action.setBadgeBackgroundColor({ color: '#dc2626' })
-}
-
 // Read the user's Sifox web-login session cookie (set by Google OAuth).
 async function getSessionToken(baseUrl) {
   try {
@@ -44,7 +58,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   ;(async () => {
     try {
       if (msg.type === 'getState') {
-        sendResponse({ recording })
+        sendResponse({ recording: await isRecording() })
         return
       }
 
@@ -61,24 +75,26 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           target: 'offscreen', type: 'start',
           streamId, sessionToken, baseUrl, title, sourceUrl,
         })
-        if (res && res.ok) {
-          recording = true
-          setBadge(true)
-        }
+        if (res && res.ok) await setRecording(true)
         sendResponse(res || { ok: false, error: 'no response from offscreen' })
         return
       }
 
       if (msg.type === 'stop') {
+        // The offscreen document holds the recording. If it's gone (extension
+        // reloaded / Chrome reclaimed it), the audio is lost — clear state.
+        if (!(await offscreenExists())) {
+          await setRecording(false)
+          sendResponse({ ok: false, error: 'Запись потеряна (расширение перезапускалось). Аудио не сохранено.' })
+          return
+        }
         const res = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'stop' })
-        recording = false
-        setBadge(false)
+        await setRecording(false)
         sendResponse(res || { ok: false, error: 'no response from offscreen' })
         return
       }
     } catch (e) {
-      recording = false
-      setBadge(false)
+      await setRecording(false)
       sendResponse({ ok: false, error: String(e && e.message || e) })
     }
   })()
