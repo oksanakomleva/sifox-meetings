@@ -62,6 +62,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return
       }
 
+      if (msg.type === 'recording-ended') {
+        // Offscreen auto-stopped (e.g. captured tab was closed) and uploaded.
+        await setRecording(false)
+        sendResponse({ ok: true })
+        return
+      }
+
       if (msg.type === 'start') {
         const { baseUrl, title, sourceUrl, tabId } = msg
         const sessionToken = await getSessionToken(baseUrl)

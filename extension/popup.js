@@ -17,9 +17,31 @@ async function getSessionToken(baseUrl) {
   }
 }
 
+// Whether the extension already has microphone access (granted earlier via the
+// permission tab). Used to hide the request UI once granted.
+async function micGranted() {
+  try {
+    const s = await navigator.permissions.query({ name: 'microphone' })
+    return s.state === 'granted'
+  } catch (e) {
+    return false // can't tell — show the prompt to be safe
+  }
+}
+
 function show(view) {
   $('login').classList.toggle('hidden', view !== 'login')
   $('recorder').classList.toggle('hidden', view !== 'recorder')
+}
+
+function updateMicUI(granted) {
+  $('micBanner').classList.toggle('hidden', granted)
+  $('micOk').classList.toggle('hidden', !granted)
+}
+
+// Request mic from a dedicated tab — a transient popup can't hold the prompt
+// (it closes on focus loss → "Permission dismissed").
+function openMicPermission() {
+  chrome.tabs.create({ url: chrome.runtime.getURL('permission.html') })
 }
 
 async function init() {
@@ -31,7 +53,6 @@ async function init() {
   const token = await getSessionToken(baseUrl)
   if (!token) { show('login'); return }
 
-  // Validate the session against the backend.
   try {
     const res = await fetch(`${baseUrl}/api/extension/me`, {
       headers: { 'X-Session-Token': token },
@@ -46,6 +67,7 @@ async function init() {
   }
 
   $('title').value = activeTab?.title || 'Запись из браузера'
+  updateMicUI(await micGranted())
   const st = await chrome.runtime.sendMessage({ type: 'getState' })
   reflect(st && st.recording)
   show('recorder')
@@ -64,12 +86,6 @@ function reflect(isRecording) {
   }
 }
 
-// Request mic from a dedicated tab — a transient popup can't hold the prompt
-// (it closes on focus loss → "Permission dismissed").
-function openMicPermission() {
-  chrome.tabs.create({ url: chrome.runtime.getURL('permission.html') })
-}
-
 // ── Login view ──────────────────────────────────────────────────────────────
 $('openLogin').addEventListener('click', async () => {
   const baseUrl = ($('baseUrl').value.trim() || DEFAULT_BASE).replace(/\/+$/, '')
@@ -77,10 +93,12 @@ $('openLogin').addEventListener('click', async () => {
   chrome.tabs.create({ url: baseUrl })
 })
 
-$('grantMic').addEventListener('click', openMicPermission)
 $('baseUrl').addEventListener('change', async () => {
   await chrome.storage.local.set({ baseUrl: $('baseUrl').value.trim() })
 })
+
+// ── Mic permission ─────────────────────────────────────────────────────────────
+$('grantMicBig').addEventListener('click', openMicPermission)
 
 // ── Recorder view ─────────────────────────────────────────────────────────────
 $('toggle').addEventListener('click', async () => {
@@ -96,6 +114,14 @@ $('toggle').addEventListener('click', async () => {
     } else {
       $('recStatus').textContent = 'Ошибка загрузки: ' + (res && res.error || '')
     }
+    return
+  }
+
+  // Require mic before the first recording — request it explicitly if missing.
+  if (!(await micGranted())) {
+    updateMicUI(false)
+    openMicPermission()
+    $('recStatus').textContent = 'Разрешите доступ к микрофону в открывшейся вкладке, затем вернитесь и нажмите «Начать запись».'
     return
   }
 
@@ -115,7 +141,5 @@ $('openApp').addEventListener('click', async () => {
   const baseUrl = await getBaseUrl()
   chrome.tabs.create({ url: `${baseUrl}/meetings` })
 })
-
-$('grantMic2').addEventListener('click', openMicPermission)
 
 init()

@@ -37,6 +37,11 @@ async function startCapture({ streamId, sessionToken, baseUrl, title, sourceUrl 
   })
   streams.push(tabStream)
 
+  // If the captured tab is closed, its audio track ends — auto-stop and upload
+  // what we have so the recording isn't silently lost.
+  const tabTrack = tabStream.getAudioTracks()[0]
+  if (tabTrack) tabTrack.addEventListener('ended', onTabEnded)
+
   // Microphone (best-effort — requires a prior permission grant from the popup).
   let micStream = null
   try {
@@ -59,6 +64,19 @@ async function startCapture({ streamId, sessionToken, baseUrl, title, sourceUrl 
   recorder = new MediaRecorder(dest.stream, { mimeType: mime })
   recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data) }
   recorder.start(1000) // gather data every second
+}
+
+async function onTabEnded() {
+  // Guard against racing a manual Stop (recorder already cleared).
+  if (!recorder || recorder.state === 'inactive') return
+  let result
+  try {
+    result = await stopAndUpload()
+  } catch (e) {
+    result = { ok: false, error: String(e && e.message || e) }
+  }
+  // Tell the service worker to clear the recording state / badge.
+  chrome.runtime.sendMessage({ type: 'recording-ended', result })
 }
 
 function stopAndUpload() {

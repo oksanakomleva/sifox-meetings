@@ -20,6 +20,8 @@
     a { color: #2563eb; font-size: 12px; cursor: pointer; }
     details { margin-top: 12px; }
     summary { cursor: pointer; }
+    .banner { background: #fef3c7; border: 1px solid #fcd34d; border-radius: 8px; padding: 10px 12px; margin: 10px 0; font-size: 13px; color: #7c2d12; }
+    .ok-pill { font-size: 12px; color: #16a34a; margin-top: 8px; }
   </style>
 </head>
 <body>
@@ -29,7 +31,6 @@
   <div id="login" class="hidden">
     <p class="muted">Войдите в Sifox в этом браузере (через Google), чтобы записывать встречи. Расширение подхватит ваш вход автоматически.</p>
     <button id="openLogin" class="primary">Открыть Sifox и войти</button>
-    <button id="grantMic" class="secondary">Разрешить микрофон</button>
     <div id="loginStatus" class="status"></div>
     <details>
       <summary class="muted">Адрес сервера</summary>
@@ -40,13 +41,21 @@
   <!-- Recorder -->
   <div id="recorder" class="hidden">
     <div id="account" class="muted"></div>
+
+    <!-- Mic permission: prominent prompt when NOT granted -->
+    <div id="micBanner" class="banner hidden">
+      🎤 Чтобы в запись попал ваш голос, разрешите доступ к микрофону. Иначе запишется только звук вкладки.
+      <button id="grantMicBig" class="primary">Разрешить доступ к микрофону</button>
+    </div>
+    <!-- Confirmation when granted -->
+    <div id="micOk" class="ok-pill hidden">✓ Микрофон разрешён</div>
+
     <label>Название встречи</label>
     <input id="title" type="text" />
     <button id="toggle" class="primary">● Начать запись</button>
     <div id="recStatus" class="status"></div>
     <div class="row">
       <a id="openApp">Открыть встречи →</a>
-      <a id="grantMic2">Разрешить микрофон</a>
     </div>
   </div>
 
