@@ -50,6 +50,10 @@ RUN npm run build
 WORKDIR /app
 COPY backend/ backend/
 
+# Browser extension source — served as a downloadable .zip from the web app
+# (GET /api/extension/download zips this folder on the fly).
+COPY extension/ extension/
+
 # Generate test audio for E2E tests (espeak-ng Russian TTS → WAV)
 # The Test Speaker bot streams this file as a fake microphone in Telemost meetings
 RUN espeak-ng -v ru -s 120 -p 50 \

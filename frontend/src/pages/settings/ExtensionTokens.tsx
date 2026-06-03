@@ -77,11 +77,19 @@ export default function ExtensionTokens() {
         <div className="card" style={{ padding: 'var(--space-4)', marginBottom: 'var(--space-4)' }}>
           <h3 style={{ marginTop: 0 }}>Как подключить</h3>
           <ol style={{ margin: 0, paddingLeft: 20, lineHeight: 1.7 }}>
+            <li>Скачайте расширение кнопкой ниже и распакуйте архив.</li>
             <li>Откройте <code>chrome://extensions</code>, включите «Режим разработчика».</li>
-            <li>«Загрузить распакованное расширение» → выберите папку <code>extension/</code>.</li>
+            <li>«Загрузить распакованное расширение» → выберите распакованную папку.</li>
             <li>Создайте токен ниже и вставьте его в попапе расширения.</li>
             <li>На вкладке со встречей нажмите «Запись» → по окончании запись появится в разделе «Встречи».</li>
           </ol>
+          <a
+            className="btn btn-primary"
+            href={api.extension.downloadUrl()}
+            style={{ marginTop: 'var(--space-3)', display: 'inline-block', textDecoration: 'none' }}
+          >
+            ⬇ Скачать расширение (.zip)
+          </a>
         </div>
 
         {/* Fresh token banner */}

@@ -6,13 +6,16 @@ web app (see /tokens). Upload kicks off the same transcribe→analyze pipeline
 used for live Telemost recordings.
 """
 import asyncio
+import io
 import logging
 import os
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, File
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from auth.deps import get_current_user, get_extension_user
@@ -55,6 +58,30 @@ async def revoke_token(token_id: int, user: CurrentUser):
     if not ok:
         raise HTTPException(404, "Token not found")
     return {"ok": True}
+
+
+# Repo root holds the `extension/` source folder (see Dockerfile COPY).
+_EXTENSION_DIR = Path(__file__).resolve().parents[2] / "extension"
+
+
+@router.get("/download")
+async def download_extension(user: CurrentUser):
+    """Zip the extension source on the fly so teammates can install it
+    (chrome://extensions → Load unpacked). Always reflects the deployed version."""
+    if not _EXTENSION_DIR.is_dir():
+        raise HTTPException(404, "Extension source not found on server")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(_EXTENSION_DIR.rglob("*")):
+            if path.is_file():
+                zf.write(path, path.relative_to(_EXTENSION_DIR))
+    buf.seek(0)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="sifox-recorder-extension.zip"'},
+    )
 
 
 # ── Extension-authenticated routes ────────────────────────────────────────────

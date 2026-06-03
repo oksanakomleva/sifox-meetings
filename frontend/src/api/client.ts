@@ -130,6 +130,7 @@ export const api = {
       }),
     revokeToken: (id: number) =>
       request<{ ok: boolean }>(`/extension/tokens/${id}`, { method: 'DELETE' }),
+    downloadUrl: () => '/api/extension/download',
   },
 
   // ── Chat ──────────────────────────────────────────────────────────────────────
