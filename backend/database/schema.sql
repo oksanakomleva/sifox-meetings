@@ -208,3 +208,19 @@ ALTER TABLE meetings DROP CONSTRAINT IF EXISTS meetings_meeting_url_key;
 -- 4. New dedup key: partial unique index on google_event_id (ON CONFLICT target).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_meetings_google_event_id
     ON meetings(google_event_id) WHERE google_event_id IS NOT NULL;
+
+-- ── Personal API tokens for the browser extension ────────────────────────────
+-- The Chrome extension records any in-browser meeting (tab audio + mic) and
+-- uploads it to /api/extension/upload. It authenticates with a per-user token
+-- (Authorization: Bearer …) issued from the web app, since there is no other
+-- per-user API credential.
+CREATE TABLE IF NOT EXISTS extension_tokens (
+    id         BIGSERIAL UNIQUE NOT NULL,
+    token      TEXT PRIMARY KEY,
+    user_id    BIGINT REFERENCES users(id) ON DELETE CASCADE,
+    name       TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    last_used  TIMESTAMPTZ,
+    revoked    BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE INDEX IF NOT EXISTS idx_ext_tokens_user ON extension_tokens(user_id);

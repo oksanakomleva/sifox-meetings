@@ -305,75 +305,14 @@ async def _record_pipeline(meeting_id: str) -> None:
         await pw.stop()
         pw = None
 
-        await models.update_meeting_status(meeting_id, "transcribing")
-
-        # Check audio file
-        if not audio_path.exists() or audio_path.stat().st_size < 10_000:
-            raise RuntimeError(f"Audio file missing or too small: {audio_path}")
-
-        # 8. Transcribe (WAV — Whisper works best on lossless)
-        segments = await transcribe_audio(str(audio_path))
-        if not segments:
-            raise RuntimeError("Empty transcription")
-
-        # Build transcript with speaker labels
-        effective_tl = _effective_speaker_timeline(speaker_timeline, participants)
-        transcript_text = _build_transcript(segments, effective_tl)
-        await models.save_transcript(meeting_id, transcript_text)
-
-        # 8b. Convert WAV → MP3 (5x smaller — keep for download, drop WAV)
-        mp3_filename = f"{meeting_id}.mp3"
-        mp3_path = Path(config.AUDIO_DIR) / mp3_filename
-        try:
-            wav_size = audio_path.stat().st_size
-            await _convert_wav_to_mp3(audio_path, mp3_path)
-            stored_filename = mp3_filename
-            stored_size = mp3_path.stat().st_size
-            try:
-                audio_path.unlink()
-            except FileNotFoundError:
-                pass
-            logger.info(
-                "Converted %s → %s (%d → %d bytes, %.0f%% smaller)",
-                audio_path.name, mp3_path.name,
-                wav_size, stored_size,
-                100 * (1 - stored_size / max(wav_size, 1)),
-            )
-        except Exception as e:
-            # Conversion failed — keep WAV so audio is at least preserved
-            logger.error("MP3 conversion failed for %s: %s — keeping WAV", meeting_id[:8], e)
-            stored_filename = audio_filename
-            stored_size = audio_path.stat().st_size
-
-        await models.save_meeting_audio(meeting_id, stored_filename, stored_size)
-
-        # Save participants
-        for p in participants:
-            if p != "Protocaller":
-                await models.upsert_participant(meeting_id, p)
-        await models.resolve_participants_by_email(meeting_id)
-
-        # 9. Analyze
-        await models.update_meeting_status(meeting_id, "analyzing")
-        analysis = await analyze_meeting(transcript_text, meeting.get("title"))
-        await models.save_analysis(
+        # 8–9. Transcribe → store → MP3 → analyze (shared with extension uploads)
+        await transcribe_and_analyze(
             meeting_id,
-            summary=analysis["summary"],
-            tags=analysis["tags"],
-            topic=analysis["topic"],
-            meeting_type=analysis["meeting_type"],
+            audio_path,
+            speaker_timeline=speaker_timeline,
+            participants=participants,
+            end_time=end_time,
         )
-
-        # Update end time
-        from database.connection import get_pool
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE meetings SET end_time = $1 WHERE id = $2",
-                end_time, meeting_id,
-            )
-
-        logger.info("Meeting %s done", meeting_id[:8])
 
     except asyncio.CancelledError:
         logger.info("Recording %s cancelled", meeting_id[:8])
@@ -395,6 +334,95 @@ async def _record_pipeline(meeting_id: str) -> None:
             except Exception:
                 pass
         await _delete_pulse_sink(sink_name)
+
+
+# ── Shared post-capture pipeline ──────────────────────────────────────────────
+
+async def transcribe_and_analyze(
+    meeting_id: str,
+    audio_path: Path,
+    *,
+    speaker_timeline: list | None = None,
+    participants: set[str] | list[str] | None = None,
+    end_time: datetime | None = None,
+) -> None:
+    """Transcribe an audio file, store the transcript, convert to MP3, run AI
+    analysis, and finalize the meeting (status='done').
+
+    Shared by the live recorder (WAV + speaker timeline) and by browser-extension
+    uploads (webm/opus, no speaker data). Raises on failure — the caller is
+    responsible for marking the meeting 'error'.
+    """
+    participants = list(participants or [])
+
+    await models.update_meeting_status(meeting_id, "transcribing")
+
+    if not audio_path.exists() or audio_path.stat().st_size < 10_000:
+        raise RuntimeError(f"Audio file missing or too small: {audio_path}")
+
+    meeting = await models.get_meeting(meeting_id)
+
+    # 1. Transcribe (faster-whisper decodes any format via ffmpeg)
+    segments = await transcribe_audio(str(audio_path))
+    if not segments:
+        raise RuntimeError("Empty transcription")
+
+    effective_tl = _effective_speaker_timeline(speaker_timeline or [], set(participants))
+    transcript_text = _build_transcript(segments, effective_tl)
+    await models.save_transcript(meeting_id, transcript_text)
+
+    # 2. Convert → MP3 (5x smaller — keep for download, drop source)
+    mp3_filename = f"{meeting_id}.mp3"
+    mp3_path = Path(config.AUDIO_DIR) / mp3_filename
+    try:
+        src_size = audio_path.stat().st_size
+        await _convert_to_mp3(audio_path, mp3_path)
+        stored_filename = mp3_filename
+        stored_size = mp3_path.stat().st_size
+        try:
+            audio_path.unlink()
+        except FileNotFoundError:
+            pass
+        logger.info(
+            "Converted %s → %s (%d → %d bytes, %.0f%% smaller)",
+            audio_path.name, mp3_path.name, src_size, stored_size,
+            100 * (1 - stored_size / max(src_size, 1)),
+        )
+    except Exception as e:
+        # Conversion failed — keep the source so audio is at least preserved
+        logger.error("MP3 conversion failed for %s: %s — keeping source", meeting_id[:8], e)
+        stored_filename = audio_path.name
+        stored_size = audio_path.stat().st_size
+
+    await models.save_meeting_audio(meeting_id, stored_filename, stored_size)
+
+    # 3. Participants (none for uploads)
+    for p in participants:
+        if p != "Protocaller":
+            await models.upsert_participant(meeting_id, p)
+    await models.resolve_participants_by_email(meeting_id)
+
+    # 4. Analyze
+    await models.update_meeting_status(meeting_id, "analyzing")
+    analysis = await analyze_meeting(transcript_text, meeting.get("title") if meeting else None)
+    await models.save_analysis(
+        meeting_id,
+        summary=analysis["summary"],
+        tags=analysis["tags"],
+        topic=analysis["topic"],
+        meeting_type=analysis["meeting_type"],
+    )
+
+    # 5. End time
+    from database.connection import get_pool
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE meetings SET end_time = $1 WHERE id = $2",
+            end_time or datetime.now(timezone.utc), meeting_id,
+        )
+
+    logger.info("Meeting %s done", meeting_id[:8])
 
 
 # ── Meeting join ──────────────────────────────────────────────────────────────
@@ -758,16 +786,17 @@ async def _stop_audio_capture(cap: AudioCapture) -> None:
     )
 
 
-async def _convert_wav_to_mp3(wav_path: Path, mp3_path: Path) -> None:
-    """Convert WAV → MP3 (libmp3lame, 64 kbps mono — plenty for speech).
+async def _convert_to_mp3(src_path: Path, mp3_path: Path) -> None:
+    """Convert any ffmpeg-readable audio → MP3 (libmp3lame, 64 kbps mono).
 
-    16 kHz mono speech at 64 kbps = ~28 MB/hour (vs ~115 MB/hour for WAV).
+    Used for live recordings (WAV input) and for browser-extension uploads
+    (webm/opus input) — ffmpeg decodes either. ~28 MB/hour for speech.
     Raises RuntimeError if ffmpeg fails or the output is missing/empty.
     """
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg",
         "-y",
-        "-i", str(wav_path),
+        "-i", str(src_path),
         "-codec:a", "libmp3lame",
         "-b:a", "64k",
         "-ac", "1",
@@ -780,7 +809,7 @@ async def _convert_wav_to_mp3(wav_path: Path, mp3_path: Path) -> None:
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
-        raise RuntimeError("ffmpeg wav→mp3 conversion timed out after 10 min")
+        raise RuntimeError("ffmpeg →mp3 conversion timed out after 10 min")
 
     if proc.returncode != 0:
         tail = (stderr.decode(errors="replace") if stderr else "")[-500:]

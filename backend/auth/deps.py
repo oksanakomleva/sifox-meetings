@@ -75,3 +75,26 @@ async def get_test_or_admin_user(
     if not session.get("is_admin"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin only")
     return session
+
+
+async def get_extension_user(
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    x_extension_token: Annotated[str | None, Header(alias="X-Extension-Token")] = None,
+) -> dict:
+    """Auth for the browser extension. Accepts a per-user token via
+    `Authorization: Bearer <token>` or the `X-Extension-Token` header.
+    Returns a user dict shaped like get_current_user (user_id, email, name,
+    is_admin)."""
+    token = x_extension_token
+    if not token and authorization:
+        parts = authorization.split(None, 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            token = parts[1].strip()
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing extension token")
+
+    user = await models.get_user_by_extension_token(token)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or revoked token")
+    await models.touch_extension_token(token)
+    return user

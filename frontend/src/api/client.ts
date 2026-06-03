@@ -10,6 +10,15 @@ export interface StorageFile {
   user_email: string | null
 }
 
+export interface ExtensionToken {
+  id: number
+  token_preview: string
+  name: string | null
+  created_at: string
+  last_used: string | null
+  revoked: boolean
+}
+
 const BASE = '/api'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -108,6 +117,19 @@ export const api = {
       request<{ files: StorageFile[]; total_bytes: number; audio_dir: string }>('/admin/storage'),
     deleteAudioFile: (meetingId: string) =>
       request<{ ok: boolean; freed_bytes: number }>(`/admin/storage/${meetingId}`, { method: 'DELETE' }),
+  },
+
+  // ── Extension (browser recorder) ───────────────────────────────────────────────
+  extension: {
+    listTokens: () =>
+      request<{ tokens: ExtensionToken[] }>('/extension/tokens'),
+    createToken: (name?: string) =>
+      request<{ token: string; name: string | null }>('/extension/tokens', {
+        method: 'POST',
+        body: JSON.stringify({ name: name || null }),
+      }),
+    revokeToken: (id: number) =>
+      request<{ ok: boolean }>(`/extension/tokens/${id}`, { method: 'DELETE' }),
   },
 
   // ── Chat ──────────────────────────────────────────────────────────────────────

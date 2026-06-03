@@ -9,6 +9,7 @@ import AdminCalendars from './pages/admin/AdminCalendars'
 import AdminUsers from './pages/admin/AdminUsers'
 import AdminMeetings from './pages/admin/AdminMeetings'
 import AdminStorage from './pages/admin/AdminStorage'
+import ExtensionTokens from './pages/settings/ExtensionTokens'
 
 function ProtectedLayout() {
   const { user, loading } = useAuth()
@@ -56,6 +57,7 @@ function ProtectedLayout() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/meetings" element={<Meetings />} />
         <Route path="/meetings/:id" element={<MeetingDetail />} />
+        <Route path="/settings/extension" element={<ExtensionTokens />} />
         {user.is_admin && (
           <>
             <Route path="/admin/calendars" element={<AdminCalendars />} />

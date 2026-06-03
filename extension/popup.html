@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { width: 320px; font-family: system-ui, sans-serif; margin: 0; padding: 16px; color: #1c1917; }
+    h1 { font-size: 15px; margin: 0 0 12px; }
+    label { display: block; font-size: 12px; color: #555; margin: 10px 0 4px; }
+    input { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
+    button { width: 100%; padding: 10px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 10px; }
+    .primary { background: #2563eb; color: #fff; }
+    .danger { background: #dc2626; color: #fff; }
+    .secondary { background: #f3f4f6; color: #1c1917; }
+    .muted { font-size: 12px; color: #777; }
+    .status { font-size: 12px; margin-top: 10px; min-height: 16px; }
+    .hidden { display: none; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #dc2626; display: inline-block; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+    a { color: #2563eb; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Sifox — запись встречи</h1>
+
+  <!-- Setup: token -->
+  <div id="setup" class="hidden">
+    <p class="muted">Вставьте токен из веб-приложения (раздел «Расширение»).</p>
+    <label>Адрес сервера</label>
+    <input id="baseUrl" type="text" />
+    <label>Токен</label>
+    <input id="token" type="password" placeholder="Bearer-токен" />
+    <button id="saveToken" class="primary">Сохранить и проверить</button>
+    <button id="grantMic" class="secondary">Разрешить микрофон</button>
+    <div id="setupStatus" class="status"></div>
+  </div>
+
+  <!-- Recorder -->
+  <div id="recorder" class="hidden">
+    <div id="account" class="muted"></div>
+    <label>Название встречи</label>
+    <input id="title" type="text" />
+    <button id="toggle" class="primary">● Начать запись</button>
+    <div id="recStatus" class="status"></div>
+    <div class="row" style="margin-top:10px; justify-content: space-between;">
+      <a href="#" id="openApp">Открыть встречи →</a>
+      <a href="#" id="changeToken">Сменить токен</a>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
