@@ -51,6 +51,30 @@ async function getSessionToken(baseUrl) {
   }
 }
 
+// Stop the active recording: tell the offscreen doc to stop + upload, then
+// clear state. Used by the popup "Stop" and by the captured-tab-closed handler.
+async function stopRecording() {
+  if (!(await offscreenExists())) {
+    await setRecording(false)
+    await chrome.storage.local.remove('capturedTabId')
+    return { ok: false, error: 'Запись потеряна (расширение перезапускалось). Аудио не сохранено.' }
+  }
+  const res = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'stop' })
+  await setRecording(false)
+  await chrome.storage.local.remove('capturedTabId')
+  return res || { ok: false, error: 'no response from offscreen' }
+}
+
+// If the tab being recorded is closed, auto-stop and upload what we have.
+// tabs.onRemoved reliably wakes the MV3 service worker (unlike the audio
+// track's 'ended' event, which Chrome doesn't always fire for tab capture).
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  const { recording, capturedTabId } = await chrome.storage.local.get(['recording', 'capturedTabId'])
+  if (recording && capturedTabId === tabId) {
+    await stopRecording()
+  }
+})
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   // Ignore messages addressed to the offscreen document.
   if (msg && msg.target === 'offscreen') return
@@ -82,22 +106,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           target: 'offscreen', type: 'start',
           streamId, sessionToken, baseUrl, title, sourceUrl,
         })
-        if (res && res.ok) await setRecording(true)
+        if (res && res.ok) {
+          await setRecording(true)
+          await chrome.storage.local.set({ capturedTabId: tabId })
+        }
         sendResponse(res || { ok: false, error: 'no response from offscreen' })
         return
       }
 
       if (msg.type === 'stop') {
-        // The offscreen document holds the recording. If it's gone (extension
-        // reloaded / Chrome reclaimed it), the audio is lost — clear state.
-        if (!(await offscreenExists())) {
-          await setRecording(false)
-          sendResponse({ ok: false, error: 'Запись потеряна (расширение перезапускалось). Аудио не сохранено.' })
-          return
-        }
-        const res = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'stop' })
-        await setRecording(false)
-        sendResponse(res || { ok: false, error: 'no response from offscreen' })
+        sendResponse(await stopRecording())
         return
       }
     } catch (e) {
