@@ -526,70 +526,52 @@ def _is_real_name(text: str) -> bool:
     return True
 
 
-# Reads names straight from the DOM WITHOUT the avatar. A participant tile holds
-# an avatar (which, with no profile photo, renders the initials e.g. "АС") next
-# to the name label. Reading the tile's whole textContent glued them into
-# "АСАлександр Сажин". Here we instead prefer the clean data-name attribute and,
-# failing that, strip avatar/image subtrees before reading text — so only the
-# name label remains. Same extractor is used for participants and speakers so
-# their names stay consistent (the speaker timeline maps onto participants).
-_EXTRACT_NAMES_JS = r"""
-(selectors) => {
-  const DROP = 'img, svg, [aria-hidden="true"], [class*="avatar" i], '
-             + '[class*="initial" i], [class*="userpic" i], [class*="photo" i], '
-             + '[class*="picture" i]';
-  const seen = new Set();
-  const out = [];
-  function nameOf(el) {
-    const dn = (el.getAttribute && (el.getAttribute('data-name') || '')).trim();
-    if (dn) return dn;                       // clean attribute wins
-    const clone = el.cloneNode(true);
-    clone.querySelectorAll(DROP).forEach(n => n.remove());  // drop the avatar
-    return (clone.textContent || '').replace(/\s+/g, ' ').trim();
-  }
-  for (const sel of selectors) {
-    document.querySelectorAll(sel).forEach(el => {
-      const name = nameOf(el);
-      if (name && !seen.has(name)) { seen.add(name); out.push(name); }
-    });
-  }
-  return out;
-}
-"""
-
-
-async def _extract_names(page, selectors: list[str]) -> list[str]:
-    try:
-        return await page.evaluate(_EXTRACT_NAMES_JS, selectors)
-    except Exception:
-        return []
-
-
 async def _get_participant_names(page) -> set[str]:
-    primary = [
-        "div[class*='ParticipantName']",
-        "div[class*='participant-name']",
-        "span[class*='participant-name']",
-        "div[class*='MemberName']",
-        "div[data-testid*='participant'] span",
-    ]
-    names = {
-        n for n in await _extract_names(page, primary)
-        if _is_real_name(n) and n != "Protocaller"
-    }
-    if names:
+    try:
+        # Try specific participant list selectors first
+        for selector in [
+            "div[class*='ParticipantName']",
+            "div[class*='participant-name']",
+            "span[class*='participant-name']",
+            "div[class*='MemberName']",
+            "div[data-testid*='participant'] span",
+        ]:
+            elements = await page.locator(selector).all()
+            if elements:
+                names = set()
+                for el in elements:
+                    text = (await el.text_content() or "").strip()
+                    if _is_real_name(text) and text != "Protocaller":
+                        names.add(text)
+                if names:
+                    return names
+
+        # Fallback: broader selector with strict filtering
+        elements = await page.locator(
+            "div[class*='participant'], div[class*='member']"
+        ).all()
+        names = set()
+        for el in elements:
+            text = (await el.text_content() or "").strip()
+            if _is_real_name(text) and text != "Protocaller":
+                names.add(text)
         return names
-    # Fallback: broader tile selector (includes avatar — extractor strips it)
-    fallback = ["div[class*='participant']", "div[class*='member']"]
-    return {
-        n for n in await _extract_names(page, fallback)
-        if _is_real_name(n) and n != "Protocaller"
-    }
+    except Exception:
+        return set()
 
 
 async def _get_active_speakers(page) -> list[str]:
-    names = await _extract_names(page, ["div[class*='rootStroke']", "div[class*='speaking']"])
-    return [n for n in names if n and n != "Protocaller"]
+    try:
+        elements = await page.locator("div[class*='rootStroke'], div[class*='speaking']").all()
+        speakers = []
+        for el in elements:
+            name = await el.get_attribute("data-name") or await el.text_content() or ""
+            name = name.strip()
+            if name and name != "Protocaller":
+                speakers.append(name)
+        return speakers
+    except Exception:
+        return []
 
 
 async def _wait_for_meeting_end(page, initial_participants: set[str], scheduled_start=None) -> None:
