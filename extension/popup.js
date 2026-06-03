@@ -64,14 +64,10 @@ function reflect(isRecording) {
   }
 }
 
-async function grantMic(statusEl) {
-  try {
-    const s = await navigator.mediaDevices.getUserMedia({ audio: true })
-    s.getTracks().forEach(t => t.stop())
-    if (statusEl) statusEl.textContent = '✓ Доступ к микрофону разрешён.'
-  } catch (e) {
-    if (statusEl) statusEl.textContent = 'Микрофон не разрешён: ' + e.message
-  }
+// Request mic from a dedicated tab — a transient popup can't hold the prompt
+// (it closes on focus loss → "Permission dismissed").
+function openMicPermission() {
+  chrome.tabs.create({ url: chrome.runtime.getURL('permission.html') })
 }
 
 // ── Login view ──────────────────────────────────────────────────────────────
@@ -81,7 +77,7 @@ $('openLogin').addEventListener('click', async () => {
   chrome.tabs.create({ url: baseUrl })
 })
 
-$('grantMic').addEventListener('click', () => grantMic($('loginStatus')))
+$('grantMic').addEventListener('click', openMicPermission)
 $('baseUrl').addEventListener('change', async () => {
   await chrome.storage.local.set({ baseUrl: $('baseUrl').value.trim() })
 })
@@ -120,6 +116,6 @@ $('openApp').addEventListener('click', async () => {
   chrome.tabs.create({ url: `${baseUrl}/meetings` })
 })
 
-$('grantMic2').addEventListener('click', () => grantMic($('recStatus')))
+$('grantMic2').addEventListener('click', openMicPermission)
 
 init()

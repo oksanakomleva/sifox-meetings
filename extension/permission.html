@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 520px; margin: 60px auto; padding: 0 20px; color: #1c1917; }
+    h2 { font-size: 20px; }
+    p { line-height: 1.6; color: #444; }
+    button { padding: 12px 20px; border: none; border-radius: 8px; background: #2563eb; color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; }
+    .ok { color: #16a34a; font-weight: 600; }
+    .err { color: #dc2626; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h2>Доступ к микрофону для записи встреч</h2>
+  <p>Чтобы в запись попадал ваш голос (а не только звук вкладки), разрешите расширению
+     доступ к микрофону. Это нужно сделать один раз.</p>
+  <button id="grant">Разрешить микрофон</button>
+  <p id="msg"></p>
+  <script src="permission.js"></script>
+</body>
+</html>
