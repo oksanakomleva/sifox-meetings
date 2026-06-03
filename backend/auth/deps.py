@@ -78,23 +78,19 @@ async def get_test_or_admin_user(
 
 
 async def get_extension_user(
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-    x_extension_token: Annotated[str | None, Header(alias="X-Extension-Token")] = None,
+    x_session_token: Annotated[str | None, Header(alias="X-Session-Token")] = None,
+    session_token: Annotated[str | None, Cookie(alias="session")] = None,
 ) -> dict:
-    """Auth for the browser extension. Accepts a per-user token via
-    `Authorization: Bearer <token>` or the `X-Extension-Token` header.
-    Returns a user dict shaped like get_current_user (user_id, email, name,
-    is_admin)."""
-    token = x_extension_token
-    if not token and authorization:
-        parts = authorization.split(None, 1)
-        if len(parts) == 2 and parts[0].lower() == "bearer":
-            token = parts[1].strip()
+    """Auth for the browser extension. The extension reads the user's existing
+    web-login session cookie (set by Google OAuth) via chrome.cookies and sends
+    its value in `X-Session-Token`. We also accept the `session` cookie directly
+    (same-origin calls). Returns a user dict like get_current_user."""
+    token = x_session_token or session_token
     if not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing extension token")
-
-    user = await models.get_user_by_extension_token(token)
-    if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or revoked token")
-    await models.touch_extension_token(token)
-    return user
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    session = await models.get_session(token)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired — log in to Sifox")
+    if not session.get("is_active", True):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
+    return session

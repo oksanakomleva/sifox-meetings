@@ -14,25 +14,27 @@
     .muted { font-size: 12px; color: #777; }
     .status { font-size: 12px; margin-top: 10px; min-height: 16px; }
     .hidden { display: none; }
-    .row { display: flex; gap: 8px; align-items: center; }
+    .row { display: flex; gap: 8px; align-items: center; justify-content: space-between; margin-top: 10px; }
     .dot { width: 10px; height: 10px; border-radius: 50%; background: #dc2626; display: inline-block; animation: pulse 1s infinite; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
-    a { color: #2563eb; font-size: 12px; }
+    a { color: #2563eb; font-size: 12px; cursor: pointer; }
+    details { margin-top: 12px; }
+    summary { cursor: pointer; }
   </style>
 </head>
 <body>
   <h1>Sifox — запись встречи</h1>
 
-  <!-- Setup: token -->
-  <div id="setup" class="hidden">
-    <p class="muted">Вставьте токен из веб-приложения (раздел «Расширение»).</p>
-    <label>Адрес сервера</label>
-    <input id="baseUrl" type="text" />
-    <label>Токен</label>
-    <input id="token" type="password" placeholder="Bearer-токен" />
-    <button id="saveToken" class="primary">Сохранить и проверить</button>
+  <!-- Not logged in -->
+  <div id="login" class="hidden">
+    <p class="muted">Войдите в Sifox в этом браузере (через Google), чтобы записывать встречи. Расширение подхватит ваш вход автоматически.</p>
+    <button id="openLogin" class="primary">Открыть Sifox и войти</button>
     <button id="grantMic" class="secondary">Разрешить микрофон</button>
-    <div id="setupStatus" class="status"></div>
+    <div id="loginStatus" class="status"></div>
+    <details>
+      <summary class="muted">Адрес сервера</summary>
+      <input id="baseUrl" type="text" />
+    </details>
   </div>
 
   <!-- Recorder -->
@@ -42,9 +44,9 @@
     <input id="title" type="text" />
     <button id="toggle" class="primary">● Начать запись</button>
     <div id="recStatus" class="status"></div>
-    <div class="row" style="margin-top:10px; justify-content: space-between;">
-      <a href="#" id="openApp">Открыть встречи →</a>
-      <a href="#" id="changeToken">Сменить токен</a>
+    <div class="row">
+      <a id="openApp">Открыть встречи →</a>
+      <a id="grantMic2">Разрешить микрофон</a>
     </div>
   </div>
 

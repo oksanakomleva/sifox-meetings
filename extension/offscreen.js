@@ -25,8 +25,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 })
 
-async function startCapture({ streamId, token, baseUrl, title, sourceUrl }) {
-  uploadCtx = { token, baseUrl, title, sourceUrl, startedAt: new Date().toISOString() }
+async function startCapture({ streamId, sessionToken, baseUrl, title, sourceUrl }) {
+  uploadCtx = { sessionToken, baseUrl, title, sourceUrl, startedAt: new Date().toISOString() }
   chunks = []
   streams = []
 
@@ -81,7 +81,7 @@ function stopAndUpload() {
 }
 
 async function upload(blob) {
-  const { token, baseUrl, title, sourceUrl, startedAt } = uploadCtx
+  const { sessionToken, baseUrl, title, sourceUrl, startedAt } = uploadCtx
   const fd = new FormData()
   fd.append('file', blob, 'recording.webm')
   if (title) fd.append('title', title)
@@ -90,7 +90,7 @@ async function upload(blob) {
 
   const res = await fetch(`${baseUrl}/api/extension/upload`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { 'X-Session-Token': sessionToken },
     body: fd,
   })
   if (!res.ok) {

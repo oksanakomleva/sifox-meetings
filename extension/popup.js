@@ -3,35 +3,45 @@ const $ = id => document.getElementById(id)
 
 let activeTab = null
 
-async function getCfg() {
-  const { token, baseUrl } = await chrome.storage.local.get(['token', 'baseUrl'])
-  return { token: token || '', baseUrl: baseUrl || DEFAULT_BASE }
+async function getBaseUrl() {
+  const { baseUrl } = await chrome.storage.local.get(['baseUrl'])
+  return (baseUrl || DEFAULT_BASE).replace(/\/+$/, '')
+}
+
+async function getSessionToken(baseUrl) {
+  try {
+    const c = await chrome.cookies.get({ url: baseUrl, name: 'session' })
+    return c && c.value ? c.value : null
+  } catch (e) {
+    return null
+  }
 }
 
 function show(view) {
-  $('setup').classList.toggle('hidden', view !== 'setup')
+  $('login').classList.toggle('hidden', view !== 'login')
   $('recorder').classList.toggle('hidden', view !== 'recorder')
 }
 
 async function init() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
   activeTab = tabs[0]
-  const { token, baseUrl } = await getCfg()
+  const baseUrl = await getBaseUrl()
   $('baseUrl').value = baseUrl
 
-  if (!token) { show('setup'); return }
+  const token = await getSessionToken(baseUrl)
+  if (!token) { show('login'); return }
 
-  // Verify token, then show recorder.
+  // Validate the session against the backend.
   try {
     const res = await fetch(`${baseUrl}/api/extension/me`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { 'X-Session-Token': token },
     })
-    if (!res.ok) throw new Error('invalid')
+    if (!res.ok) throw new Error('not logged in')
     const me = await res.json()
     $('account').textContent = `Аккаунт: ${me.email}`
   } catch (e) {
-    $('setupStatus').textContent = 'Токен недействителен — введите заново.'
-    show('setup')
+    $('loginStatus').textContent = 'Сессия не найдена — войдите в Sifox.'
+    show('login')
     return
   }
 
@@ -54,37 +64,31 @@ function reflect(isRecording) {
   }
 }
 
-// ── Setup handlers ──────────────────────────────────────────────────────────
-$('saveToken').addEventListener('click', async () => {
-  const token = $('token').value.trim()
-  const baseUrl = ($('baseUrl').value.trim() || DEFAULT_BASE).replace(/\/+$/, '')
-  if (!token) { $('setupStatus').textContent = 'Введите токен.'; return }
-  $('setupStatus').textContent = 'Проверяю…'
-  try {
-    const res = await fetch(`${baseUrl}/api/extension/me`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    if (!res.ok) throw new Error('invalid')
-    await chrome.storage.local.set({ token, baseUrl })
-    await init()
-  } catch (e) {
-    $('setupStatus').textContent = 'Токен не подошёл. Проверьте адрес и токен.'
-  }
-})
-
-$('grantMic').addEventListener('click', async () => {
+async function grantMic(statusEl) {
   try {
     const s = await navigator.mediaDevices.getUserMedia({ audio: true })
     s.getTracks().forEach(t => t.stop())
-    $('setupStatus').textContent = '✓ Доступ к микрофону разрешён.'
+    if (statusEl) statusEl.textContent = '✓ Доступ к микрофону разрешён.'
   } catch (e) {
-    $('setupStatus').textContent = 'Микрофон не разрешён: ' + e.message
+    if (statusEl) statusEl.textContent = 'Микрофон не разрешён: ' + e.message
   }
+}
+
+// ── Login view ──────────────────────────────────────────────────────────────
+$('openLogin').addEventListener('click', async () => {
+  const baseUrl = ($('baseUrl').value.trim() || DEFAULT_BASE).replace(/\/+$/, '')
+  await chrome.storage.local.set({ baseUrl })
+  chrome.tabs.create({ url: baseUrl })
 })
 
-// ── Recorder handlers ─────────────────────────────────────────────────────────
+$('grantMic').addEventListener('click', () => grantMic($('loginStatus')))
+$('baseUrl').addEventListener('change', async () => {
+  await chrome.storage.local.set({ baseUrl: $('baseUrl').value.trim() })
+})
+
+// ── Recorder view ─────────────────────────────────────────────────────────────
 $('toggle').addEventListener('click', async () => {
-  const { token, baseUrl } = await getCfg()
+  const baseUrl = await getBaseUrl()
   const st = await chrome.runtime.sendMessage({ type: 'getState' })
 
   if (st && st.recording) {
@@ -103,7 +107,7 @@ $('toggle').addEventListener('click', async () => {
   const res = await chrome.runtime.sendMessage({
     type: 'start',
     tabId: activeTab.id,
-    token, baseUrl,
+    baseUrl,
     title: $('title').value.trim(),
     sourceUrl: activeTab.url,
   })
@@ -111,15 +115,11 @@ $('toggle').addEventListener('click', async () => {
   else $('recStatus').textContent = 'Не удалось начать: ' + (res && res.error || '')
 })
 
-$('openApp').addEventListener('click', async (e) => {
-  e.preventDefault()
-  const { baseUrl } = await getCfg()
+$('openApp').addEventListener('click', async () => {
+  const baseUrl = await getBaseUrl()
   chrome.tabs.create({ url: `${baseUrl}/meetings` })
 })
 
-$('changeToken').addEventListener('click', async (e) => {
-  e.preventDefault()
-  show('setup')
-})
+$('grantMic2').addEventListener('click', () => grantMic($('recStatus')))
 
 init()

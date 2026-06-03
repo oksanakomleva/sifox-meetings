@@ -1,9 +1,9 @@
-"""Browser-extension routes: per-user tokens + audio upload.
+"""Browser-extension routes: audio upload + extension download.
 
 The Chrome extension records any in-browser meeting (tab audio + mic) and
-uploads the audio here. It authenticates with a per-user token issued from the
-web app (see /tokens). Upload kicks off the same transcribe→analyze pipeline
-used for live Telemost recordings.
+uploads the audio here. It authenticates by reading the user's existing web
+login (Google) session cookie and sending it as X-Session-Token. Upload kicks
+off the same transcribe→analyze pipeline used for live Telemost recordings.
 """
 import asyncio
 import io
@@ -16,7 +16,6 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, File
 from fastapi.responses import Response
-from pydantic import BaseModel
 
 from auth.deps import get_current_user, get_extension_user
 from config import config
@@ -31,33 +30,6 @@ ExtensionUser = Annotated[dict, Depends(get_extension_user)]
 # Accept common browser MediaRecorder containers; ffmpeg decodes all of them.
 _ALLOWED_AUDIO_SUFFIX = {".webm", ".ogg", ".opus", ".m4a", ".mp4", ".wav", ".mp3"}
 _MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB (~16h of opus) — generous cap
-
-
-# ── Token management (web session auth) ───────────────────────────────────────
-
-class CreateTokenRequest(BaseModel):
-    name: str | None = None
-
-
-@router.post("/tokens")
-async def create_token(req: CreateTokenRequest, user: CurrentUser):
-    """Issue a new extension token. The raw token is returned ONCE."""
-    token = await models.create_extension_token(user["user_id"], req.name)
-    return {"token": token, "name": req.name}
-
-
-@router.get("/tokens")
-async def list_tokens(user: CurrentUser):
-    tokens = await models.list_extension_tokens(user["user_id"])
-    return {"tokens": tokens}
-
-
-@router.delete("/tokens/{token_id}")
-async def revoke_token(token_id: int, user: CurrentUser):
-    ok = await models.revoke_extension_token(token_id, user["user_id"])
-    if not ok:
-        raise HTTPException(404, "Token not found")
-    return {"ok": True}
 
 
 # Repo root holds the `extension/` source folder (see Dockerfile COPY).

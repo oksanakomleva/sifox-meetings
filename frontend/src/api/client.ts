@@ -10,15 +10,6 @@ export interface StorageFile {
   user_email: string | null
 }
 
-export interface ExtensionToken {
-  id: number
-  token_preview: string
-  name: string | null
-  created_at: string
-  last_used: string | null
-  revoked: boolean
-}
-
 const BASE = '/api'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -121,15 +112,6 @@ export const api = {
 
   // ── Extension (browser recorder) ───────────────────────────────────────────────
   extension: {
-    listTokens: () =>
-      request<{ tokens: ExtensionToken[] }>('/extension/tokens'),
-    createToken: (name?: string) =>
-      request<{ token: string; name: string | null }>('/extension/tokens', {
-        method: 'POST',
-        body: JSON.stringify({ name: name || null }),
-      }),
-    revokeToken: (id: number) =>
-      request<{ ok: boolean }>(`/extension/tokens/${id}`, { method: 'DELETE' }),
     downloadUrl: () => '/api/extension/download',
   },
 

@@ -132,76 +132,7 @@ async def purge_expired_sessions() -> None:
         await conn.execute("DELETE FROM sessions WHERE expires_at <= NOW()")
 
 
-# ── Extension tokens (browser recorder) ─────────────────────────────────────────
-
-async def create_extension_token(user_id: int, name: str | None = None) -> str:
-    import secrets
-    token = secrets.token_urlsafe(32)
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO extension_tokens (token, user_id, name) VALUES ($1, $2, $3)",
-            token, user_id, name,
-        )
-    return token
-
-
-async def get_user_by_extension_token(token: str) -> dict[str, Any] | None:
-    """Resolve an extension token to a user dict shaped like get_session()
-    (user_id, email, name, is_admin). Returns None if revoked/inactive/unknown."""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT t.user_id, u.email, u.name, u.avatar_url, u.is_admin, u.is_active
-            FROM extension_tokens t
-            JOIN users u ON u.id = t.user_id
-            WHERE t.token = $1 AND NOT t.revoked AND u.is_active
-            """,
-            token,
-        )
-    return dict(row) if row else None
-
-
-async def touch_extension_token(token: str) -> None:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE extension_tokens SET last_used = NOW() WHERE token = $1", token
-        )
-
-
-async def list_extension_tokens(user_id: int) -> list[dict]:
-    """List a user's tokens WITHOUT exposing the secret — only a short prefix."""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT id, token, name, created_at, last_used, revoked
-            FROM extension_tokens
-            WHERE user_id = $1
-            ORDER BY created_at DESC
-            """,
-            user_id,
-        )
-    out = []
-    for r in rows:
-        d = dict(r)
-        tok = d.pop("token")
-        d["token_preview"] = tok[:6] + "…"
-        out.append(d)
-    return out
-
-
-async def revoke_extension_token(token_id: int, user_id: int) -> bool:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        result = await conn.execute(
-            "UPDATE extension_tokens SET revoked = TRUE WHERE id = $1 AND user_id = $2",
-            token_id, user_id,
-        )
-    return result == "UPDATE 1"
-
+# ── Browser recorder (extension) ────────────────────────────────────────────────
 
 async def set_meeting_recorder_user(meeting_id: str, user_id: int) -> None:
     pool = await get_pool()
