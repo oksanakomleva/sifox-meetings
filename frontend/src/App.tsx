@@ -7,6 +7,8 @@ import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Meetings from './pages/Meetings'
 import MeetingDetail from './pages/MeetingDetail'
+import CallsFeed from './pages/demo/CallsFeed'
+import CallDetail from './pages/demo/CallDetail'
 import AdminCalendars from './pages/admin/AdminCalendars'
 import AdminUsers from './pages/admin/AdminUsers'
 import AdminMeetings from './pages/admin/AdminMeetings'
@@ -44,6 +46,9 @@ function ProtectedLayout() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/meetings" element={<Meetings />} />
         <Route path="/meetings/:id" element={<MeetingDetail />} />
+        {/* Demo-only "Calls" section (components redirect out when demo is off) */}
+        <Route path="/calls" element={<CallsFeed />} />
+        <Route path="/calls/:id" element={<CallDetail />} />
         <Route path="/settings/extension" element={<ExtensionTokens />} />
         {user.is_admin && (
           <>

@@ -35,6 +35,11 @@ const IconStorage = () => (
     <path d="M3 9v4c0 1.38 3.134 2.5 7 2.5S17 14.38 17 13V9"/>
   </svg>
 )
+const IconCalls = () => (
+  <svg className="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
+    <path d="M4 3h3l1.5 4-2 1.5a11 11 0 005 5l1.5-2 4 1.5v3a1 1 0 01-1 1A14 14 0 013 4a1 1 0 011-1z"/>
+  </svg>
+)
 const IconExtension = () => (
   <svg className="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
     <path d="M7 3h3v2.5a1.5 1.5 0 003 0V3h3v3h-2.5a1.5 1.5 0 000 3H17v3h-3v-2.5a1.5 1.5 0 00-3 0V15H7v-3H4.5a1.5 1.5 0 010-3H7V3z"/>
@@ -82,6 +87,11 @@ export default function Sidebar() {
         <NavLink to="/meetings" className={({ isActive }) => isActive ? 'active' : ''}>
           <IconMeetings /> Встречи
         </NavLink>
+        {demoOn && (
+          <NavLink to="/calls" className={({ isActive }) => isActive ? 'active' : ''}>
+            <IconCalls /> Звонки
+          </NavLink>
+        )}
         {!demoOn && (
           <NavLink to="/settings/extension" className={({ isActive }) => isActive ? 'active' : ''}>
             <IconExtension /> Расширение
