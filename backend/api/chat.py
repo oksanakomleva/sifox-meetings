@@ -20,12 +20,18 @@ CurrentUser = Annotated[dict, Depends(get_current_user)]
 class ChatRequest(BaseModel):
     message: str
     meeting_id: str | None = None  # None = ask about all accessible meetings
+    demo: bool = False             # demo mode: scope to "демо" meetings, don't persist
+
+
+_DEMO_TAG = "демо"
 
 
 @router.post("/stream")
 async def chat_stream(req: ChatRequest, user: CurrentUser):
     """SSE streaming chat response."""
     user_id = user["user_id"]
+    # Demo only takes effect inside a preview session (admin-only to create).
+    demo_mode = bool(req.demo and user.get("is_preview"))
 
     # Build context from FULL transcripts (with speaker labels), no protocols.
     # Bounded by a character budget so we never blow the model's context window.
@@ -57,6 +63,13 @@ async def chat_stream(req: ChatRequest, user: CurrentUser):
             meetings = await models.get_recent_meetings_with_transcripts_for_user(
                 user_id, days=config.CHAT_CONTEXT_DAYS
             )
+
+        if demo_mode:
+            # Only reason over the curated "демо" meetings.
+            meetings = [
+                m for m in meetings
+                if any((t or "").lower() == _DEMO_TAG for t in (m.get("tags") or []))
+            ]
 
         used = 0
         included = 0
@@ -92,7 +105,8 @@ async def chat_stream(req: ChatRequest, user: CurrentUser):
     from datetime import datetime, timezone
     today = datetime.now(timezone.utc).strftime("%d %B %Y")
 
-    history = await models.get_chat_history(user_id, req.meeting_id, limit=10)
+    # Demo chat is ephemeral: no past history fed in, nothing saved.
+    history = [] if demo_mode else await models.get_chat_history(user_id, req.meeting_id, limit=10)
     messages = [
         {
             "role": "system",
@@ -111,10 +125,11 @@ async def chat_stream(req: ChatRequest, user: CurrentUser):
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": req.message})
 
-    await models.save_chat_message(user_id, "user", req.message, req.meeting_id)
+    if not demo_mode:
+        await models.save_chat_message(user_id, "user", req.message, req.meeting_id)
 
     return StreamingResponse(
-        _stream_openai(messages, user_id, req.meeting_id),
+        _stream_openai(messages, user_id, req.meeting_id, persist=not demo_mode),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -127,6 +142,7 @@ async def _stream_openai(
     messages: list[dict],
     user_id: int,
     meeting_id: str | None,
+    persist: bool = True,
 ) -> AsyncGenerator[str, None]:
     from openai import AsyncOpenAI
 
@@ -147,10 +163,11 @@ async def _stream_openai(
                 full_response.append(delta)
                 yield f"data: {json.dumps({'delta': delta})}\n\n"
 
-        # Save assistant reply
-        await models.save_chat_message(
-            user_id, "assistant", "".join(full_response), meeting_id
-        )
+        # Save assistant reply (skipped in demo — chat is ephemeral)
+        if persist:
+            await models.save_chat_message(
+                user_id, "assistant", "".join(full_response), meeting_id
+            )
         yield "data: [DONE]\n\n"
 
     except Exception as e:

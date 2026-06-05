@@ -24,10 +24,16 @@ export default function Dashboard() {
       setSearchParams({}, { replace: true })
     }
 
-    api.meetings.weekSummary()
-      .then(r => { setSummary(r.summary); setMeetingCount(r.count) })
-      .catch(() => setSummary(null))
-      .finally(() => setLoadingSummary(false))
+    // Weekly summary is generated over all of the user's meetings, so it would
+    // leak non-demo content — skip it in demo (the section is hidden too).
+    if (isDemoOn()) {
+      setLoadingSummary(false)
+    } else {
+      api.meetings.weekSummary()
+        .then(r => { setSummary(r.summary); setMeetingCount(r.count) })
+        .catch(() => setSummary(null))
+        .finally(() => setLoadingSummary(false))
+    }
 
     api.chat.history(undefined)
       .then(r => setChatHistory(r.messages))
@@ -96,7 +102,8 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* ── Weekly AI summary ── */}
+        {/* ── Weekly AI summary (hidden in demo) ── */}
+        {!isDemoOn() && (
         <section>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
             <h2 style={{
@@ -147,6 +154,7 @@ export default function Dashboard() {
             )}
           </div>
         </section>
+        )}
 
         {/* ── Global AI chat ── */}
         <section>
@@ -166,14 +174,7 @@ export default function Dashboard() {
             Задайте вопрос по всем доступным вам встречам
           </p>
           <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-            {isDemoOn() ? (
-              <div style={{
-                padding: 'var(--space-6)', color: 'var(--color-text-muted)',
-                fontSize: 'var(--font-size-sm)', textAlign: 'center',
-              }}>
-                AI-ассистент доступен в рабочей версии — отвечает по всем вашим встречам.
-              </div>
-            ) : loadingChat ? (
+            {loadingChat ? (
               <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-8)' }}>
                 <span className="spinner" style={{ width: 24, height: 24 }} />
               </div>

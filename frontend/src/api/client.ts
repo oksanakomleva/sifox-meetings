@@ -10,7 +10,7 @@ export interface StorageFile {
   user_email: string | null
 }
 
-import { isDemoOn, demo as demoData, DEMO_MEETINGS } from '../demo/demo'
+import { isDemoOn, filterDemoMeetings, stripDemoTag, stripDemoFromTags } from '../demo/demo'
 
 const BASE = '/api'
 
@@ -46,40 +46,35 @@ export const api = {
 
   // ── Meetings ──────────────────────────────────────────────────────────────────
   meetings: {
-    list: (limit = 20, offset = 0) =>
-      isDemoOn()
-        ? Promise.resolve(demoData.list())
-        : request<{ meetings: import('../types').Meeting[] }>(`/meetings?limit=${limit}&offset=${offset}`),
+    // In demo mode: real meetings, but only those tagged "демо", with the "демо"
+    // tag hidden. Other tags shown as usual.
+    list: (limit = 20, offset = 0) => {
+      const p = request<{ meetings: import('../types').Meeting[] }>(`/meetings?limit=${limit}&offset=${offset}`)
+      return isDemoOn() ? p.then(r => ({ meetings: filterDemoMeetings(r.meetings) })) : p
+    },
     get: (id: string) => {
-      if (isDemoOn()) {
-        const m = demoData.get(id)
-        return m ? Promise.resolve(m) : Promise.reject(new Error('Not found'))
-      }
-      return request<import('../types').Meeting>(`/meetings/${id}`)
+      const p = request<import('../types').Meeting>(`/meetings/${id}`)
+      return isDemoOn() ? p.then(stripDemoTag) : p
     },
     transcript: (id: string) =>
-      isDemoOn()
-        ? Promise.resolve(demoData.transcript())
-        : request<{ transcript: string }>(`/meetings/${id}/transcript`),
+      request<{ transcript: string }>(`/meetings/${id}/transcript`),
     audioUrl: (id: string) => `/api/meetings/${id}/audio`,
     calendarStatus: () =>
       request<{ connected: boolean; has_enabled_calendar: boolean; calendar_count: number }>('/meetings/calendar-status'),
-    week: () =>
-      isDemoOn()
-        ? Promise.resolve(demoData.week())
-        : request<{ meetings: import('../types').Meeting[] }>('/meetings/week'),
+    week: () => {
+      const p = request<{ meetings: import('../types').Meeting[] }>('/meetings/week')
+      return isDemoOn() ? p.then(r => ({ meetings: filterDemoMeetings(r.meetings) })) : p
+    },
     weekSummary: () =>
-      isDemoOn()
-        ? Promise.resolve(demoData.weekSummary())
-        : request<{ summary: string | null; count: number }>('/meetings/week-summary'),
-    upcoming: () =>
-      isDemoOn()
-        ? Promise.resolve(demoData.upcoming())
-        : request<{ meetings: import('../types').Meeting[] }>('/meetings/upcoming'),
-    knownTags: () =>
-      isDemoOn()
-        ? Promise.resolve({ tags: Array.from(new Set(DEMO_MEETINGS.flatMap(m => m.tags ?? []))) })
-        : request<{ tags: string[] }>('/meetings/tags'),
+      request<{ summary: string | null; count: number }>('/meetings/week-summary'),
+    upcoming: () => {
+      const p = request<{ meetings: import('../types').Meeting[] }>('/meetings/upcoming')
+      return isDemoOn() ? p.then(r => ({ meetings: filterDemoMeetings(r.meetings) })) : p
+    },
+    knownTags: () => {
+      const p = request<{ tags: string[] }>('/meetings/tags')
+      return isDemoOn() ? p.then(r => ({ tags: stripDemoFromTags(r.tags) })) : p
+    },
     updateTags: (id: string, tags: string[]) =>
       request<{ tags: string[] }>(`/meetings/${id}/tags`, {
         method: 'PUT',
@@ -136,9 +131,12 @@ export const api = {
 
   // ── Chat ──────────────────────────────────────────────────────────────────────
   chat: {
+    // Demo chat starts empty and is not persisted — never load past history.
     history: (meetingId?: string) =>
-      request<{ messages: import('../types').ChatMessage[] }>(
-        `/chat/history${meetingId ? `?meeting_id=${meetingId}` : ''}`
-      ),
+      isDemoOn()
+        ? Promise.resolve({ messages: [] as import('../types').ChatMessage[] })
+        : request<{ messages: import('../types').ChatMessage[] }>(
+            `/chat/history${meetingId ? `?meeting_id=${meetingId}` : ''}`
+          ),
   },
 }

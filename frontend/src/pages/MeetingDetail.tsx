@@ -5,7 +5,6 @@ import StatusBadge from '../components/StatusBadge'
 import AudioPlayer from '../components/AudioPlayer'
 import ChatWidget from '../components/ChatWidget'
 import TagEditor from '../components/TagEditor'
-import { isDemoOn } from '../demo/demo'
 import type { Meeting, ChatMessage } from '../types'
 
 type Tab = 'protocol' | 'transcript' | 'audio' | 'chat'
@@ -163,9 +162,8 @@ export default function MeetingDetail() {
             const disabled: Record<Tab, boolean> = {
               protocol: meeting.status !== 'done' || !meeting.summary,
               transcript: meeting.status !== 'done',
-              // Audio/chat hit the backend by meeting id, which demo meetings don't have.
-              audio: !meeting.audio_path || isDemoOn(),
-              chat: meeting.status !== 'done' || isDemoOn(),
+              audio: !meeting.audio_path,
+              chat: meeting.status !== 'done',
             }
             return (
               <button

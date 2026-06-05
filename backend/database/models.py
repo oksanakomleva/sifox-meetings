@@ -700,7 +700,7 @@ async def get_recent_meetings_with_transcripts(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, title, topic, start_time, end_time, transcript
+            SELECT id, title, topic, start_time, end_time, transcript, tags
             FROM meetings
             WHERE status = 'done'
               AND transcript IS NOT NULL
@@ -728,7 +728,7 @@ async def get_recent_meetings_with_transcripts_for_user(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT DISTINCT m.id, m.title, m.topic, m.start_time, m.end_time, m.transcript
+            SELECT DISTINCT m.id, m.title, m.topic, m.start_time, m.end_time, m.transcript, m.tags
             FROM meetings m
             WHERE m.status = 'done'
               AND m.transcript IS NOT NULL
