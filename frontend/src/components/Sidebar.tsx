@@ -94,7 +94,7 @@ export default function Sidebar() {
         )}
         {!demoOn && (
           <NavLink to="/settings/extension" className={({ isActive }) => isActive ? 'active' : ''}>
-            <IconExtension /> Расширение
+            <IconExtension /> Запись в браузере
           </NavLink>
         )}
 
