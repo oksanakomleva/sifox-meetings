@@ -243,6 +243,16 @@ async def list_meetings(
     return {"meetings": meetings, "limit": limit, "offset": offset}
 
 
+@router.get("/demo-list")
+async def demo_list(user: CurrentUser):
+    """All "демо"-tagged completed meetings (the curated demo set), regardless of
+    the preview user's per-meeting access. Preview-gated."""
+    if not user.get("is_preview"):
+        raise HTTPException(403, "Demo only")
+    meetings = await models.get_demo_meetings()
+    return {"meetings": meetings}
+
+
 @router.get("/{meeting_id}")
 async def get_meeting(meeting_id: str, user: CurrentUser):
     meeting = await _get_accessible_meeting(meeting_id, user)
@@ -303,6 +313,11 @@ async def _get_accessible_meeting(meeting_id: str, user: dict) -> dict:
         raise HTTPException(404, "Meeting not found")
 
     if user["is_admin"]:
+        return meeting
+
+    # Preview/demo: the curated "демо"-tagged meetings are accessible regardless
+    # of the preview user's own per-meeting access.
+    if user.get("is_preview") and any((t or "").lower() == "демо" for t in (meeting.get("tags") or [])):
         return meeting
 
     # Check user has access

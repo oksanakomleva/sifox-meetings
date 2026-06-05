@@ -126,9 +126,31 @@ export default function CallDetail() {
               {call.reminders.length > 0 && (
                 <div className="card">
                   <div style={{ fontWeight: 600, marginBottom: 'var(--space-2)' }}>📅 Напоминания</div>
-                  {call.reminders.map((r, i) => (
-                    <div key={i} style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>{r}</div>
-                  ))}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+                    {call.reminders.map((r, i) => (
+                      <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                        <span style={{ flex: 1, fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>{r}</span>
+                        <button
+                          type="button"
+                          title="Добавить в календарь"
+                          onClick={() => window.open(
+                            `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(r)}`,
+                            '_blank', 'noopener',
+                          )}
+                          style={{
+                            flexShrink: 0, width: 28, height: 28, borderRadius: 8, cursor: 'pointer',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            border: '1px solid var(--color-border)', background: 'transparent', color: 'var(--color-accent)',
+                          }}
+                        >
+                          <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
+                            <rect x="3" y="4" width="14" height="13" rx="2" />
+                            <path d="M3 8h14M7 2v4M13 2v4M10 11v4M8 13h4" />
+                          </svg>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </>

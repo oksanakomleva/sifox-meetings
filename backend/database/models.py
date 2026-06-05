@@ -690,6 +690,25 @@ async def get_all_meetings(limit: int = 100, offset: int = 0) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_demo_meetings(limit: int = 200) -> list[dict]:
+    """All completed meetings tagged "демо" (the curated demo set), newest first."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, title, start_time, end_time, status, summary, tags, topic,
+                   meeting_type, audio_path, audio_size, created_at
+            FROM meetings
+            WHERE status = 'done'
+              AND EXISTS (SELECT 1 FROM unnest(tags) t WHERE lower(t) = 'демо')
+            ORDER BY start_time DESC NULLS LAST
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
 async def get_recent_meetings_with_transcripts(
     days: int = 90,
     limit: int = 1000,

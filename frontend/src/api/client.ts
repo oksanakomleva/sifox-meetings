@@ -48,10 +48,13 @@ export const api = {
   meetings: {
     // In demo mode: real meetings, but only those tagged "демо", with the "демо"
     // tag hidden. Other tags shown as usual.
-    list: (limit = 20, offset = 0) => {
-      const p = request<{ meetings: import('../types').Meeting[] }>(`/meetings?limit=${limit}&offset=${offset}`)
-      return isDemoOn() ? p.then(r => ({ meetings: filterDemoMeetings(r.meetings) })) : p
-    },
+    list: (limit = 20, offset = 0) =>
+      isDemoOn()
+        // Demo: the full curated "демо" set (preview-gated, not limited by the
+        // preview user's per-meeting access). Hide the "демо" tag itself.
+        ? request<{ meetings: import('../types').Meeting[] }>('/meetings/demo-list')
+            .then(r => ({ meetings: r.meetings.map(stripDemoTag) }))
+        : request<{ meetings: import('../types').Meeting[] }>(`/meetings?limit=${limit}&offset=${offset}`),
     get: (id: string) => {
       const p = request<import('../types').Meeting>(`/meetings/${id}`)
       return isDemoOn() ? p.then(stripDemoTag) : p
