@@ -127,6 +127,87 @@ async def week_summary(user: CurrentUser):
     return {"summary": summary_text, "count": len(meetings)}
 
 
+class DemoCallIn(BaseModel):
+    title: str
+    datetime: str = ""
+    transcript: str = ""
+
+
+class DemoSummaryRequest(BaseModel):
+    period: str = "week"            # 'day' | 'week'
+    calls: list[DemoCallIn] = []
+
+
+@router.post("/demo-summary")
+async def demo_summary(body: DemoSummaryRequest, user: CurrentUser):
+    """Demo-only day/week summary: SAME prompt as the real week summary, but the
+    context is the "демо"-tagged meetings for the period + the fake demo calls
+    sent from the client. Only available inside a preview session."""
+    if not user.get("is_preview"):
+        raise HTTPException(403, "Demo only")
+    from openai import AsyncOpenAI
+
+    # "демо"-tagged completed meetings with transcripts (admin-wide query — this
+    # is the curated demo set, and the endpoint is preview-gated).
+    meetings = await models.get_recent_meetings_with_transcripts(days=7)
+    meetings = [
+        m for m in meetings
+        if any((t or "").lower() == "демо" for t in (m.get("tags") or []))
+    ]
+    if body.period == "day":
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).date()
+        meetings = [
+            m for m in meetings
+            if m.get("start_time") and m["start_time"].date() == today
+        ]
+
+    max_chars = config.CHAT_MAX_CONTEXT_CHARS
+    parts: list[str] = []
+    used = 0
+    for m in meetings:
+        t = m.get("transcript")
+        if not t:
+            continue
+        block = (
+            f"### Встреча: {m.get('topic') or m.get('title') or 'Без названия'}\n"
+            f"Транскрипт:\n{t}"
+        )
+        if used + len(block) > max_chars:
+            break
+        parts.append(block)
+        used += len(block)
+    for c in body.calls:
+        block = f"### Звонок: {c.title} ({c.datetime})\nРасшифровка:\n{c.transcript}"
+        if used + len(block) > max_chars:
+            break
+        parts.append(block)
+        used += len(block)
+
+    if not parts:
+        return {"summary": None}
+
+    period_word = "за сегодня" if body.period == "day" else "за последние 7 дней"
+    context = "\n\n---\n\n".join(parts)
+    client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+    resp = await client.chat.completions.create(
+        model=config.CHAT_MODEL,
+        messages=[
+            {"role": "system", "content": _WEEK_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Встречи и звонки {period_word} (полные расшифровки):\n\n{context}\n\n"
+                    "Составь короткую сводку по правилам выше."
+                ),
+            },
+        ],
+        max_tokens=600,
+        temperature=0.3,
+    )
+    return {"summary": resp.choices[0].message.content}
+
+
 @router.get("/upcoming")
 async def upcoming_meetings(user: CurrentUser):
     """Pending/active meetings for Calendar tab."""

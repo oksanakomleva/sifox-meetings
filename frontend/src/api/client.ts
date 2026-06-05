@@ -67,6 +67,12 @@ export const api = {
     },
     weekSummary: () =>
       request<{ summary: string | null; count: number }>('/meetings/week-summary'),
+    // Demo-only: day/week summary over "демо" meetings + the fake calls (sent in).
+    demoSummary: (period: 'day' | 'week', calls: { title: string; datetime: string; transcript: string }[]) =>
+      request<{ summary: string | null }>('/meetings/demo-summary', {
+        method: 'POST',
+        body: JSON.stringify({ period, calls }),
+      }),
     // Upcoming meetings are pending (no tags yet); in demo we show the real
     // planned meetings from the calendar as-is.
     upcoming: () =>
