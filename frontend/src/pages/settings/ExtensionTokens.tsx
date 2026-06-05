@@ -1,5 +1,15 @@
-import { useState } from 'react'
+import { useState, type CSSProperties } from 'react'
 import { api } from '../../api/client'
+
+// Card sub-headings: plain sentence case. Using a <div> (not <h3>) avoids the
+// global h1–h4 rule that forces UPPERCASE + title-font letter-spacing, which
+// made these instruction headings look like shouting.
+const cardTitle: CSSProperties = {
+  margin: '0 0 var(--space-3)',
+  fontSize: 'var(--font-size-base)',
+  fontWeight: 700,
+  color: 'var(--color-text)',
+}
 
 function CopyChip({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
@@ -41,7 +51,7 @@ export default function ExtensionTokens() {
       <div className="page-body" style={{ maxWidth: 760 }}>
         {/* Installation */}
         <div className="card" style={{ padding: 'var(--space-4)', marginBottom: 'var(--space-4)' }}>
-          <h3 style={{ marginTop: 0 }}>Установка</h3>
+          <div style={cardTitle}>Установка</div>
           <ol style={{ margin: 0, paddingLeft: 20, lineHeight: 1.9 }}>
             <li>
               Скачайте архив и распакуйте его в постоянную папку (не удаляйте её потом —
@@ -78,7 +88,7 @@ export default function ExtensionTokens() {
 
         {/* First run */}
         <div className="card" style={{ padding: 'var(--space-4)', marginBottom: 'var(--space-4)' }}>
-          <h3 style={{ marginTop: 0 }}>Первый запуск</h3>
+          <div style={cardTitle}>Первый запуск</div>
           <ol style={{ margin: 0, paddingLeft: 20, lineHeight: 1.9 }}>
             <li>Войдите в Sifox в этом браузере (как обычно, через Google) — расширение
               подхватит ваш вход автоматически, отдельный токен не нужен.</li>
@@ -90,7 +100,7 @@ export default function ExtensionTokens() {
 
         {/* Usage */}
         <div className="card" style={{ padding: 'var(--space-4)', marginBottom: 'var(--space-4)' }}>
-          <h3 style={{ marginTop: 0 }}>Как пользоваться</h3>
+          <div style={cardTitle}>Как пользоваться</div>
           <p style={{ margin: '0 0 6px', fontWeight: 600 }}>Когда вы на встрече:</p>
           <ul style={{ margin: '0 0 12px', paddingLeft: 20, lineHeight: 1.8 }}>
             <li>Откройте вкладку со встречей (Google Meet, Zoom-web, любой звонок в браузере).</li>
@@ -119,7 +129,7 @@ export default function ExtensionTokens() {
 
         {/* Auth */}
         <div className="card" style={{ padding: 'var(--space-4)' }}>
-          <h3 style={{ marginTop: 0 }}>Авторизация</h3>
+          <div style={cardTitle}>Авторизация</div>
           <p style={{ margin: 0, lineHeight: 1.6, color: 'var(--color-text-secondary)' }}>
             Расширение использует ваш вход в Sifox (Google). Пока вы залогинены в веб-приложении
             в этом браузере — расширение авторизовано автоматически. Если вы выйдете из аккаунта,
