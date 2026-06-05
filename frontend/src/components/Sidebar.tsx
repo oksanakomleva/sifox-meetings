@@ -1,5 +1,7 @@
+import { useState, type CSSProperties } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
+import { isDemoOn, setDemo, clearDemo } from '../demo/demo'
 
 const IconHome = () => (
   <svg className="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
@@ -48,6 +50,24 @@ const IconLogout = () => (
 
 export default function Sidebar() {
   const { user, logout } = useAuth()
+  const [menuOpen, setMenuOpen] = useState(false)
+  const demoOn = isDemoOn()
+
+  const toggleDemo = () => {
+    setDemo(!demoOn)
+    window.location.assign('/')   // reload at home so demo data loads fresh
+  }
+  const exitPreview = () => {
+    clearDemo()
+    window.location.href = '/api/auth/exit-preview'
+  }
+
+  const menuItemStyle: CSSProperties = {
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    width: '100%', gap: 8, padding: '8px 10px', background: 'none', border: 'none',
+    borderRadius: 6, cursor: 'pointer', fontSize: 13, color: 'var(--color-text)',
+    textAlign: 'left',
+  }
 
   return (
     <aside className="sidebar">
@@ -62,9 +82,11 @@ export default function Sidebar() {
         <NavLink to="/meetings" className={({ isActive }) => isActive ? 'active' : ''}>
           <IconMeetings /> Встречи
         </NavLink>
-        <NavLink to="/settings/extension" className={({ isActive }) => isActive ? 'active' : ''}>
-          <IconExtension /> Расширение
-        </NavLink>
+        {!demoOn && (
+          <NavLink to="/settings/extension" className={({ isActive }) => isActive ? 'active' : ''}>
+            <IconExtension /> Расширение
+          </NavLink>
+        )}
 
         {user?.is_admin && (
           <>
@@ -85,29 +107,70 @@ export default function Sidebar() {
         )}
       </nav>
 
-      <div className="sidebar-footer">
-        {user?.avatar_url ? (
-          <img src={user.avatar_url} alt={user.name} className="sidebar-avatar" />
-        ) : (
-          <div className="sidebar-avatar" style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: '14px', fontWeight: 600, color: '#fff',
-            background: 'rgba(255,255,255,0.15)',
-          }}>
-            {user?.name?.[0]?.toUpperCase() || '?'}
-          </div>
-        )}
-        <div className="sidebar-user-info">
-          <div className="sidebar-user-name">{user?.name}</div>
-          <div className="sidebar-user-email">{user?.email}</div>
-        </div>
+      <div className="sidebar-footer" style={{ position: 'relative' }}>
+        {/* Click the user block to open the account menu */}
         <button
-          onClick={logout}
-          title="Выйти"
-          style={{ color: 'var(--color-sidebar-muted)', padding: '4px' }}
+          onClick={() => setMenuOpen(o => !o)}
+          title="Аккаунт"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
+            flex: 1, minWidth: 0, background: 'none', border: 'none',
+            cursor: 'pointer', padding: 0, textAlign: 'left',
+          }}
         >
-          <IconLogout />
+          {user?.avatar_url ? (
+            <img src={user.avatar_url} alt={user.name} className="sidebar-avatar" />
+          ) : (
+            <div className="sidebar-avatar" style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: '14px', fontWeight: 600, color: '#fff',
+              background: 'rgba(255,255,255,0.15)',
+            }}>
+              {user?.name?.[0]?.toUpperCase() || '?'}
+            </div>
+          )}
+          <div className="sidebar-user-info">
+            <div className="sidebar-user-name">
+              {user?.name}{demoOn ? ' · демо' : ''}
+            </div>
+            <div className="sidebar-user-email">{user?.email}</div>
+          </div>
         </button>
+
+        {menuOpen && (
+          <>
+            <div
+              onClick={() => setMenuOpen(false)}
+              style={{ position: 'fixed', inset: 0, zIndex: 40 }}
+            />
+            <div style={{
+              position: 'absolute', bottom: '100%', left: 0, right: 0, marginBottom: 8,
+              background: 'var(--color-surface)', border: '1px solid var(--color-border)',
+              borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.25)',
+              padding: 6, zIndex: 50, display: 'flex', flexDirection: 'column', gap: 2,
+            }}>
+              {user?.is_preview && (
+                <>
+                  <button style={menuItemStyle} onClick={toggleDemo}>
+                    <span>Режим демонстрации</span>
+                    <span style={{
+                      fontSize: 11, fontWeight: 700,
+                      color: demoOn ? 'var(--color-accent)' : 'var(--color-text-muted)',
+                    }}>{demoOn ? '● ВКЛ' : 'ВЫКЛ'}</span>
+                  </button>
+                  <button style={menuItemStyle} onClick={exitPreview}>
+                    ← Вернуться к админскому виду
+                  </button>
+                  <div style={{ height: 1, background: 'var(--color-border)', margin: '4px 0' }} />
+                </>
+              )}
+              <button style={menuItemStyle} onClick={logout}>
+                <span>Выйти</span>
+                <IconLogout />
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </aside>
   )

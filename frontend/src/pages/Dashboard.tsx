@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import { useAuth } from '../hooks/useAuth'
 import ChatWidget from '../components/ChatWidget'
+import { isDemoOn } from '../demo/demo'
 import type { ChatMessage } from '../types'
 
 export default function Dashboard() {
@@ -165,7 +166,14 @@ export default function Dashboard() {
             Задайте вопрос по всем доступным вам встречам
           </p>
           <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-            {loadingChat ? (
+            {isDemoOn() ? (
+              <div style={{
+                padding: 'var(--space-6)', color: 'var(--color-text-muted)',
+                fontSize: 'var(--font-size-sm)', textAlign: 'center',
+              }}>
+                AI-ассистент доступен в рабочей версии — отвечает по всем вашим встречам.
+              </div>
+            ) : loadingChat ? (
               <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-8)' }}>
                 <span className="spinner" style={{ width: 24, height: 24 }} />
               </div>

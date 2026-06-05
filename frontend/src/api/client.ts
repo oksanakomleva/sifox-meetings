@@ -10,6 +10,8 @@ export interface StorageFile {
   user_email: string | null
 }
 
+import { isDemoOn, demo as demoData, DEMO_MEETINGS } from '../demo/demo'
+
 const BASE = '/api'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -45,22 +47,39 @@ export const api = {
   // ── Meetings ──────────────────────────────────────────────────────────────────
   meetings: {
     list: (limit = 20, offset = 0) =>
-      request<{ meetings: import('../types').Meeting[] }>(`/meetings?limit=${limit}&offset=${offset}`),
-    get: (id: string) =>
-      request<import('../types').Meeting>(`/meetings/${id}`),
+      isDemoOn()
+        ? Promise.resolve(demoData.list())
+        : request<{ meetings: import('../types').Meeting[] }>(`/meetings?limit=${limit}&offset=${offset}`),
+    get: (id: string) => {
+      if (isDemoOn()) {
+        const m = demoData.get(id)
+        return m ? Promise.resolve(m) : Promise.reject(new Error('Not found'))
+      }
+      return request<import('../types').Meeting>(`/meetings/${id}`)
+    },
     transcript: (id: string) =>
-      request<{ transcript: string }>(`/meetings/${id}/transcript`),
+      isDemoOn()
+        ? Promise.resolve(demoData.transcript())
+        : request<{ transcript: string }>(`/meetings/${id}/transcript`),
     audioUrl: (id: string) => `/api/meetings/${id}/audio`,
     calendarStatus: () =>
       request<{ connected: boolean; has_enabled_calendar: boolean; calendar_count: number }>('/meetings/calendar-status'),
     week: () =>
-      request<{ meetings: import('../types').Meeting[] }>('/meetings/week'),
+      isDemoOn()
+        ? Promise.resolve(demoData.week())
+        : request<{ meetings: import('../types').Meeting[] }>('/meetings/week'),
     weekSummary: () =>
-      request<{ summary: string | null; count: number }>('/meetings/week-summary'),
+      isDemoOn()
+        ? Promise.resolve(demoData.weekSummary())
+        : request<{ summary: string | null; count: number }>('/meetings/week-summary'),
     upcoming: () =>
-      request<{ meetings: import('../types').Meeting[] }>('/meetings/upcoming'),
+      isDemoOn()
+        ? Promise.resolve(demoData.upcoming())
+        : request<{ meetings: import('../types').Meeting[] }>('/meetings/upcoming'),
     knownTags: () =>
-      request<{ tags: string[] }>('/meetings/tags'),
+      isDemoOn()
+        ? Promise.resolve({ tags: Array.from(new Set(DEMO_MEETINGS.flatMap(m => m.tags ?? []))) })
+        : request<{ tags: string[] }>('/meetings/tags'),
     updateTags: (id: string, tags: string[]) =>
       request<{ tags: string[] }>(`/meetings/${id}/tags`, {
         method: 'PUT',
