@@ -140,9 +140,7 @@ export default function Sidebar() {
             </div>
           )}
           <div className="sidebar-user-info">
-            <div className="sidebar-user-name">
-              {user?.name}{demoOn ? ' · демо' : ''}
-            </div>
+            <div className="sidebar-user-name">{user?.name}</div>
             <div className="sidebar-user-email">{user?.email}</div>
           </div>
         </button>

@@ -4,7 +4,7 @@ import { api } from '../api/client'
 import { useAuth } from '../hooks/useAuth'
 import ChatWidget from '../components/ChatWidget'
 import { isDemoOn } from '../demo/demo'
-import { callsForDay, callsForWeek, type DemoCall } from '../demo/calls'
+import { callsForWeek, type DemoCall } from '../demo/calls'
 import type { ChatMessage } from '../types'
 
 export default function Dashboard() {
@@ -17,7 +17,6 @@ export default function Dashboard() {
   const [loadingChat, setLoadingChat] = useState(true)
   const [calStatus, setCalStatus] = useState<{ connected: boolean; has_enabled_calendar: boolean } | null>(null)
   const [calendarJustConnected, setCalendarJustConnected] = useState(false)
-  const [demoDay, setDemoDay] = useState<string | null>(null)
   const [demoWeek, setDemoWeek] = useState<string | null>(null)
   const [loadingDemo, setLoadingDemo] = useState(true)
 
@@ -41,11 +40,8 @@ export default function Dashboard() {
           transcript: c.transcript.map(l => `[${l.time}] ${l.speaker}: ${l.text}`).join('\n'),
         }))
       setLoadingDemo(true)
-      Promise.all([
-        api.meetings.demoSummary('day', toPayload(callsForDay())),
-        api.meetings.demoSummary('week', toPayload(callsForWeek())),
-      ])
-        .then(([d, w]) => { setDemoDay(d.summary); setDemoWeek(w.summary) })
+      api.meetings.demoSummary('week', toPayload(callsForWeek()))
+        .then(w => setDemoWeek(w.summary))
         .catch(() => {})
         .finally(() => setLoadingDemo(false))
     } else {
@@ -126,7 +122,7 @@ export default function Dashboard() {
         {isDemoOn() && (
           <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 420px)', gap: 'var(--space-5)', alignItems: 'start' }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
-              {([['Итоги дня', demoDay], ['Итоги недели', demoWeek]] as [string, string | null][]).map(([title, text]) => (
+              {([['Итоги недели', demoWeek]] as [string, string | null][]).map(([title, text]) => (
                 <section key={title}>
                   <h2 style={{ fontSize: 'var(--font-size-lg)', fontWeight: 'var(--font-weight-semibold)', color: 'var(--color-text)', margin: '0 0 var(--space-4)' }}>
                     {title}
