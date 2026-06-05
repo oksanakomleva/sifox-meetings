@@ -18,6 +18,7 @@ export interface DemoCall {
   title: string
   phone: string
   duration: string          // mm:ss
+  date: string              // ISO timestamp (for day/week roll-ups)
   datetime: string          // human label, e.g. "17 окт., 16:57"
   tasksCount?: number
   remindersCount?: number
@@ -44,13 +45,25 @@ export const ANALYSIS_TYPES: AnalysisType[] = [
 
 const PHONE = '+7 (XXX) XXX-XX-XX'
 
+// Build a date `offset` days ago at h:m, returning both an ISO timestamp (for
+// filtering day/week roll-ups) and a Russian display label.
+function dcal(offset: number, h: number, m: number): { date: string; datetime: string } {
+  const d = new Date()
+  d.setDate(d.getDate() - offset)
+  d.setHours(h, m, 0, 0)
+  return {
+    date: d.toISOString(),
+    datetime: d.toLocaleString('ru-RU', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }),
+  }
+}
+
 export const DEMO_CALLS: DemoCall[] = [
   {
     id: 'call-1',
     title: 'Продажа квартиры Айгуль: встреча в 20:00',
     phone: PHONE,
     duration: '3:14',
-    datetime: '17 окт., 16:57',
+    ...dcal(0, 16, 57),
     tasksCount: 5,
     remindersCount: 1,
     transcript: [
@@ -83,7 +96,7 @@ export const DEMO_CALLS: DemoCall[] = [
     title: 'Документы для Edo и Egoist',
     phone: PHONE,
     duration: '0:59',
-    datetime: '27 янв., 21:02',
+    ...dcal(1, 21, 2),
     tasksCount: 3,
     transcript: [
       { time: '0:00', speaker: 'Вы', text: 'Привет, по документам для Edo и Egoist что готово?' },
@@ -105,7 +118,7 @@ export const DEMO_CALLS: DemoCall[] = [
     title: 'Договоры на Арцуловской, подписание',
     phone: PHONE,
     duration: '0:49',
-    datetime: '27 янв., 20:42',
+    ...dcal(2, 20, 42),
     tasksCount: 3,
     remindersCount: 1,
     transcript: [
@@ -127,7 +140,7 @@ export const DEMO_CALLS: DemoCall[] = [
     title: 'Обсуждение планов и проблем с iPhone',
     phone: PHONE,
     duration: '3:36',
-    datetime: '12 дек., 19:45',
+    ...dcal(4, 19, 45),
     transcript: [
       { time: '0:00', speaker: 'Вы', text: 'Что с поставкой iPhone, решили вопрос?' },
       { time: '0:08', speaker: 'Собеседник', text: 'Часть партии задерживается на неделю.' },
@@ -212,15 +225,25 @@ export const ANALYSIS_RESULTS: Record<Exclude<AnalysisType['key'], 'chat'>, Anal
   },
 }
 
-// ── Day / week roll-ups across all demo calls (for the demo Dashboard) ────────
+// ── Date helpers for day/week roll-ups (calls + meetings) ─────────────────────
 
-export const DEMO_CALLS_DAY_SUMMARY =
-  'Сегодня 2 звонка. По квартире Айгуль договорились о встрече в 20:00 — нужно подтвердить в 17:00. ' +
-  'По документам для Edo и Egoist: подставить реквизиты и отправить на проверку до конца дня.'
+export function isToday(iso?: string | null): boolean {
+  if (!iso) return false
+  const d = new Date(iso)
+  const n = new Date()
+  return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate()
+}
 
-export const DEMO_CALLS_WEEK_SUMMARY =
-  'За неделю 4 звонка.\n' +
-  '• Айгуль — продажа квартиры: вышли на встречу с осмотром, цена обсуждается.\n' +
-  '• Арцуловская — подписание договоров согласовано на завтра 11:00.\n' +
-  '• Edo / Egoist — документы готовятся, проверка сегодня.\n' +
-  '• iPhone — задержка поставки на неделю, клиентов предупреждаем.'
+export function isWithinDays(iso: string | null | undefined, days: number): boolean {
+  if (!iso) return false
+  const diff = Date.now() - new Date(iso).getTime()
+  return diff >= 0 && diff <= days * 24 * 60 * 60 * 1000
+}
+
+export function callsForDay(): DemoCall[] {
+  return DEMO_CALLS.filter(c => isToday(c.date))
+}
+
+export function callsForWeek(): DemoCall[] {
+  return DEMO_CALLS.filter(c => isWithinDays(c.date, 7))
+}

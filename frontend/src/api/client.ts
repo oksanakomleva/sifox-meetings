@@ -67,10 +67,10 @@ export const api = {
     },
     weekSummary: () =>
       request<{ summary: string | null; count: number }>('/meetings/week-summary'),
-    upcoming: () => {
-      const p = request<{ meetings: import('../types').Meeting[] }>('/meetings/upcoming')
-      return isDemoOn() ? p.then(r => ({ meetings: filterDemoMeetings(r.meetings) })) : p
-    },
+    // Upcoming meetings are pending (no tags yet); in demo we show the real
+    // planned meetings from the calendar as-is.
+    upcoming: () =>
+      request<{ meetings: import('../types').Meeting[] }>('/meetings/upcoming'),
     knownTags: () => {
       const p = request<{ tags: string[] }>('/meetings/tags')
       return isDemoOn() ? p.then(r => ({ tags: stripDemoFromTags(r.tags) })) : p

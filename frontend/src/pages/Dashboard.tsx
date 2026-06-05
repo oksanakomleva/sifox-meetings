@@ -4,8 +4,8 @@ import { api } from '../api/client'
 import { useAuth } from '../hooks/useAuth'
 import ChatWidget from '../components/ChatWidget'
 import { isDemoOn } from '../demo/demo'
-import { DEMO_CALLS_DAY_SUMMARY, DEMO_CALLS_WEEK_SUMMARY } from '../demo/calls'
-import type { ChatMessage } from '../types'
+import { callsForDay, callsForWeek, isToday, isWithinDays, type DemoCall } from '../demo/calls'
+import type { ChatMessage, Meeting } from '../types'
 
 export default function Dashboard() {
   const { user } = useAuth()
@@ -17,6 +17,7 @@ export default function Dashboard() {
   const [loadingChat, setLoadingChat] = useState(true)
   const [calStatus, setCalStatus] = useState<{ connected: boolean; has_enabled_calendar: boolean } | null>(null)
   const [calendarJustConnected, setCalendarJustConnected] = useState(false)
+  const [demoMeetings, setDemoMeetings] = useState<Meeting[]>([])
 
   useEffect(() => {
     // Check if redirected back after connecting calendar
@@ -29,6 +30,8 @@ export default function Dashboard() {
     // leak non-demo content — skip it in demo (the section is hidden too).
     if (isDemoOn()) {
       setLoadingSummary(false)
+      // Demo dashboard rolls up calls + "демо"-tagged meetings.
+      api.meetings.list(100).then(r => setDemoMeetings(r.meetings)).catch(() => {})
     } else {
       api.meetings.weekSummary()
         .then(r => { setSummary(r.summary); setMeetingCount(r.count) })
@@ -107,19 +110,16 @@ export default function Dashboard() {
         {isDemoOn() && (
           <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 420px)', gap: 'var(--space-5)', alignItems: 'start' }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
-              {[
-                { title: 'Итоги дня', text: DEMO_CALLS_DAY_SUMMARY },
-                { title: 'Итоги недели', text: DEMO_CALLS_WEEK_SUMMARY },
-              ].map(s => (
-                <section key={s.title}>
-                  <h2 style={{ fontSize: 'var(--font-size-lg)', fontWeight: 'var(--font-weight-semibold)', color: 'var(--color-text)', margin: '0 0 var(--space-4)' }}>
-                    {s.title}
-                  </h2>
-                  <div className="card">
-                    <p style={{ margin: 0, fontSize: 'var(--font-size-base)', lineHeight: 'var(--line-height-relaxed)', whiteSpace: 'pre-wrap' }}>{s.text}</p>
-                  </div>
-                </section>
-              ))}
+              <RollUp
+                title="Итоги дня"
+                calls={callsForDay()}
+                meetings={demoMeetings.filter(m => isToday(m.start_time))}
+              />
+              <RollUp
+                title="Итоги недели"
+                calls={callsForWeek()}
+                meetings={demoMeetings.filter(m => isWithinDays(m.start_time, 7))}
+              />
             </div>
             <div>
               <h2 style={{ fontSize: 'var(--font-size-lg)', fontWeight: 'var(--font-weight-semibold)', color: 'var(--color-text)', margin: '0 0 var(--space-4)' }}>
@@ -227,5 +227,47 @@ export default function Dashboard() {
 
       </div>
     </div>
+  )
+}
+
+function plural(n: number, one: string, few: string, many: string): string {
+  const m10 = n % 10, m100 = n % 100
+  if (m10 === 1 && m100 !== 11) return one
+  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few
+  return many
+}
+
+function RollUp({ title, calls, meetings }: { title: string; calls: DemoCall[]; meetings: Meeting[] }) {
+  const empty = calls.length === 0 && meetings.length === 0
+  return (
+    <section>
+      <h2 style={{ fontSize: 'var(--font-size-lg)', fontWeight: 'var(--font-weight-semibold)', color: 'var(--color-text)', margin: '0 0 var(--space-4)' }}>
+        {title}
+      </h2>
+      <div className="card">
+        {empty ? (
+          <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-text-muted)' }}>Событий нет.</p>
+        ) : (
+          <>
+            <p style={{ margin: '0 0 var(--space-3)', fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>
+              {calls.length} {plural(calls.length, 'звонок', 'звонка', 'звонков')} ·{' '}
+              {meetings.length} {plural(meetings.length, 'встреча', 'встречи', 'встреч')}
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+              {calls.map(c => (
+                <div key={c.id} style={{ fontSize: 'var(--font-size-sm)' }}>
+                  📞 {c.title} <span style={{ color: 'var(--color-text-muted)' }}>· {c.datetime}</span>
+                </div>
+              ))}
+              {meetings.map(m => (
+                <div key={m.id} style={{ fontSize: 'var(--font-size-sm)' }}>
+                  📅 {m.topic || m.title || 'Встреча'}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </section>
   )
 }
