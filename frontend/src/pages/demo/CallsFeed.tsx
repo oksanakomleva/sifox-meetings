@@ -1,10 +1,12 @@
-import { type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useNavigate, Navigate } from 'react-router-dom'
 import { isDemoOn } from '../../demo/demo'
-import { DEMO_CALLS } from '../../demo/calls'
+import { DEMO_CALLS, type DemoCall } from '../../demo/calls'
+import CallAnalysisPanel from '../../components/demo/CallAnalysisPanel'
 
 export default function CallsFeed() {
   const navigate = useNavigate()
+  const [analysisCall, setAnalysisCall] = useState<DemoCall | null>(null)
 
   // Demo-only section.
   if (!isDemoOn()) return <Navigate to="/" replace />
@@ -30,10 +32,15 @@ export default function CallsFeed() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
                   {c.tasksCount ? <Badge>✔ {c.tasksCount}</Badge> : null}
                   {c.remindersCount ? <Badge>📅 {c.remindersCount}</Badge> : null}
-                  <span style={{
-                    width: 26, height: 26, borderRadius: 8, display: 'flex', alignItems: 'center',
-                    justifyContent: 'center', background: 'var(--color-accent-6)', color: 'var(--color-accent)',
-                  }} title="AI-анализ">✨</span>
+                  <button
+                    onClick={() => setAnalysisCall(c)}
+                    title="AI-анализ"
+                    style={{
+                      width: 28, height: 28, borderRadius: 8, display: 'flex', alignItems: 'center',
+                      justifyContent: 'center', background: 'var(--color-accent-6)', color: 'var(--color-accent)',
+                      border: 'none', cursor: 'pointer', fontSize: 15,
+                    }}
+                  >✨</button>
                 </div>
               </div>
               <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
@@ -50,6 +57,31 @@ export default function CallsFeed() {
           ))}
         </div>
       </div>
+
+      {/* Right-side AI analysis drawer */}
+      {analysisCall && (
+        <>
+          <div onClick={() => setAnalysisCall(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', zIndex: 100 }} />
+          <div style={{
+            position: 'fixed', top: 0, right: 0, bottom: 0, width: 'min(460px, 92vw)', zIndex: 101,
+            background: 'var(--color-surface)', boxShadow: '-8px 0 30px rgba(0,0,0,0.25)',
+            display: 'flex', flexDirection: 'column',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: 'var(--space-4)', borderBottom: '1px solid var(--color-border)' }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 700 }}>AI Анализ звонка</div>
+                <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {analysisCall.title}
+                </div>
+              </div>
+              <button onClick={() => setAnalysisCall(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, color: 'var(--color-text-muted)' }}>×</button>
+            </div>
+            <div style={{ padding: 'var(--space-4)', overflowY: 'auto' }}>
+              <CallAnalysisPanel call={analysisCall} />
+            </div>
+          </div>
+        </>
+      )}
     </div>
   )
 }

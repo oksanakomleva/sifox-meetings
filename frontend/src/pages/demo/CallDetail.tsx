@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { useParams, useNavigate, Navigate } from 'react-router-dom'
 import { isDemoOn } from '../../demo/demo'
-import { demoCallById, ANALYSIS_TYPES, callAnalysis, type AnalysisType } from '../../demo/calls'
+import { demoCallById } from '../../demo/calls'
+import CallAnalysisPanel from '../../components/demo/CallAnalysisPanel'
 
 type RightTab = 'summary' | 'ai'
 
@@ -9,31 +10,10 @@ export default function CallDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const [rightTab, setRightTab] = useState<RightTab>('summary')
-  const [analysis, setAnalysis] = useState<AnalysisType['key'] | null>(null)
-  const [modalOpen, setModalOpen] = useState(false)
-  const [chat, setChat] = useState<{ role: 'user' | 'assistant'; text: string }[]>([])
-  const [chatInput, setChatInput] = useState('')
 
   if (!isDemoOn()) return <Navigate to="/" replace />
   const call = id ? demoCallById(id) : undefined
   if (!call) return <Navigate to="/calls" replace />
-
-  const pickAnalysis = (key: AnalysisType['key']) => {
-    setAnalysis(key)
-    setRightTab('ai')
-    setModalOpen(false)
-  }
-
-  const sendChat = () => {
-    const t = chatInput.trim()
-    if (!t) return
-    setChatInput('')
-    setChat(prev => [
-      ...prev,
-      { role: 'user', text: t },
-      { role: 'assistant', text: `Это демонстрационный ответ AI по звонку «${call.title}». В рабочей версии ассистент отвечает по реальной расшифровке разговора.` },
-    ])
-  }
 
   return (
     <div className="main-content">
@@ -48,7 +28,7 @@ export default function CallDetail() {
             <h1 className="page-title">{call.title}</h1>
             <p className="page-subtitle">📞 {call.phone} · {call.datetime}</p>
           </div>
-          <button className="btn btn-secondary" onClick={() => setModalOpen(true)}>✨ AI-анализ</button>
+          <button className="btn btn-secondary" onClick={() => setRightTab('ai')}>✨ AI-анализ</button>
         </div>
       </div>
 
@@ -154,94 +134,11 @@ export default function CallDetail() {
             </>
           ) : (
             <div className="card">
-              {!analysis ? (
-                <AnalysisPicker onPick={pickAnalysis} />
-              ) : analysis === 'chat' ? (
-                <div>
-                  <BackToTypes onBack={() => setAnalysis(null)} />
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', marginTop: 'var(--space-3)', maxHeight: 280, overflowY: 'auto' }}>
-                    {chat.length === 0 && (
-                      <div style={{ color: 'var(--color-text-muted)', fontSize: 'var(--font-size-sm)' }}>Задайте вопрос по этому звонку.</div>
-                    )}
-                    {chat.map((m, i) => (
-                      <div key={i} style={{
-                        alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-                        maxWidth: '85%', padding: '6px 10px', borderRadius: 'var(--radius-md)',
-                        fontSize: 'var(--font-size-sm)',
-                        background: m.role === 'user' ? 'var(--color-accent)' : 'var(--color-surface-2)',
-                        color: m.role === 'user' ? '#fff' : 'var(--color-text)',
-                      }}>{m.text}</div>
-                    ))}
-                  </div>
-                  <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }}>
-                    <input className="input" value={chatInput} onChange={e => setChatInput(e.target.value)}
-                      onKeyDown={e => e.key === 'Enter' && sendChat()} placeholder="Ваш вопрос…" style={{ flex: 1 }} />
-                    <button className="btn btn-primary" onClick={sendChat}>→</button>
-                  </div>
-                </div>
-              ) : (
-                <div>
-                  <BackToTypes onBack={() => setAnalysis(null)} />
-                  <div style={{ fontWeight: 600, margin: 'var(--space-3) 0 var(--space-2)' }}>
-                    {ANALYSIS_TYPES.find(t => t.key === analysis)?.title}
-                  </div>
-                  <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', lineHeight: 'var(--line-height-relaxed)', whiteSpace: 'pre-wrap' }}>
-                    {callAnalysis(call, analysis)}
-                  </p>
-                </div>
-              )}
+              <CallAnalysisPanel call={call} />
             </div>
           )}
         </div>
       </div>
-
-      {/* AI analysis modal */}
-      {modalOpen && (
-        <div onClick={() => setModalOpen(false)} style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 100,
-          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 'var(--space-4)',
-        }}>
-          <div onClick={e => e.stopPropagation()} style={{
-            background: 'var(--color-surface)', borderRadius: 'var(--radius-lg)', maxWidth: 460, width: '100%',
-            padding: 'var(--space-6)', boxShadow: '0 12px 40px rgba(0,0,0,0.3)',
-          }}>
-            <div style={{ fontSize: 'var(--font-size-lg)', fontWeight: 700, marginBottom: 4 }}>AI Анализ звонка</div>
-            <div style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--font-size-sm)', marginBottom: 'var(--space-4)' }}>
-              Что вы хотите узнать из этого разговора?
-            </div>
-            <AnalysisPicker onPick={pickAnalysis} />
-          </div>
-        </div>
-      )}
     </div>
-  )
-}
-
-function AnalysisPicker({ onPick }: { onPick: (k: AnalysisType['key']) => void }) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-      {ANALYSIS_TYPES.map(t => (
-        <button key={t.key} onClick={() => onPick(t.key)} style={{
-          display: 'flex', alignItems: 'flex-start', gap: 'var(--space-3)', textAlign: 'left',
-          padding: 'var(--space-3)', borderRadius: 'var(--radius-md)', cursor: 'pointer',
-          border: '1px solid var(--color-border)', background: 'transparent',
-        }}>
-          <span style={{ fontSize: 20, lineHeight: 1 }}>{t.icon}</span>
-          <span>
-            <span style={{ display: 'block', fontWeight: 600, fontSize: 'var(--font-size-sm)' }}>{t.title}</span>
-            <span style={{ display: 'block', color: 'var(--color-text-secondary)', fontSize: 'var(--font-size-xs)' }}>{t.desc}</span>
-          </span>
-        </button>
-      ))}
-    </div>
-  )
-}
-
-function BackToTypes({ onBack }: { onBack: () => void }) {
-  return (
-    <button onClick={onBack} style={{
-      background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-accent)',
-      fontSize: 'var(--font-size-sm)', padding: 0,
-    }}>← Все типы анализа</button>
   )
 }

@@ -4,6 +4,7 @@ import { api } from '../api/client'
 import { useAuth } from '../hooks/useAuth'
 import ChatWidget from '../components/ChatWidget'
 import { isDemoOn } from '../demo/demo'
+import { DEMO_CALLS_DAY_SUMMARY, DEMO_CALLS_WEEK_SUMMARY } from '../demo/calls'
 import type { ChatMessage } from '../types'
 
 export default function Dashboard() {
@@ -102,6 +103,41 @@ export default function Dashboard() {
           </div>
         )}
 
+        {/* ── Demo: call roll-ups (left) + AI chat (right) ── */}
+        {isDemoOn() && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 420px)', gap: 'var(--space-5)', alignItems: 'start' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+              {[
+                { title: 'Итоги дня', text: DEMO_CALLS_DAY_SUMMARY },
+                { title: 'Итоги недели', text: DEMO_CALLS_WEEK_SUMMARY },
+              ].map(s => (
+                <section key={s.title}>
+                  <h2 style={{ fontSize: 'var(--font-size-lg)', fontWeight: 'var(--font-weight-semibold)', color: 'var(--color-text)', margin: '0 0 var(--space-4)' }}>
+                    {s.title}
+                  </h2>
+                  <div className="card">
+                    <p style={{ margin: 0, fontSize: 'var(--font-size-base)', lineHeight: 'var(--line-height-relaxed)', whiteSpace: 'pre-wrap' }}>{s.text}</p>
+                  </div>
+                </section>
+              ))}
+            </div>
+            <div>
+              <h2 style={{ fontSize: 'var(--font-size-lg)', fontWeight: 'var(--font-weight-semibold)', color: 'var(--color-text)', margin: '0 0 var(--space-4)' }}>
+                AI-ассистент
+              </h2>
+              <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+                {loadingChat ? (
+                  <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-8)' }}>
+                    <span className="spinner" style={{ width: 24, height: 24 }} />
+                  </div>
+                ) : (
+                  <ChatWidget initialHistory={chatHistory} emptyPlaceholder="Спросите о встречах или звонках…" />
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ── Weekly AI summary (hidden in demo) ── */}
         {!isDemoOn() && (
         <section>
@@ -156,7 +192,8 @@ export default function Dashboard() {
         </section>
         )}
 
-        {/* ── Global AI chat ── */}
+        {/* ── Global AI chat (in demo it lives in the grid above) ── */}
+        {!isDemoOn() && (
         <section>
           <h2 style={{
             fontSize: 'var(--font-size-lg)',
@@ -186,6 +223,7 @@ export default function Dashboard() {
             )}
           </div>
         </section>
+        )}
 
       </div>
     </div>
