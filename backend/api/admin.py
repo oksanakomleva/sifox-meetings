@@ -62,11 +62,27 @@ async def set_calendar_enabled(
 
 @router.post("/calendars/sync")
 async def trigger_sync(admin: AdminUser):
-    """Manually trigger calendar sync for all users."""
-    from services.calendar_sync import sync_all_users
+    """Manually trigger calendar sync.
+
+    Refreshes the LIST of available calendars from Google right now (so newly
+    shared/added calendars show up), then kicks off event sync in the background.
+    """
+    from services.calendar_sync import sync_user_calendars, sync_all_users
     import asyncio
+
+    users = await models.get_all_users_with_tokens()
+    refreshed, failed = 0, 0
+    for u in users:
+        try:
+            await sync_user_calendars(u["id"])
+            refreshed += 1
+        except Exception as e:
+            failed += 1
+            logger.warning("Calendar list refresh failed for user %s: %s", u["id"], e)
+
+    # Events in the background (longer-running).
     asyncio.create_task(sync_all_users())
-    return {"ok": True, "message": "Sync started in background"}
+    return {"ok": True, "calendars_refreshed": refreshed, "failed": failed}
 
 
 # ── Meetings ──────────────────────────────────────────────────────────────────

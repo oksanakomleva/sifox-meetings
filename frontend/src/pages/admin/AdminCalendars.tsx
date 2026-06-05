@@ -23,9 +23,16 @@ export default function AdminCalendars() {
 
   const sync = async () => {
     setSyncing(true)
-    await api.admin.syncCalendars().catch(() => {})
-    setSyncing(false)
-    setTimeout(load, 3000)
+    try {
+      await api.admin.syncCalendars()  // refreshes the calendar list server-side
+      load()                           // list is ready now
+      // Events sync continues in the background — refresh again shortly to pick them up.
+      setTimeout(load, 4000)
+    } catch {
+      alert('Не удалось синхронизировать. Возможно, истёк доступ к Google Calendar — переподключите календарь.')
+    } finally {
+      setSyncing(false)
+    }
   }
 
   // Group by owner
