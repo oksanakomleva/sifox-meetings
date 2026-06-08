@@ -22,6 +22,13 @@
     summary { cursor: pointer; }
     .banner { background: #fef3c7; border: 1px solid #fcd34d; border-radius: 8px; padding: 10px 12px; margin: 10px 0; font-size: 13px; color: #7c2d12; }
     .ok-pill { font-size: 12px; color: #16a34a; margin-top: 8px; }
+    .tabcard { display: flex; gap: 8px; align-items: center; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px 10px; margin: 12px 0 6px; }
+    .tabcard img { width: 18px; height: 18px; border-radius: 4px; flex: 0 0 auto; }
+    .tabcard .ico-fallback { width: 18px; height: 18px; border-radius: 4px; background: #d1d5db; flex: 0 0 auto; }
+    .tabcard .meta { min-width: 0; }
+    .tabcard .t { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tabcard .h { font-size: 11px; color: #777; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .hint { font-size: 11px; color: #777; margin: 0 0 4px; line-height: 1.5; }
   </style>
 </head>
 <body>
@@ -41,6 +48,25 @@
   <!-- Recorder -->
   <div id="recorder" class="hidden">
     <div id="account" class="muted"></div>
+
+    <!-- Update available -->
+    <div id="updateBanner" class="banner hidden">
+      🔄 Доступна новая версия расширения.
+      <a id="dlUpdate">Скачать обновление</a> — распакуйте поверх старой папки и нажмите «Обновить» на chrome://extensions.
+    </div>
+
+    <!-- Which tab is being recorded -->
+    <div id="tabCard" class="tabcard">
+      <span id="tabIconWrap"></span>
+      <div class="meta">
+        <div id="tabTitle" class="t"></div>
+        <div id="tabHost" class="h"></div>
+      </div>
+    </div>
+    <p id="tabHint" class="hint">
+      Записывается звук <b>этой вкладки</b> и ваш микрофон. Если звонок в другой вкладке или в приложении —
+      откройте его и запустите запись именно на той вкладке.
+    </p>
 
     <!-- Mic permission: prominent prompt when NOT granted -->
     <div id="micBanner" class="banner hidden">

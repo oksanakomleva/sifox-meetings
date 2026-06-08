@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Sifox Meetings Recorder",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Запись любой встречи в браузере (звук вкладки + микрофон) прямо в Sifox Meetings.",
   "permissions": ["tabCapture", "offscreen", "storage", "activeTab", "tabs", "cookies"],
   "host_permissions": [

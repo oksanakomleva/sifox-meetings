@@ -56,12 +56,12 @@ async function getSessionToken(baseUrl) {
 async function stopRecording() {
   if (!(await offscreenExists())) {
     await setRecording(false)
-    await chrome.storage.local.remove('capturedTabId')
+    await chrome.storage.local.remove(['capturedTabId', 'capturedTab'])
     return { ok: false, error: 'Запись потеряна (расширение перезапускалось). Аудио не сохранено.' }
   }
   const res = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'stop' })
   await setRecording(false)
-  await chrome.storage.local.remove('capturedTabId')
+  await chrome.storage.local.remove(['capturedTabId', 'capturedTab'])
   return res || { ok: false, error: 'no response from offscreen' }
 }
 
@@ -82,7 +82,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   ;(async () => {
     try {
       if (msg.type === 'getState') {
-        sendResponse({ recording: await isRecording() })
+        const { capturedTab } = await chrome.storage.local.get('capturedTab')
+        sendResponse({ recording: await isRecording(), tab: capturedTab || null })
         return
       }
 
@@ -94,7 +95,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
 
       if (msg.type === 'start') {
-        const { baseUrl, title, sourceUrl, tabId } = msg
+        const { baseUrl, title, sourceUrl, tabId, favIconUrl } = msg
         const sessionToken = await getSessionToken(baseUrl)
         if (!sessionToken) {
           sendResponse({ ok: false, error: 'Войдите в Sifox в этом браузере' })
@@ -108,7 +109,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         })
         if (res && res.ok) {
           await setRecording(true)
-          await chrome.storage.local.set({ capturedTabId: tabId })
+          await chrome.storage.local.set({
+            capturedTabId: tabId,
+            capturedTab: { title, url: sourceUrl, icon: favIconUrl },
+          })
         }
         sendResponse(res || { ok: false, error: 'no response from offscreen' })
         return

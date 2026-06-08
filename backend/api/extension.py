@@ -36,6 +36,18 @@ _MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB (~16h of opus) — generous cap
 _EXTENSION_DIR = Path(__file__).resolve().parents[2] / "extension"
 
 
+@router.get("/version")
+async def extension_version():
+    """Latest extension version (from the deployed manifest) so installed copies
+    can detect when an update is available. Public — no auth needed."""
+    import json
+    try:
+        data = json.loads((_EXTENSION_DIR / "manifest.json").read_text(encoding="utf-8"))
+        return {"version": data.get("version", "0.0.0")}
+    except Exception:
+        return {"version": "0.0.0"}
+
+
 @router.get("/download")
 async def download_extension(user: CurrentUser):
     """Zip the extension source on the fly so teammates can install it

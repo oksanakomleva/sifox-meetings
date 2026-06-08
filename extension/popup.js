@@ -33,6 +33,50 @@ function show(view) {
   $('recorder').classList.toggle('hidden', view !== 'recorder')
 }
 
+function hostOf(url) {
+  try { return new URL(url).hostname } catch (e) { return '' }
+}
+
+// Show which tab is (or will be) captured: favicon + title + host.
+function fillTabCard(tab) {
+  const wrap = $('tabIconWrap')
+  wrap.innerHTML = ''
+  const icon = tab && (tab.icon || tab.favIconUrl)
+  if (icon) {
+    const img = document.createElement('img')
+    img.src = icon
+    img.onerror = () => { const s = document.createElement('span'); s.className = 'ico-fallback'; img.replaceWith(s) }
+    wrap.appendChild(img)
+  } else {
+    const s = document.createElement('span'); s.className = 'ico-fallback'; wrap.appendChild(s)
+  }
+  $('tabTitle').textContent = (tab && tab.title) || 'Без названия'
+  $('tabHost').textContent = hostOf(tab && tab.url)
+}
+
+function isNewer(remote, local) {
+  const a = String(remote).split('.').map(n => parseInt(n) || 0)
+  const b = String(local).split('.').map(n => parseInt(n) || 0)
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] || 0, y = b[i] || 0
+    if (x !== y) return x > y
+  }
+  return false
+}
+
+async function checkUpdate(baseUrl) {
+  try {
+    const res = await fetch(`${baseUrl}/api/extension/version`)
+    if (!res.ok) return
+    const { version } = await res.json()
+    if (isNewer(version, chrome.runtime.getManifest().version)) {
+      $('updateBanner').classList.remove('hidden')
+      $('dlUpdate').addEventListener('click', () =>
+        chrome.tabs.create({ url: `${baseUrl}/api/extension/download` }))
+    }
+  } catch (e) { /* offline / old server — ignore */ }
+}
+
 function updateMicUI(granted) {
   $('micBanner').classList.toggle('hidden', granted)
   $('micOk').classList.toggle('hidden', !granted)
@@ -67,8 +111,15 @@ async function init() {
   }
 
   $('title').value = activeTab?.title || 'Запись из браузера'
+  fillTabCard({ title: activeTab?.title, url: activeTab?.url, icon: activeTab?.favIconUrl })
   updateMicUI(await micGranted())
+  checkUpdate(baseUrl)
   const st = await chrome.runtime.sendMessage({ type: 'getState' })
+  if (st && st.recording && st.tab) {
+    // Show the tab actually being recorded (may differ from the current active tab).
+    fillTabCard(st.tab)
+    $('tabHint').textContent = 'Идёт запись этой вкладки.'
+  }
   reflect(st && st.recording)
   show('recorder')
 }
@@ -132,6 +183,7 @@ $('toggle').addEventListener('click', async () => {
     baseUrl,
     title: $('title').value.trim(),
     sourceUrl: activeTab.url,
+    favIconUrl: activeTab.favIconUrl,
   })
   if (res && res.ok) reflect(true)
   else $('recStatus').textContent = 'Не удалось начать: ' + (res && res.error || '')
