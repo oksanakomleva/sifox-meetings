@@ -1201,3 +1201,161 @@ async def upsert_week_summary_cache(
             """,
             user_id, signature, summary, meeting_count,
         )
+
+
+# ── Communications: Mattermost + Gmail ────────────────────────────────────────
+
+async def get_user_emails() -> list[str]:
+    """All non-null user emails (Gmail sync targets only these)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT email FROM users WHERE email IS NOT NULL")
+    return [r["email"] for r in rows]
+
+
+async def get_sync_state(source: str) -> dict | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT source, last_synced_at, last_cursor FROM sync_state WHERE source = $1",
+            source,
+        )
+    return dict(row) if row else None
+
+
+async def upsert_sync_state(source: str, last_synced_at, last_cursor: str | None) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO sync_state (source, last_synced_at, last_cursor)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (source) DO UPDATE
+              SET last_synced_at = EXCLUDED.last_synced_at,
+                  last_cursor    = EXCLUDED.last_cursor
+            """,
+            source, last_synced_at, last_cursor,
+        )
+
+
+async def insert_mm_messages(rows: list[dict]) -> int:
+    """Bulk-insert Mattermost posts; skip duplicates. Returns count attempted."""
+    if not rows:
+        return 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            """
+            INSERT INTO mm_messages
+              (id, channel_id, channel_name, user_id, username, message, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            [
+                (r["id"], r["channel_id"], r.get("channel_name"), r.get("user_id"),
+                 r.get("username"), r["message"], r["created_at"])
+                for r in rows
+            ],
+        )
+    return len(rows)
+
+
+async def insert_email_messages(rows: list[dict]) -> int:
+    if not rows:
+        return 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            """
+            INSERT INTO email_messages
+              (id, user_email, from_email, to_emails, subject, body_text, received_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            [
+                (r["id"], r["user_email"], r.get("from_email"), r.get("to_emails") or [],
+                 r.get("subject"), r.get("body_text"), r["received_at"])
+                for r in rows
+            ],
+        )
+    return len(rows)
+
+
+async def query_mm_messages(
+    channel_id: str | None = None,
+    user_id: str | None = None,
+    date_from=None,
+    date_to=None,
+    q: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict]:
+    conds, args = [], []
+    def add(expr, val):
+        args.append(val)
+        conds.append(expr.format(len(args)))
+    if channel_id: add("channel_id = ${}", channel_id)
+    if user_id:    add("user_id = ${}", user_id)
+    if date_from:  add("created_at >= ${}", date_from)
+    if date_to:    add("created_at <= ${}", date_to)
+    if q:          add("message ILIKE ${}", f"%{q}%")
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
+    args.append(limit); lim = len(args)
+    args.append(offset); off = len(args)
+    sql = f"SELECT * FROM mm_messages {where} ORDER BY created_at DESC LIMIT ${lim} OFFSET ${off}"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *args)
+    return [dict(r) for r in rows]
+
+
+async def query_email_messages(
+    user_email: str | None = None,
+    date_from=None,
+    date_to=None,
+    q: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict]:
+    conds, args = [], []
+    def add(expr, val):
+        args.append(val)
+        conds.append(expr.format(len(args)))
+    if user_email: add("user_email = ${}", user_email)
+    if date_from:  add("received_at >= ${}", date_from)
+    if date_to:    add("received_at <= ${}", date_to)
+    if q:
+        args.append(f"%{q}%")
+        n = len(args)
+        conds.append(f"(subject ILIKE ${n} OR body_text ILIKE ${n})")
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
+    args.append(limit); lim = len(args)
+    args.append(offset); off = len(args)
+    sql = f"SELECT * FROM email_messages {where} ORDER BY received_at DESC LIMIT ${lim} OFFSET ${off}"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *args)
+    return [dict(r) for r in rows]
+
+
+async def distinct_mm_channels() -> list[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT channel_id, MAX(channel_name) AS channel_name, COUNT(*) AS count
+            FROM mm_messages
+            GROUP BY channel_id
+            ORDER BY channel_name NULLS LAST
+            """
+        )
+    return [dict(r) for r in rows]
+
+
+async def distinct_email_users() -> list[str]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT DISTINCT user_email FROM email_messages ORDER BY user_email"
+        )
+    return [r["user_email"] for r in rows]

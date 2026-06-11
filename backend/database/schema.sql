@@ -211,3 +211,35 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_meetings_google_event_id
 
 -- Note: the browser extension authenticates by reusing the user's web login
 -- (Google) session cookie via X-Session-Token — no separate token table needed.
+
+-- ── Communications: Mattermost messages + Gmail emails ────────────────────────
+CREATE TABLE IF NOT EXISTS mm_messages (
+    id           TEXT PRIMARY KEY,          -- post id from Mattermost
+    channel_id   TEXT NOT NULL,
+    channel_name TEXT,
+    user_id      TEXT,
+    username     TEXT,
+    message      TEXT NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL,
+    fetched_at   TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_mm_channel_time ON mm_messages(channel_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS email_messages (
+    id          TEXT PRIMARY KEY,           -- gmail message id
+    user_email  TEXT NOT NULL REFERENCES users(email) ON DELETE CASCADE,
+    from_email  TEXT,
+    to_emails   TEXT[],
+    subject     TEXT,
+    body_text   TEXT,
+    received_at TIMESTAMPTZ NOT NULL,
+    fetched_at  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_email_user_time ON email_messages(user_email, received_at DESC);
+
+-- Incremental sync cursors. source: 'mattermost:{channel_id}' | 'gmail:{email}'
+CREATE TABLE IF NOT EXISTS sync_state (
+    source         TEXT PRIMARY KEY,
+    last_synced_at TIMESTAMPTZ,
+    last_cursor    TEXT                       -- MM: last post create_at (ms); Gmail: historyId
+);

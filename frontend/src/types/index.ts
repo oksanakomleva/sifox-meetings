@@ -7,6 +7,38 @@ export interface User {
   is_preview?: boolean
 }
 
+// ── Communications (Mattermost / Gmail) ──────────────────────────────────────
+export interface MmMessage {
+  id: string
+  channel_id: string
+  channel_name: string | null
+  user_id: string | null
+  username: string | null
+  message: string
+  created_at: string
+}
+
+export interface MmChannel {
+  channel_id: string
+  channel_name: string | null
+  count: number
+}
+
+export interface EmailMessage {
+  id: string
+  user_email: string
+  from_email: string | null
+  to_emails: string[] | null
+  subject: string | null
+  body_text: string | null
+  received_at: string
+}
+
+export interface CommsChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
+
 export interface Meeting {
   id: string
   title: string | null

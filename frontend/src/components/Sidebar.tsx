@@ -40,6 +40,11 @@ const IconCalls = () => (
     <path d="M4 3h3l1.5 4-2 1.5a11 11 0 005 5l1.5-2 4 1.5v3a1 1 0 01-1 1A14 14 0 013 4a1 1 0 011-1z"/>
   </svg>
 )
+const IconComms = () => (
+  <svg className="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
+    <path d="M4 4h12a1 1 0 011 1v7a1 1 0 01-1 1H8l-4 3V5a1 1 0 011-1z"/>
+  </svg>
+)
 const IconExtension = () => (
   <svg className="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
     <path d="M7 3h3v2.5a1.5 1.5 0 003 0V3h3v3h-2.5a1.5 1.5 0 000 3H17v3h-3v-2.5a1.5 1.5 0 00-3 0V15H7v-3H4.5a1.5 1.5 0 010-3H7V3z"/>
@@ -109,6 +114,9 @@ export default function Sidebar() {
             </NavLink>
             <NavLink to="/admin/meetings" className={({ isActive }) => isActive ? 'active' : ''}>
               <IconMeetings /> Все встречи
+            </NavLink>
+            <NavLink to="/admin/communications" className={({ isActive }) => isActive ? 'active' : ''}>
+              <IconComms /> Коммуникации
             </NavLink>
             <NavLink to="/admin/storage" className={({ isActive }) => isActive ? 'active' : ''}>
               <IconStorage /> Хранилище

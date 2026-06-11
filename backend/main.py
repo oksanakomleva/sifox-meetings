@@ -42,9 +42,13 @@ async def lifespan(app: FastAPI):
 
     # Background tasks
     from services.calendar_sync import run_sync_loop
+    from services.mattermost_sync import run_mm_sync_loop
+    from services.gmail_sync import run_gmail_sync_loop
 
     sync_task = asyncio.create_task(run_sync_loop(), name="calendar-sync")
     scheduler_task = asyncio.create_task(run_recording_scheduler(), name="rec-scheduler")
+    mm_task = asyncio.create_task(run_mm_sync_loop(), name="mm-sync")
+    gmail_task = asyncio.create_task(run_gmail_sync_loop(), name="gmail-sync")
 
     logger.info("telemost-web started")
     yield
@@ -54,6 +58,8 @@ async def lifespan(app: FastAPI):
     request_shutdown()
     sync_task.cancel()
     scheduler_task.cancel()
+    mm_task.cancel()
+    gmail_task.cancel()
 
     # 2. Wait for any in-progress recordings to finish gracefully.
     #    railway.toml stopSec must be >= this timeout + a small buffer.
@@ -81,12 +87,14 @@ from api.meetings import router as meetings_router
 from api.chat import router as chat_router
 from api.admin import router as admin_router
 from api.extension import router as extension_router
+from api.communications import router as communications_router
 
 app.include_router(auth_router)
 app.include_router(meetings_router)
 app.include_router(chat_router)
 app.include_router(admin_router)
 app.include_router(extension_router)
+app.include_router(communications_router)
 
 
 @app.get("/health")

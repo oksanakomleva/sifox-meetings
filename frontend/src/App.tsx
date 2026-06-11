@@ -13,6 +13,7 @@ import AdminCalendars from './pages/admin/AdminCalendars'
 import AdminUsers from './pages/admin/AdminUsers'
 import AdminMeetings from './pages/admin/AdminMeetings'
 import AdminStorage from './pages/admin/AdminStorage'
+import Communications from './pages/admin/Communications'
 import ExtensionTokens from './pages/settings/ExtensionTokens'
 
 function ProtectedLayout() {
@@ -55,6 +56,7 @@ function ProtectedLayout() {
             <Route path="/admin/calendars" element={<AdminCalendars />} />
             <Route path="/admin/users" element={<AdminUsers />} />
             <Route path="/admin/meetings" element={<AdminMeetings />} />
+            <Route path="/admin/communications" element={<Communications />} />
             <Route path="/admin/storage" element={<AdminStorage />} />
           </>
         )}

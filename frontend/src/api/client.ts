@@ -35,6 +35,14 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json()
 }
 
+function qs(p: Record<string, string | number | undefined | null>): string {
+  const u = new URLSearchParams()
+  for (const [k, v] of Object.entries(p)) {
+    if (v !== undefined && v !== null && v !== '') u.set(k, String(v))
+  }
+  return u.toString()
+}
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 export const api = {
   auth: {
@@ -131,6 +139,22 @@ export const api = {
       request<{ files: StorageFile[]; total_bytes: number; audio_dir: string }>('/admin/storage'),
     deleteAudioFile: (meetingId: string) =>
       request<{ ok: boolean; freed_bytes: number }>(`/admin/storage/${meetingId}`, { method: 'DELETE' }),
+
+    // ── Communications (Mattermost / Gmail) ──
+    commsSync: () => request<{ ok: boolean; message: string }>('/admin/comms/sync', { method: 'POST' }),
+    mmChannels: () => request<{ channels: import('../types').MmChannel[] }>('/admin/mm/channels'),
+    emailUsers: () => request<{ users: string[] }>('/admin/email/users'),
+    mmMessages: (p: Record<string, string | number | undefined>) =>
+      request<{ messages: import('../types').MmMessage[] }>(`/admin/mm/messages?${qs(p)}`),
+    emailMessages: (p: Record<string, string | number | undefined>) =>
+      request<{ messages: import('../types').EmailMessage[] }>(`/admin/email/messages?${qs(p)}`),
+    commsAiChat: (body: {
+      question: string
+      context_filters: Record<string, unknown>
+      conversation_history: import('../types').CommsChatMessage[]
+    }) => request<{ answer: string | null; error?: string }>('/admin/ai/chat', {
+      method: 'POST', body: JSON.stringify(body),
+    }),
   },
 
   // ── Extension (browser recorder) ───────────────────────────────────────────────

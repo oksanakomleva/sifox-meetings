@@ -49,6 +49,15 @@ class Config(BaseSettings):
     # ── Session ───────────────────────────────────────────────────────────
     SESSION_TTL_DAYS: int = 30
 
+    # ── Communications ingestion (Mattermost + Gmail) ─────────────────────
+    # All optional — if unset, the corresponding sync loop is a no-op.
+    MM_TOKEN: str | None = None              # Mattermost bot/personal access token
+    MM_SERVER_URL: str | None = None         # e.g. https://mattermost.company.com
+    GOOGLE_SERVICE_ACCOUNT_JSON: str | None = None  # SA key JSON (inline or file path) for Gmail DWD
+    GMAIL_BOOTSTRAP_DAYS: int = 30           # first-run window per user
+    MM_SYNC_MINUTES: int = 15
+    GMAIL_SYNC_MINUTES: int = 30
+
     # ── E2E Testing ───────────────────────────────────────────────────────
     TEST_API_KEY: str | None = None          # static key for automated E2E tests
     TEST_MEETING_URL: str | None = None      # permanent Telemost room URL
