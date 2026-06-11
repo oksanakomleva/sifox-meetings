@@ -1,10 +1,13 @@
 """All asyncpg queries for telemost-web."""
+import logging
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from database.connection import get_pool
 from utils.encryption import encrypt, decrypt
+
+logger = logging.getLogger(__name__)
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
@@ -408,30 +411,7 @@ async def upsert_meeting(
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
-        if google_event_id:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO meetings (meeting_url, title, start_time, google_event_id)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (google_event_id) WHERE google_event_id IS NOT NULL
-                DO UPDATE
-                  SET title = COALESCE(EXCLUDED.title, meetings.title),
-                      meeting_url = EXCLUDED.meeting_url,
-                      updated_at = NOW(),
-                      -- Keep the start_time fresh while still pending (event may be
-                      -- rescheduled). Once recording/done, freeze it so re-syncing
-                      -- the same occurrence never disturbs an in-flight or finished
-                      -- recording.
-                      start_time = CASE
-                        WHEN meetings.status = 'pending'
-                        THEN EXCLUDED.start_time
-                        ELSE meetings.start_time
-                      END
-                RETURNING *
-                """,
-                meeting_url, title, start_time, google_event_id,
-            )
-        else:
+        if not google_event_id:
             # Manual / non-calendar meeting: no dedup key, always a new row.
             row = await conn.fetchrow(
                 """
@@ -441,7 +421,77 @@ async def upsert_meeting(
                 """,
                 meeting_url, title, start_time,
             )
-    return dict(row)
+            return dict(row)
+
+        async with conn.transaction():
+            existing = await conn.fetchrow(
+                "SELECT id, status, start_time FROM meetings "
+                "WHERE google_event_id = $1 FOR UPDATE",
+                google_event_id,
+            )
+
+            if existing is None:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO meetings (meeting_url, title, start_time, google_event_id)
+                    VALUES ($1, $2, $3, $4)
+                    RETURNING *
+                    """,
+                    meeting_url, title, start_time, google_event_id,
+                )
+                return dict(row)
+
+            old_start = existing["start_time"]
+            # A finished occurrence (done/error) whose event was moved to a new,
+            # still-recordable time is a genuine reschedule: keep the old recording
+            # and split off a fresh pending occurrence so the bot records the new
+            # time (and it shows up in the upcoming list).
+            rescheduled = (
+                existing["status"] in ("done", "error")
+                and old_start is not None
+                and abs((start_time - old_start).total_seconds()) > 60
+                and start_time >= datetime.now(timezone.utc) - timedelta(minutes=30)
+            )
+
+            if rescheduled:
+                # Release the google_event_id from the archived recording (its
+                # transcript/audio/summary stay intact; the partial unique index
+                # allows NULL) so the new pending row can hold it.
+                await conn.execute(
+                    "UPDATE meetings SET google_event_id = NULL, updated_at = NOW() WHERE id = $1",
+                    existing["id"],
+                )
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO meetings (meeting_url, title, start_time, google_event_id)
+                    VALUES ($1, $2, $3, $4)
+                    RETURNING *
+                    """,
+                    meeting_url, title, start_time, google_event_id,
+                )
+                logger.info(
+                    "Event %s rescheduled (%s → %s): archived recording %s, new occurrence %s",
+                    google_event_id, old_start, start_time,
+                    str(existing["id"])[:8], str(row["id"])[:8],
+                )
+                return dict(row)
+
+            # Normal re-sync: update in place. Keep start_time fresh only while
+            # still pending; otherwise freeze it so re-syncing the same occurrence
+            # never disturbs an in-flight or finished recording.
+            row = await conn.fetchrow(
+                """
+                UPDATE meetings
+                   SET title = COALESCE($2, title),
+                       meeting_url = $1,
+                       updated_at = NOW(),
+                       start_time = CASE WHEN status = 'pending' THEN $3 ELSE start_time END
+                 WHERE id = $4
+                RETURNING *
+                """,
+                meeting_url, title, start_time, existing["id"],
+            )
+            return dict(row)
 
 
 async def get_meeting_by_url(meeting_url: str) -> dict[str, Any] | None:
@@ -878,7 +928,9 @@ async def link_calendar_event_to_meeting(
               (google_event_id, user_id, meeting_id, calendar_id, attendee_emails)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (google_event_id, user_id) DO UPDATE
-              SET attendee_emails = EXCLUDED.attendee_emails
+              SET attendee_emails = EXCLUDED.attendee_emails,
+                  meeting_id = EXCLUDED.meeting_id,
+                  calendar_id = EXCLUDED.calendar_id
             """,
             google_event_id, user_id, meeting_id, calendar_id, attendee_emails,
         )
