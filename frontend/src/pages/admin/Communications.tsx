@@ -101,7 +101,14 @@ export default function Communications() {
       const sources = [srcMm ? 'mattermost' : '', srcGmail ? 'gmail' : ''].filter(Boolean)
       const r = await api.admin.commsAiChat({
         question: text,
-        context_filters: { sources, date_from: ctxFrom, date_to: ctxTo },
+        context_filters: {
+          sources,
+          date_from: ctxFrom,
+          date_to: ctxTo,
+          // Inherit the left-panel scoping so "what I see is what the AI reasons over".
+          channel_id: channelId || undefined,
+          user_email: userEmail || undefined,
+        },
         conversation_history: history,
       })
       setHistory([...newHist, { role: 'assistant', content: r.answer || r.error || 'Ошибка' }])
