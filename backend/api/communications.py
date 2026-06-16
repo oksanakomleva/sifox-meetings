@@ -10,7 +10,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from auth.deps import get_admin_user, get_test_or_admin_user
+from auth.deps import get_admin_user
 from config import config
 from database import models
 
@@ -18,75 +18,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["communications"])
 
 AdminUser = Annotated[dict, Depends(get_admin_user)]
-TestOrAdmin = Annotated[dict, Depends(get_test_or_admin_user)]
-
-
-@router.get("/comms/debug")
-async def comms_debug(user: TestOrAdmin, run: int = 0, gmail_user: str | None = None):
-    """Diagnostics (accepts X-Test-Api-Key). ?run=1 runs the MM sync inline and
-    returns the count or the captured error."""
-    import os
-    out: dict = {
-        "mm_configured": bool(config.MM_TOKEN and config.MM_SERVER_URL),
-        "mm_server_url": config.MM_SERVER_URL,
-        "gmail_configured": bool(config.GOOGLE_SERVICE_ACCOUNT_JSON),
-        # Env introspection (names + lengths only, never values) to pinpoint
-        # missing/misnamed/empty variables on the running container.
-        "env_mm_keys": sorted([k for k in os.environ if "MM" in k.upper()]),
-        "env_MM_TOKEN_len": len(os.environ.get("MM_TOKEN", "")),
-        "env_MM_SERVER_URL_present": "MM_SERVER_URL" in os.environ,
-        "config_MM_TOKEN_len": len(config.MM_TOKEN or ""),
-    }
-    # Live probe: which channels can the token see?
-    if config.MM_TOKEN and config.MM_SERVER_URL:
-        try:
-            import httpx
-            from services.mattermost_sync import _bot_channels
-            async with httpx.AsyncClient(
-                base_url=config.MM_SERVER_URL.rstrip("/"),
-                headers={"Authorization": f"Bearer {config.MM_TOKEN}"},
-                timeout=20.0,
-            ) as client:
-                chans = await _bot_channels(client)
-                out["mm_channels_visible"] = [
-                    {"id": c["id"], "name": c.get("display_name") or c.get("name")} for c in chans
-                ]
-        except Exception as e:
-            out["mm_probe_error"] = repr(e)
-    # Live Gmail probe: build the service for one user (DWD impersonation) and
-    # read their profile — surfaces JSON / DWD-authorization / API-enabled errors.
-    if config.GOOGLE_SERVICE_ACCOUNT_JSON:
-        try:
-            import asyncio as _asyncio
-            from services.gmail_sync import _build_service
-            emails = await models.get_user_emails()
-            out["gmail_user_count"] = len(emails)
-            probe = gmail_user or (emails[0] if emails else None)
-            if probe:
-                loop = _asyncio.get_running_loop()
-                prof = await loop.run_in_executor(
-                    None, lambda: _build_service(probe).users().getProfile(userId="me").execute()
-                )
-                out["gmail_probe_user"] = probe
-                out["gmail_probe_ok"] = True
-                out["gmail_history_id"] = prof.get("historyId")
-                out["gmail_messages_total"] = prof.get("messagesTotal")
-        except Exception as e:
-            out["gmail_probe_error"] = repr(e)
-
-    if run:
-        try:
-            from services.mattermost_sync import sync_mattermost
-            out["mm_ingested_now"] = await sync_mattermost()
-        except Exception as e:
-            out["mm_sync_error"] = repr(e)
-        try:
-            from services.gmail_sync import sync_gmail
-            out["gmail_ingested_now"] = await sync_gmail()
-        except Exception as e:
-            out["gmail_sync_error"] = repr(e)
-    out["stats"] = await models.comms_stats()
-    return out
 
 
 def _parse_date(s: str | None, end: bool = False):
