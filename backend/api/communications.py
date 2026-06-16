@@ -25,10 +25,17 @@ TestOrAdmin = Annotated[dict, Depends(get_test_or_admin_user)]
 async def comms_debug(user: TestOrAdmin, run: int = 0):
     """Diagnostics (accepts X-Test-Api-Key). ?run=1 runs the MM sync inline and
     returns the count or the captured error."""
+    import os
     out: dict = {
         "mm_configured": bool(config.MM_TOKEN and config.MM_SERVER_URL),
         "mm_server_url": config.MM_SERVER_URL,
         "gmail_configured": bool(config.GOOGLE_SERVICE_ACCOUNT_JSON),
+        # Env introspection (names + lengths only, never values) to pinpoint
+        # missing/misnamed/empty variables on the running container.
+        "env_mm_keys": sorted([k for k in os.environ if "MM" in k.upper()]),
+        "env_MM_TOKEN_len": len(os.environ.get("MM_TOKEN", "")),
+        "env_MM_SERVER_URL_present": "MM_SERVER_URL" in os.environ,
+        "config_MM_TOKEN_len": len(config.MM_TOKEN or ""),
     }
     # Live probe: which channels can the token see?
     if config.MM_TOKEN and config.MM_SERVER_URL:
