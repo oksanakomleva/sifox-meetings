@@ -1206,10 +1206,15 @@ async def upsert_week_summary_cache(
 # ── Communications: Mattermost + Gmail ────────────────────────────────────────
 
 async def get_user_emails() -> list[str]:
-    """All non-null user emails (Gmail sync targets only these)."""
+    """Real user emails for Gmail sync. Excludes the synthetic preview account
+    (google_id='__preview__', preview@sifox.local) — it has no real mailbox, so
+    DWD impersonation would fail and spam the logs every cycle."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT email FROM users WHERE email IS NOT NULL")
+        rows = await conn.fetch(
+            "SELECT email FROM users "
+            "WHERE email IS NOT NULL AND google_id IS DISTINCT FROM '__preview__'"
+        )
     return [r["email"] for r in rows]
 
 
