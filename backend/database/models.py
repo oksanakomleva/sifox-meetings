@@ -315,6 +315,7 @@ async def get_calendars(owner_user_id: int | None = None) -> list[dict]:
                 SELECT c.*, u.email AS owner_email, u.name AS owner_name
                 FROM calendars c
                 JOIN users u ON u.id = c.owner_user_id
+                WHERE u.google_id IS DISTINCT FROM '__preview__'
                 ORDER BY u.email, c.is_primary DESC, c.name
                 """
             )

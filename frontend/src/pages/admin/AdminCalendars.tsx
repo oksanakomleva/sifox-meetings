@@ -6,8 +6,12 @@ export default function AdminCalendars() {
   const [calendars, setCalendars] = useState<Calendar[]>([])
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
+  const [connected, setConnected] = useState(false)
 
-  useEffect(() => { load() }, [])
+  useEffect(() => {
+    load()
+    api.meetings.calendarStatus().then(s => setConnected(s.connected)).catch(() => {})
+  }, [])
 
   const load = () => {
     api.admin.calendars()
@@ -57,20 +61,22 @@ export default function AdminCalendars() {
       </div>
 
       <div className="page-body">
-        {/* Connect banner */}
-        <div className="card" style={{ background: 'var(--color-accent-6)', borderColor: 'var(--color-accent-4)', marginBottom: 'var(--space-6)' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
-            <div>
-              <div style={{ fontWeight: 600, marginBottom: 4 }}>Подключить Google Calendar</div>
-              <div style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>
-                Подключите свой аккаунт чтобы система видела ваши встречи
+        {/* Connect banner — only when the current admin hasn't connected a calendar */}
+        {!connected && (
+          <div className="card" style={{ background: 'var(--color-accent-6)', borderColor: 'var(--color-accent-4)', marginBottom: 'var(--space-6)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+              <div>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>Подключить Google Calendar</div>
+                <div style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>
+                  Подключите свой аккаунт чтобы система видела ваши встречи
+                </div>
               </div>
+              <a href="/api/auth/connect-calendar">
+                <button className="btn btn-primary">Подключить Calendar</button>
+              </a>
             </div>
-            <a href="/api/auth/connect-calendar">
-              <button className="btn btn-primary">Подключить Calendar</button>
-            </a>
           </div>
-        </div>
+        )}
 
         {loading ? (
           <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 40 }}>

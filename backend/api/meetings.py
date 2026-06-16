@@ -210,8 +210,9 @@ async def demo_summary(body: DemoSummaryRequest, user: CurrentUser):
 
 @router.get("/upcoming")
 async def upcoming_meetings(user: CurrentUser):
-    """Pending/active meetings for Calendar tab."""
-    meetings = await models.get_upcoming_meetings_for_user(user["user_id"], user["is_admin"])
+    """Pending/active meetings for the user's own "Мои встречи" calendar tab.
+    Always user-scoped (even for admins — they see ALL upcoming via /admin/upcoming)."""
+    meetings = await models.get_upcoming_meetings_for_user(user["user_id"], False)
     return {"meetings": meetings}
 
 
@@ -234,12 +235,11 @@ async def list_meetings(
     limit: int = 20,
     offset: int = 0,
 ):
-    if user["is_admin"]:
-        meetings = await models.get_all_meetings(limit=limit, offset=offset)
-    else:
-        meetings = await models.get_meetings_for_user(
-            user["user_id"], limit=limit, offset=offset
-        )
+    """The caller's OWN meetings ("Мои встречи"). Admins see all meetings via the
+    separate /api/admin/meetings page, not here."""
+    meetings = await models.get_meetings_for_user(
+        user["user_id"], limit=limit, offset=offset
+    )
     return {"meetings": meetings, "limit": limit, "offset": offset}
 
 

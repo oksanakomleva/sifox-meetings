@@ -93,6 +93,13 @@ async def list_all_meetings(admin: AdminUser, limit: int = 100, offset: int = 0)
     return {"meetings": meetings}
 
 
+@router.get("/upcoming")
+async def list_all_upcoming(admin: AdminUser):
+    """All pending/active meetings (admin "Все встречи" → Запланированные)."""
+    meetings = await models.get_upcoming_meetings_for_user(admin["user_id"], True)
+    return {"meetings": meetings}
+
+
 @router.post("/meetings/{meeting_id}/reanalyze")
 async def reanalyze_meeting(meeting_id: str, admin: AdminUser):
     """Re-run analysis on a meeting that already has a transcript."""

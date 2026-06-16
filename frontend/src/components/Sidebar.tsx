@@ -90,7 +90,7 @@ export default function Sidebar() {
           <IconHome /> Главная
         </NavLink>
         <NavLink to="/meetings" className={({ isActive }) => isActive ? 'active' : ''}>
-          <IconMeetings /> Встречи
+          <IconMeetings /> Мои встречи
         </NavLink>
         {demoOn && (
           <NavLink to="/calls" className={({ isActive }) => isActive ? 'active' : ''}>
