@@ -22,7 +22,7 @@ TestOrAdmin = Annotated[dict, Depends(get_test_or_admin_user)]
 
 
 @router.get("/comms/debug")
-async def comms_debug(user: TestOrAdmin, run: int = 0):
+async def comms_debug(user: TestOrAdmin, run: int = 0, gmail_user: str | None = None):
     """Diagnostics (accepts X-Test-Api-Key). ?run=1 runs the MM sync inline and
     returns the count or the captured error."""
     import os
@@ -53,12 +53,38 @@ async def comms_debug(user: TestOrAdmin, run: int = 0):
                 ]
         except Exception as e:
             out["mm_probe_error"] = repr(e)
+    # Live Gmail probe: build the service for one user (DWD impersonation) and
+    # read their profile — surfaces JSON / DWD-authorization / API-enabled errors.
+    if config.GOOGLE_SERVICE_ACCOUNT_JSON:
+        try:
+            import asyncio as _asyncio
+            from services.gmail_sync import _build_service
+            emails = await models.get_user_emails()
+            out["gmail_user_count"] = len(emails)
+            probe = gmail_user or (emails[0] if emails else None)
+            if probe:
+                loop = _asyncio.get_running_loop()
+                prof = await loop.run_in_executor(
+                    None, lambda: _build_service(probe).users().getProfile(userId="me").execute()
+                )
+                out["gmail_probe_user"] = probe
+                out["gmail_probe_ok"] = True
+                out["gmail_history_id"] = prof.get("historyId")
+                out["gmail_messages_total"] = prof.get("messagesTotal")
+        except Exception as e:
+            out["gmail_probe_error"] = repr(e)
+
     if run:
         try:
             from services.mattermost_sync import sync_mattermost
             out["mm_ingested_now"] = await sync_mattermost()
         except Exception as e:
             out["mm_sync_error"] = repr(e)
+        try:
+            from services.gmail_sync import sync_gmail
+            out["gmail_ingested_now"] = await sync_gmail()
+        except Exception as e:
+            out["gmail_sync_error"] = repr(e)
     out["stats"] = await models.comms_stats()
     return out
 
