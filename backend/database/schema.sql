@@ -237,6 +237,12 @@ CREATE TABLE IF NOT EXISTS email_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_email_user_time ON email_messages(user_email, received_at DESC);
 
+-- Full-text search (relevance ranking for the AI context). 'russian' config.
+CREATE INDEX IF NOT EXISTS idx_mm_fts ON mm_messages
+    USING gin (to_tsvector('russian', message));
+CREATE INDEX IF NOT EXISTS idx_email_fts ON email_messages
+    USING gin (to_tsvector('russian', coalesce(subject, '') || ' ' || coalesce(body_text, '')));
+
 -- Incremental sync cursors. source: 'mattermost:{channel_id}' | 'gmail:{email}'
 CREATE TABLE IF NOT EXISTS sync_state (
     source         TEXT PRIMARY KEY,

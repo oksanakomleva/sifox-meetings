@@ -1338,6 +1338,73 @@ async def query_email_messages(
     return [dict(r) for r in rows]
 
 
+async def search_mm_messages(
+    query_text: str,
+    date_from=None,
+    date_to=None,
+    channel_id: str | None = None,
+    limit: int = 200,
+) -> list[dict]:
+    """Most relevant MM posts to `query_text` within the period (FTS, ts_rank)."""
+    args = [query_text]
+    extra = []
+    def add(expr, val):
+        args.append(val)
+        extra.append(expr.format(len(args)))
+    if date_from:  add("m.created_at >= ${}", date_from)
+    if date_to:    add("m.created_at <= ${}", date_to)
+    if channel_id: add("m.channel_id = ${}", channel_id)
+    args.append(limit); lim = len(args)
+    extra_sql = (" AND " + " AND ".join(extra)) if extra else ""
+    # Broaden the query to OR semantics (any term) so a multi-word question still
+    # matches; ts_rank then surfaces the messages matching the most/strongest terms.
+    sql = f"""
+        WITH q AS (SELECT replace(websearch_to_tsquery('russian', $1)::text, '&', '|')::tsquery AS tq)
+        SELECT m.*, ts_rank(to_tsvector('russian', m.message), q.tq) AS rank
+        FROM mm_messages m, q
+        WHERE q.tq @@ to_tsvector('russian', m.message){extra_sql}
+        ORDER BY rank DESC, m.created_at DESC
+        LIMIT ${lim}
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *args)
+    return [dict(r) for r in rows]
+
+
+async def search_email_messages(
+    query_text: str,
+    date_from=None,
+    date_to=None,
+    user_email: str | None = None,
+    limit: int = 200,
+) -> list[dict]:
+    """Most relevant emails (subject+body) to `query_text` within the period."""
+    args = [query_text]
+    extra = []
+    def add(expr, val):
+        args.append(val)
+        extra.append(expr.format(len(args)))
+    if date_from:   add("e.received_at >= ${}", date_from)
+    if date_to:     add("e.received_at <= ${}", date_to)
+    if user_email:  add("e.user_email = ${}", user_email)
+    args.append(limit); lim = len(args)
+    extra_sql = (" AND " + " AND ".join(extra)) if extra else ""
+    sql = f"""
+        WITH q AS (SELECT replace(websearch_to_tsquery('russian', $1)::text, '&', '|')::tsquery AS tq)
+        SELECT e.*,
+               ts_rank(to_tsvector('russian', coalesce(e.subject,'') || ' ' || coalesce(e.body_text,'')), q.tq) AS rank
+        FROM email_messages e, q
+        WHERE q.tq @@ to_tsvector('russian', coalesce(e.subject,'') || ' ' || coalesce(e.body_text,'')){extra_sql}
+        ORDER BY rank DESC, e.received_at DESC
+        LIMIT ${lim}
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *args)
+    return [dict(r) for r in rows]
+
+
 async def distinct_mm_channels() -> list[dict]:
     pool = await get_pool()
     async with pool.acquire() as conn:

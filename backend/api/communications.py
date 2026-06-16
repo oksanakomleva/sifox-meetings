@@ -164,36 +164,49 @@ async def ai_chat(req: AiChatRequest, admin: AdminUser):
     f = req.context_filters
     df, dt = _parse_date(f.date_from), _parse_date(f.date_to, end=True)
 
-    lines: list[tuple] = []  # (datetime, formatted_line)
-    if "mattermost" in f.sources:
-        for m in await models.query_mm_messages(
-            channel_id=f.channel_id, date_from=df, date_to=dt, limit=200
-        ):
-            lines.append((m["created_at"],
-                          f"[MM] {_fmt_dt(m['created_at'])} @{m.get('username') or '—'} "
-                          f"в #{m.get('channel_name') or m['channel_id']}: {m['message']}"))
-    if "gmail" in f.sources:
-        for e in await models.query_email_messages(
-            user_email=f.user_email, date_from=df, date_to=dt, limit=200
-        ):
-            lines.append((e["received_at"],
-                          f"[EMAIL] {_fmt_dt(e['received_at'])} от {e.get('from_email') or '—'} "
-                          f"кому {', '.join(e.get('to_emails') or [])} / Тема: {e.get('subject') or ''} / "
-                          f"{(e.get('body_text') or '')[:1000]}"))
+    def mm_line(m):
+        return (f"[MM] {_fmt_dt(m['created_at'])} @{m.get('username') or '—'} "
+                f"в #{m.get('channel_name') or m['channel_id']}: {m['message']}")
 
-    if not lines:
+    def em_line(e):
+        return (f"[EMAIL] {_fmt_dt(e['received_at'])} от {e.get('from_email') or '—'} "
+                f"кому {', '.join(e.get('to_emails') or [])} / Тема: {e.get('subject') or ''} / "
+                f"{(e.get('body_text') or '')[:1000]}")
+
+    q_text = (req.question or "").strip()
+    PER_SOURCE = 200
+    items: list[tuple[float, object, str]] = []  # (relevance, datetime, line)
+
+    if "mattermost" in f.sources:
+        # Relevance-ranked over the whole period; fall back to recent if the
+        # question yields no lexical match (e.g. generic "что обсуждали?").
+        rows = await models.search_mm_messages(q_text, df, dt, f.channel_id, PER_SOURCE) if q_text else []
+        if not rows:
+            rows = await models.query_mm_messages(channel_id=f.channel_id, date_from=df, date_to=dt, limit=PER_SOURCE)
+        for m in rows:
+            items.append((float(m.get("rank") or 0), m["created_at"], mm_line(m)))
+    if "gmail" in f.sources:
+        rows = await models.search_email_messages(q_text, df, dt, f.user_email, PER_SOURCE) if q_text else []
+        if not rows:
+            rows = await models.query_email_messages(user_email=f.user_email, date_from=df, date_to=dt, limit=PER_SOURCE)
+        for e in rows:
+            items.append((float(e.get("rank") or 0), e["received_at"], em_line(e)))
+
+    if not items:
         return {"answer": "Нет данных за выбранный период."}
 
-    lines.sort(key=lambda x: x[0], reverse=True)
-    # Pack newest-first under the char budget.
+    # Keep the MOST RELEVANT under the char budget (so relevant older messages
+    # survive instead of being dropped by recency), then present newest-first.
+    items.sort(key=lambda x: (x[0], x[1]), reverse=True)
     budget = config.CHAT_MAX_CONTEXT_CHARS
-    used, ctx = 0, []
-    for _, ln in lines[:200]:
+    used, kept = 0, []
+    for _rank, dtv, ln in items:
         if used + len(ln) > budget:
             break
-        ctx.append(ln)
+        kept.append((dtv, ln))
         used += len(ln)
-    context = "\n".join(ctx)
+    kept.sort(key=lambda x: x[0], reverse=True)
+    context = "\n".join(ln for _, ln in kept)
 
     system = (
         "Ты — аналитик коммуникаций компании. Отвечай на вопросы СТРОГО на основе "
