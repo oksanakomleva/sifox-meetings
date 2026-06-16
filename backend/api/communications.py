@@ -10,7 +10,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from auth.deps import get_admin_user
+from auth.deps import get_admin_user, get_test_or_admin_user
 from config import config
 from database import models
 
@@ -18,6 +18,42 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["communications"])
 
 AdminUser = Annotated[dict, Depends(get_admin_user)]
+TestOrAdmin = Annotated[dict, Depends(get_test_or_admin_user)]
+
+
+@router.get("/comms/debug")
+async def comms_debug(user: TestOrAdmin, run: int = 0):
+    """Diagnostics (accepts X-Test-Api-Key). ?run=1 runs the MM sync inline and
+    returns the count or the captured error."""
+    out: dict = {
+        "mm_configured": bool(config.MM_TOKEN and config.MM_SERVER_URL),
+        "mm_server_url": config.MM_SERVER_URL,
+        "gmail_configured": bool(config.GOOGLE_SERVICE_ACCOUNT_JSON),
+    }
+    # Live probe: which channels can the token see?
+    if config.MM_TOKEN and config.MM_SERVER_URL:
+        try:
+            import httpx
+            from services.mattermost_sync import _bot_channels
+            async with httpx.AsyncClient(
+                base_url=config.MM_SERVER_URL.rstrip("/"),
+                headers={"Authorization": f"Bearer {config.MM_TOKEN}"},
+                timeout=20.0,
+            ) as client:
+                chans = await _bot_channels(client)
+                out["mm_channels_visible"] = [
+                    {"id": c["id"], "name": c.get("display_name") or c.get("name")} for c in chans
+                ]
+        except Exception as e:
+            out["mm_probe_error"] = repr(e)
+    if run:
+        try:
+            from services.mattermost_sync import sync_mattermost
+            out["mm_ingested_now"] = await sync_mattermost()
+        except Exception as e:
+            out["mm_sync_error"] = repr(e)
+    out["stats"] = await models.comms_stats()
+    return out
 
 
 def _parse_date(s: str | None, end: bool = False):

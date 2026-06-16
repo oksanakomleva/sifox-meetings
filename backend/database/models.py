@@ -1359,3 +1359,15 @@ async def distinct_email_users() -> list[str]:
             "SELECT DISTINCT user_email FROM email_messages ORDER BY user_email"
         )
     return [r["user_email"] for r in rows]
+
+
+async def comms_stats() -> dict:
+    """Counts + sync cursors — for the comms debug endpoint."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        mm = await conn.fetchval("SELECT COUNT(*) FROM mm_messages")
+        em = await conn.fetchval("SELECT COUNT(*) FROM email_messages")
+        ss = await conn.fetch(
+            "SELECT source, last_synced_at, last_cursor FROM sync_state ORDER BY source"
+        )
+    return {"mm_messages": mm, "email_messages": em, "sync_state": [dict(r) for r in ss]}
