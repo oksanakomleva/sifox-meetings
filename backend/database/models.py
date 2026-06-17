@@ -234,6 +234,49 @@ async def get_google_write_token(user_id: int) -> dict[str, Any] | None:
     return result
 
 
+async def save_gmail_send_token(
+    user_id: int,
+    access_token: str,
+    refresh_token: str | None,
+    token_expiry: datetime | None,
+) -> None:
+    """Save a personal OAuth token with the gmail.send scope (for sending
+    protocols). Stored apart from google_tokens — see gmail_send_tokens."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO gmail_send_tokens
+              (user_id, access_token, refresh_token, token_expiry, updated_at)
+            VALUES ($1, $2, $3, $4, NOW())
+            ON CONFLICT (user_id) DO UPDATE
+              SET access_token  = EXCLUDED.access_token,
+                  refresh_token = COALESCE(EXCLUDED.refresh_token, gmail_send_tokens.refresh_token),
+                  token_expiry  = EXCLUDED.token_expiry,
+                  updated_at    = NOW()
+            """,
+            user_id,
+            encrypt(access_token),
+            encrypt(refresh_token) if refresh_token else None,
+            token_expiry,
+        )
+
+
+async def get_gmail_send_token(user_id: int) -> dict[str, Any] | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM gmail_send_tokens WHERE user_id = $1", user_id
+        )
+    if not row:
+        return None
+    result = dict(row)
+    result["access_token"] = decrypt(result["access_token"])
+    if result.get("refresh_token"):
+        result["refresh_token"] = decrypt(result["refresh_token"])
+    return result
+
+
 async def get_any_admin_write_token() -> tuple[int, dict] | None:
     """Return (user_id, token) for any admin user who has calendar write scope."""
     pool = await get_pool()
@@ -667,6 +710,33 @@ async def get_meeting(meeting_id: str) -> dict[str, Any] | None:
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM meetings WHERE id = $1", meeting_id)
     return dict(row) if row else None
+
+
+async def get_meeting_attendee_emails(meeting_id: str) -> list[str]:
+    """All attendee e-mails from the calendar event(s) for this meeting —
+    including external (non-sifox.com) guests. The most complete recipient set
+    for sending the protocol."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT lower(email) AS email
+            FROM calendar_meeting_links, LATERAL unnest(attendee_emails) AS email
+            WHERE meeting_id = $1
+            """,
+            meeting_id,
+        )
+    return [r["email"] for r in rows if r["email"] and "@" in r["email"]]
+
+
+async def set_protocol_sent(meeting_id: str) -> None:
+    """Mark that the protocol was e-mailed to participants (for UI badge)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE meetings SET protocol_sent_at = NOW(), updated_at = NOW() WHERE id = $1",
+            meeting_id,
+        )
 
 
 async def get_meetings_for_user(

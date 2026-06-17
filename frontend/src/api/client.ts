@@ -50,6 +50,8 @@ export const api = {
     logout: () => request<void>('/auth/logout', { method: 'POST' }),
     loginUrl: () => '/api/auth/login',
     connectCalendarUrl: () => '/api/auth/connect-calendar',
+    gmailSendStatus: () => request<{ connected: boolean }>('/auth/gmail-send-status'),
+    connectGmailSendUrl: (next: string) => `/api/auth/connect-gmail-send?next=${encodeURIComponent(next)}`,
   },
 
   // ── Meetings ──────────────────────────────────────────────────────────────────
@@ -69,6 +71,13 @@ export const api = {
     },
     transcript: (id: string) =>
       request<{ transcript: string }>(`/meetings/${id}/transcript`),
+    protocolRecipients: (id: string) =>
+      request<{ recipients: string[] }>(`/meetings/${id}/protocol-recipients`),
+    sendProtocol: (id: string, payload: { subject: string; recipients: string[]; body_markdown: string }) =>
+      request<{ ok: boolean; sent_to: number }>(`/meetings/${id}/send-protocol`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
     audioUrl: (id: string) => `/api/meetings/${id}/audio`,
     calendarStatus: () =>
       request<{ connected: boolean; has_enabled_calendar: boolean; calendar_count: number }>('/meetings/calendar-status'),

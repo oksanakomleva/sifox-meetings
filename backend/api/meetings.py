@@ -1,5 +1,6 @@
 """Meeting routes: list, detail, transcript, audio stream."""
 import os
+import re
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import FileResponse, StreamingResponse
@@ -272,6 +273,61 @@ async def update_meeting_tags(meeting_id: str, body: TagsUpdate, user: CurrentUs
     tags = normalize_tags(body.tags)
     await models.update_meeting_tags(meeting_id, tags)
     return {"tags": tags}
+
+
+@router.get("/{meeting_id}/protocol-recipients")
+async def protocol_recipients(meeting_id: str, user: CurrentUser):
+    """Default recipient list for sending the protocol — all calendar attendees
+    (incl. external guests). Used to prefill the send dialog."""
+    await _get_accessible_meeting(meeting_id, user)
+    recipients = await models.get_meeting_attendee_emails(meeting_id)
+    return {"recipients": recipients}
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class SendProtocolRequest(BaseModel):
+    subject: str
+    recipients: list[str]
+    body_markdown: str
+
+
+@router.post("/{meeting_id}/send-protocol")
+async def send_protocol(meeting_id: str, body: SendProtocolRequest, user: CurrentUser):
+    """E-mail the (edited) protocol to the given recipients from the current
+    user's own mailbox via personal OAuth (gmail.send)."""
+    from services import gmail_send
+
+    meeting = await _get_accessible_meeting(meeting_id, user)
+
+    recipients = [r.strip().lower() for r in body.recipients if r.strip()]
+    invalid = [r for r in recipients if not _EMAIL_RE.match(r)]
+    if not recipients:
+        raise HTTPException(400, "Не указаны получатели")
+    if invalid:
+        raise HTTPException(400, f"Некорректные адреса: {', '.join(invalid)}")
+    if not body.body_markdown.strip():
+        raise HTTPException(400, "Пустой текст протокола")
+
+    token = await models.get_gmail_send_token(user["user_id"])
+    if not token:
+        # Frontend handles this by offering the "connect gmail.send" flow.
+        raise HTTPException(409, "gmail_send_not_connected")
+
+    result = await gmail_send.send_protocol_email(
+        user_id=user["user_id"],
+        token_row=token,
+        sender=user["email"],
+        recipients=recipients,
+        subject=body.subject.strip() or f"Протокол встречи: {meeting.get('title') or ''}".strip(),
+        body_markdown=body.body_markdown,
+    )
+    if not result.get("ok"):
+        raise HTTPException(502, f"Не удалось отправить письмо: {result.get('error', 'unknown')}")
+
+    await models.set_protocol_sent(meeting_id)
+    return {"ok": True, "sent_to": len(recipients)}
 
 
 @router.get("/{meeting_id}/transcript")

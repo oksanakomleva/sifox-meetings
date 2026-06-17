@@ -168,6 +168,22 @@ async def _process_callback(result: dict, invite_token: str | None):
         )
         return RedirectResponse(f"{config.BASE_URL}/admin/calendars?write_connected=1")
 
+    elif result["purpose"] == "gmail_send":
+        # ── Personal gmail.send connect (for emailing protocols) ──────────
+        user_id = result["existing_user_id"]
+        tokens = result["tokens"]
+        await models.save_gmail_send_token(
+            user_id,
+            tokens["token"],
+            tokens.get("refresh_token"),
+            tokens.get("expiry"),
+        )
+        # Return to where the user started (sanitized to a relative path).
+        nxt = result.get("next_path") or "/"
+        if not nxt.startswith("/"):
+            nxt = "/"
+        return RedirectResponse(f"{config.BASE_URL}{nxt}")
+
     raise HTTPException(400, "Unknown OAuth purpose")
 
 
@@ -259,6 +275,30 @@ async def connect_calendar(
         raise HTTPException(401, "Session expired")
     url = google_oauth.get_calendar_url(session["user_id"])
     return RedirectResponse(url)
+
+
+@router.get("/connect-gmail-send")
+async def connect_gmail_send(
+    next: str = "/",
+    session_token: Annotated[str | None, Cookie(alias="session")] = None,
+):
+    """Start personal OAuth consent for gmail.send (to e-mail meeting protocols).
+    `next` is the relative path to return to after consent (e.g. /meetings/{id})."""
+    if not session_token:
+        raise HTTPException(401, "Not authenticated")
+    session = await models.get_session(session_token)
+    if not session:
+        raise HTTPException(401, "Session expired")
+    safe_next = next if next.startswith("/") else "/"
+    url = google_oauth.get_gmail_send_url(session["user_id"], safe_next)
+    return RedirectResponse(url)
+
+
+@router.get("/gmail-send-status")
+async def gmail_send_status(user: Annotated[dict, Depends(get_current_user)]):
+    """Whether the current user has connected personal gmail.send."""
+    token = await models.get_gmail_send_token(user["user_id"])
+    return {"connected": token is not None}
 
 
 @router.get("/connect-calendar-write")

@@ -32,8 +32,21 @@ _CALENDAR_WRITE_SCOPES = [
     "https://www.googleapis.com/auth/calendar",
 ]
 
+# Scopes for sending the meeting protocol from the user's own mailbox.
+# Personal OAuth (NOT service-account/DWD) — no Workspace super-admin needed,
+# works for any Google account including personal gmail. Kept minimal (no
+# calendar) so the send token stays independent of calendar sync.
+_GMAIL_SEND_SCOPES = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/gmail.send",
+]
+
 # In-memory state store: state -> (purpose, user_id|None, expires_at)
 _states: dict[str, tuple[str, int | None, float]] = {}
+# Optional post-auth redirect path, keyed by the same state.
+_next_paths: dict[str, str] = {}
 
 _CLIENT_CONFIG = {
     "web": {
@@ -87,6 +100,22 @@ def get_calendar_write_url(user_id: int) -> str:
     state = secrets.token_urlsafe(16)
     _states[state] = ("calendar_write", user_id, time.monotonic() + 600)
     flow = _make_flow(_CALENDAR_WRITE_SCOPES)
+    url, _ = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="false",
+        state=state,
+        prompt="consent",
+    )
+    return url
+
+
+def get_gmail_send_url(user_id: int, next_path: str | None = None) -> str:
+    """Generate Google OAuth URL for personal gmail.send consent."""
+    state = secrets.token_urlsafe(16)
+    _states[state] = ("gmail_send", user_id, time.monotonic() + 600)
+    if next_path:
+        _next_paths[state] = next_path
+    flow = _make_flow(_GMAIL_SEND_SCOPES)
     url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="false",
@@ -160,6 +189,8 @@ async def handle_callback(
         scopes = _CALENDAR_WRITE_SCOPES
     elif purpose == "calendar":
         scopes = _CALENDAR_SCOPES
+    elif purpose == "gmail_send":
+        scopes = _GMAIL_SEND_SCOPES
     else:
         scopes = _LOGIN_SCOPES
 
@@ -174,4 +205,5 @@ async def handle_callback(
         "user_info": user_info,
         "tokens": tokens,
         "existing_user_id": existing_user_id,
+        "next_path": _next_paths.pop(state, None),
     }

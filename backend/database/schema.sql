@@ -37,6 +37,18 @@ CREATE TABLE IF NOT EXISTS google_tokens (
 -- Migration: add has_write_scope if missing
 ALTER TABLE google_tokens ADD COLUMN IF NOT EXISTS has_write_scope BOOLEAN DEFAULT FALSE;
 
+-- ── Gmail send tokens (per user, personal OAuth gmail.send) ──────────────────
+-- Kept SEPARATE from google_tokens so granting send access never clobbers the
+-- calendar token and a personal gmail used only for sending isn't pulled into
+-- calendar sync.
+CREATE TABLE IF NOT EXISTS gmail_send_tokens (
+    user_id       BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    access_token  TEXT NOT NULL,         -- Fernet-encrypted
+    refresh_token TEXT,                  -- Fernet-encrypted
+    token_expiry  TIMESTAMPTZ,
+    updated_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- ── Calendars available for recording ────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS calendars (
     id                  BIGSERIAL PRIMARY KEY,
@@ -70,6 +82,8 @@ CREATE TABLE IF NOT EXISTS meetings (
     created_at    TIMESTAMP DEFAULT NOW(),
     updated_at    TIMESTAMP DEFAULT NOW()
 );
+-- Migration: timestamp of when the protocol was last e-mailed to participants
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS protocol_sent_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_meetings_status    ON meetings(status);
 CREATE INDEX IF NOT EXISTS idx_meetings_start     ON meetings(start_time);
 CREATE INDEX IF NOT EXISTS idx_meetings_url       ON meetings(meeting_url);

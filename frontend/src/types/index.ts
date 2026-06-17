@@ -53,6 +53,7 @@ export interface Meeting {
   audio_size: number | null
   error_message: string | null
   created_at: string
+  protocol_sent_at?: string | null
   participants?: Participant[]
   transcript?: string
 }

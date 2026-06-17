@@ -5,6 +5,8 @@ import StatusBadge from '../components/StatusBadge'
 import AudioPlayer from '../components/AudioPlayer'
 import ChatWidget from '../components/ChatWidget'
 import TagEditor from '../components/TagEditor'
+import SendProtocolModal from '../components/SendProtocolModal'
+import { isDemoOn } from '../demo/demo'
 import type { Meeting, ChatMessage } from '../types'
 
 type Tab = 'protocol' | 'transcript' | 'audio' | 'chat'
@@ -18,6 +20,7 @@ export default function MeetingDetail() {
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState<Tab>('protocol')
   const [error, setError] = useState('')
+  const [showSend, setShowSend] = useState(false)
 
   useEffect(() => {
     if (!id) return
@@ -183,14 +186,28 @@ export default function MeetingDetail() {
         {tab === 'protocol' && (
           <div style={{ maxWidth: 760 }}>
             {meeting.summary ? (
-              <div style={{
-                fontSize: 'var(--font-size-sm)',
-                lineHeight: 'var(--line-height-relaxed)',
-                color: 'var(--color-text)',
-                whiteSpace: 'pre-wrap',
-              }}>
-                <MarkdownRenderer text={meeting.summary} />
-              </div>
+              <>
+                {!isDemoOn() && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginBottom: 'var(--space-4)', flexWrap: 'wrap' }}>
+                    <button className="btn btn-primary" onClick={() => setShowSend(true)}>
+                      📧 Отправить участникам
+                    </button>
+                    {meeting.protocol_sent_at && (
+                      <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-text-muted)' }}>
+                        Отправлено {new Date(meeting.protocol_sent_at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}
+                      </span>
+                    )}
+                  </div>
+                )}
+                <div style={{
+                  fontSize: 'var(--font-size-sm)',
+                  lineHeight: 'var(--line-height-relaxed)',
+                  color: 'var(--color-text)',
+                  whiteSpace: 'pre-wrap',
+                }}>
+                  <MarkdownRenderer text={meeting.summary} />
+                </div>
+              </>
             ) : (
               <div className="empty-state">
                 <div className="empty-state-icon">⏳</div>
@@ -240,6 +257,16 @@ export default function MeetingDetail() {
           </div>
         )}
       </div>
+
+      {showSend && id && meeting.summary && (
+        <SendProtocolModal
+          meetingId={id}
+          title={meeting.title}
+          summary={meeting.summary}
+          onClose={() => setShowSend(false)}
+          onSent={() => setMeeting(m => (m ? { ...m, protocol_sent_at: new Date().toISOString() } : m))}
+        />
+      )}
     </div>
   )
 }
