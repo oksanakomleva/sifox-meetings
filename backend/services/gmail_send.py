@@ -71,7 +71,8 @@ def markdown_to_html(md: str) -> str:
                 close_list()
                 html_parts.append("<ol>")
                 list_type = "ol"
-            html_parts.append(f"<li>{_inline(re.sub(r'^\d+\.\s', '', line))}</li>")
+            item = re.sub(r"^\d+\.\s", "", line)
+            html_parts.append(f"<li>{_inline(item)}</li>")
         else:
             close_list()
             html_parts.append(f"<p>{_inline(line)}</p>")

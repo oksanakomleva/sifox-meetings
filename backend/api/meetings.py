@@ -324,9 +324,16 @@ async def send_protocol(meeting_id: str, body: SendProtocolRequest, user: Curren
         body_markdown=body.body_markdown,
     )
     if not result.get("ok"):
-        raise HTTPException(502, f"Не удалось отправить письмо: {result.get('error', 'unknown')}")
+        # 400 (not 5xx): a 5xx from the app can be replaced by Railway's edge with
+        # a non-JSON gateway page, hiding the real reason. Keep it 4xx so the
+        # actual Gmail error text reaches the user.
+        raise HTTPException(400, f"Не удалось отправить письмо: {result.get('error', 'unknown')}")
 
-    await models.set_protocol_sent(meeting_id)
+    try:
+        await models.set_protocol_sent(meeting_id)
+    except Exception as e:
+        # The mail already went out — don't fail the request over the UI badge.
+        logger.warning("set_protocol_sent failed for %s: %s", meeting_id, e)
     return {"ok": True, "sent_to": len(recipients)}
 
 
