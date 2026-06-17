@@ -1103,13 +1103,20 @@ async def get_upcoming_meetings_for_user(user_id: int, is_admin: bool) -> list[d
                 WHERE m.status IN ('pending', 'recording', 'transcribing', 'analyzing')
                   AND m.start_time > NOW() - interval '2 hours'
                   AND (
+                    -- the user is an actual attendee of the event...
                     EXISTS (SELECT 1 FROM calendar_meeting_links cml
-                            WHERE cml.meeting_id = m.id AND cml.user_id = $1)
-                    OR EXISTS (SELECT 1 FROM calendar_meeting_links cml
-                               WHERE cml.meeting_id = m.id AND $2 = ANY(cml.attendee_emails))
+                            WHERE cml.meeting_id = m.id AND $2 = ANY(cml.attendee_emails))
+                    -- ...or has an explicit access grant...
                     OR EXISTS (SELECT 1 FROM meeting_access_grants g
                                WHERE g.meeting_id = m.id AND g.user_id = $1)
+                    -- ...or recorded/uploaded it (parity with "Завершённые").
+                    OR m.recorder_user_id = $1
                   )
+                  -- NB: we intentionally do NOT match merely because the event
+                  -- came from a calendar this user synced (cml.user_id = $1) —
+                  -- that leaks other people's meetings into "Мои встречи" when an
+                  -- admin records team/shared calendars. "Все встречи" still shows
+                  -- everything via the is_admin branch / /api/admin/upcoming.
                 ORDER BY m.start_time ASC
                 LIMIT 100
                 """,
