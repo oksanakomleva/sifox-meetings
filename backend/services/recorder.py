@@ -27,6 +27,11 @@ _active: dict[str, asyncio.Task] = {}
 _shutdown_requested: bool = False
 
 
+class EmptyRecordingError(Exception):
+    """Raised when a recording has no usable audio/speech (silence). Lets callers
+    distinguish a benign 'nobody showed up' from a real failure."""
+
+
 def request_shutdown() -> None:
     """Signal that the service is shutting down — no new recordings will start."""
     global _shutdown_requested
@@ -151,11 +156,30 @@ async def recover_interrupted_meetings() -> None:
         logger.warning("Meeting '%s' (%s) stuck in %s without recoverable data — marked error", title, mid[:8], status)
 
 
+async def _finalize_no_show(meeting_id: str) -> None:
+    """Mark a meeting nobody joined as 'no_show' and drop its empty recording.
+    Deletes the file regardless of size (find_audio_on_disk skips tiny files)."""
+    await models.mark_no_show(meeting_id)
+    base = Path(config.AUDIO_DIR)
+    for ext in (".wav", ".mp3"):
+        p = base / f"{meeting_id}{ext}"
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logger.warning("Could not delete empty recording %s: %s", p.name, e)
+
+
 async def _recover_pipeline(meeting_id: str, audio_path: "Path") -> None:
     """Resume transcription → analysis from an existing audio file on the volume.
     transcribe_and_analyze raises on failure, so mark the meeting 'error' here."""
     try:
         await transcribe_and_analyze(meeting_id, audio_path)
+    except EmptyRecordingError:
+        # Recovered audio has no usable speech — nothing to show.
+        logger.info("Recovery %s: empty recording — marking no_show", meeting_id[:8])
+        await _finalize_no_show(meeting_id)
     except Exception as e:
         logger.error("Recovery pipeline failed for %s: %s", meeting_id[:8], e)
         await models.update_meeting_status(meeting_id, "error", f"Ошибка при восстановлении: {str(e)[:400]}")
@@ -226,6 +250,7 @@ async def _record_pipeline(meeting_id: str) -> None:
     audio_path.parent.mkdir(parents=True, exist_ok=True)
 
     sink_name = f"meet_{meeting_id[:8]}"
+    had_participants = False
     audio_proc: AudioCapture | None = None
     browser = None
     pw = None
@@ -321,7 +346,7 @@ async def _record_pipeline(meeting_id: str) -> None:
         tracker = asyncio.create_task(track_speakers())
 
         # 6. Wait for meeting end
-        await _wait_for_meeting_end(page, participants, meeting.get("start_time"))
+        had_participants = await _wait_for_meeting_end(page, participants, meeting.get("start_time"))
         tracker.cancel()
 
         # 7. Stop recording
@@ -346,6 +371,15 @@ async def _record_pipeline(meeting_id: str) -> None:
     except asyncio.CancelledError:
         logger.info("Recording %s cancelled", meeting_id[:8])
         raise
+    except EmptyRecordingError as e:
+        if had_participants:
+            # People were here but no speech was captured — a real failure worth seeing.
+            logger.warning("Recording %s empty despite participants: %s", meeting_id[:8], e)
+            await models.update_meeting_status(meeting_id, "error", "Пустая запись: речь не распознана")
+        else:
+            # Nobody showed up (cancelled / no-show) — benign, not an error.
+            logger.info("Recording %s: nobody joined — marking no_show", meeting_id[:8])
+            await _finalize_no_show(meeting_id)
     except Exception as e:
         logger.error("Recording %s failed: %s", meeting_id[:8], e, exc_info=True)
         await models.update_meeting_status(meeting_id, "error", str(e)[:500])
@@ -387,14 +421,14 @@ async def transcribe_and_analyze(
     await models.update_meeting_status(meeting_id, "transcribing")
 
     if not audio_path.exists() or audio_path.stat().st_size < 10_000:
-        raise RuntimeError(f"Audio file missing or too small: {audio_path}")
+        raise EmptyRecordingError(f"Audio file missing or too small: {audio_path}")
 
     meeting = await models.get_meeting(meeting_id)
 
     # 1. Transcribe (faster-whisper decodes any format via ffmpeg)
     segments = await transcribe_audio(str(audio_path))
     if not segments:
-        raise RuntimeError("Empty transcription")
+        raise EmptyRecordingError("Empty transcription")
 
     effective_tl = _effective_speaker_timeline(speaker_timeline or [], set(participants))
     transcript_text = _build_transcript(segments, effective_tl)
@@ -631,7 +665,9 @@ async def _get_active_speakers(page) -> list[str]:
         return []
 
 
-async def _wait_for_meeting_end(page, initial_participants: set[str], scheduled_start=None) -> None:
+async def _wait_for_meeting_end(page, initial_participants: set[str], scheduled_start=None) -> bool:
+    """Block until the meeting ends. Returns whether any real participant (besides
+    Protocaller) was ever present — False means nobody showed up (no_show)."""
     meeting_started = len(initial_participants) > 0
     empty_polls = 0
     deadline = time.monotonic() + config.MAX_RECORDING_HOURS * 3600
@@ -645,16 +681,16 @@ async def _wait_for_meeting_end(page, initial_participants: set[str], scheduled_
         # Hard deadline
         if time.monotonic() > deadline:
             logger.info("Max recording time reached — stopping")
-            return
+            return meeting_started
 
         try:
             current_url = page.url
             if "telemost" not in current_url.lower():
                 logger.info("URL changed — meeting ended")
-                return
+                return meeting_started
         except Exception:
             logger.info("Page crashed — meeting ended")
-            return
+            return meeting_started
 
         new_names = await _get_participant_names(page)
         others = [n for n in new_names if n != "Protocaller"]
@@ -680,7 +716,7 @@ async def _wait_for_meeting_end(page, initial_participants: set[str], scheduled_
         logger.info("Empty poll %d/%d (started=%s)", empty_polls, config.EMPTY_POLLS_TO_END, meeting_started)
         if empty_polls >= config.EMPTY_POLLS_TO_END:
             logger.info("Meeting ended (no participants)")
-            return
+            return meeting_started
 
 
 # ── Audio capture ─────────────────────────────────────────────────────────────

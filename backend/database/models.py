@@ -739,6 +739,31 @@ async def set_protocol_sent(meeting_id: str) -> None:
         )
 
 
+async def mark_no_show(meeting_id: str) -> None:
+    """Terminal status for a meeting nobody joined ('Не состоялась') — distinct
+    from 'error' so it's not flagged as a failure."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE meetings SET status='no_show', error_message=NULL, updated_at=NOW() WHERE id=$1",
+            meeting_id,
+        )
+
+
+async def delete_meeting_by_event_id(google_event_id: str) -> bool:
+    """Delete a still-pending meeting whose calendar event was cancelled. Only
+    touches 'pending' rows (an in-progress/finished recording is left alone).
+    Cascades to calendar_meeting_links / meeting_participants. Returns True if a
+    row was deleted."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM meetings WHERE google_event_id=$1 AND status='pending'",
+            google_event_id,
+        )
+    return result.split()[-1] != "0"
+
+
 async def get_meetings_for_user(
     user_id: int,
     limit: int = 50,

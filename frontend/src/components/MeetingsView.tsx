@@ -145,8 +145,9 @@ export default function MeetingsView({ title, subtitle, fetchDone, fetchUpcoming
   const [error, setError] = useState('')
   const navigate = useNavigate()
 
-  // Admin sees finished AND errored meetings (so errors stay visible/fixable).
-  const doneStatuses = admin ? ['done', 'error'] : ['done']
+  // Admin sees finished, errored AND no-show meetings (so they stay visible);
+  // regular users only see completed ones.
+  const doneStatuses = admin ? ['done', 'error', 'no_show'] : ['done']
 
   const load = () => {
     setLoading(true)

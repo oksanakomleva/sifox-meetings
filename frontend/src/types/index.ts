@@ -65,6 +65,7 @@ export type MeetingStatus =
   | 'analyzing'
   | 'done'
   | 'error'
+  | 'no_show'
 
 export interface Participant {
   name: string

@@ -7,6 +7,7 @@ const STATUS_LABELS: Record<MeetingStatus, string> = {
   analyzing:   'Анализ...',
   done:        'Готово',
   error:       'Ошибка',
+  no_show:     'Не состоялась',
 }
 
 const STATUS_CLASSES: Record<MeetingStatus, string> = {
@@ -16,6 +17,7 @@ const STATUS_CLASSES: Record<MeetingStatus, string> = {
   analyzing:   'badge-pending',
   done:        'badge-done',
   error:       'badge-error',
+  no_show:     'badge-other',
 }
 
 export default function StatusBadge({ status }: { status: MeetingStatus }) {

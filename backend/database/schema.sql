@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS meetings (
     start_time    TIMESTAMP WITH TIME ZONE,
     end_time      TIMESTAMP WITH TIME ZONE,
     status        TEXT DEFAULT 'pending',
-    -- pending → recording → transcribing → analyzing → done | error
+    -- pending → recording → transcribing → analyzing → done | error | no_show
+    -- no_show: bot joined but nobody came (not a failure)
     transcript    TEXT,
     summary       TEXT,
     tags          TEXT[],
@@ -84,6 +85,10 @@ CREATE TABLE IF NOT EXISTS meetings (
 );
 -- Migration: timestamp of when the protocol was last e-mailed to participants
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS protocol_sent_at TIMESTAMPTZ;
+-- Backfill: meetings that failed only because nobody showed up were marked
+-- 'error'/'Empty transcription' — reclassify them as the benign 'no_show'.
+UPDATE meetings SET status='no_show', error_message=NULL
+ WHERE status='error' AND error_message='Empty transcription';
 CREATE INDEX IF NOT EXISTS idx_meetings_status    ON meetings(status);
 CREATE INDEX IF NOT EXISTS idx_meetings_start     ON meetings(start_time);
 CREATE INDEX IF NOT EXISTS idx_meetings_url       ON meetings(meeting_url);

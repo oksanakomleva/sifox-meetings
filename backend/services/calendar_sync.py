@@ -67,7 +67,7 @@ def _naive_expiry(dt) -> "datetime | None":
     return dt
 
 
-def _fetch_events_sync(token_row: dict, calendar_ids: list[str], days: int = 7) -> list[dict[str, Any]]:
+def _fetch_events_sync(token_row: dict, calendar_ids: list[str], days: int = 7) -> tuple[list[dict[str, Any]], list[str]]:
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
     from googleapiclient.discovery import build
@@ -95,6 +95,7 @@ def _fetch_events_sync(token_row: dict, calendar_ids: list[str], days: int = 7) 
     time_max = now + timedelta(days=days)
 
     events = []
+    cancelled_ids: list[str] = []
     for cal_id in calendar_ids:
         try:
             result = service.events().list(
@@ -110,6 +111,13 @@ def _fetch_events_sync(token_row: dict, calendar_ids: list[str], days: int = 7) 
             continue
 
         for item in result.get("items", []):
+            # Cancelled occurrences come back with status='cancelled' and often
+            # without start/conference fields — collect their ids (to delete the
+            # pending meeting) and skip them before touching other fields.
+            if item.get("status") == "cancelled":
+                cancelled_ids.append(item["id"])
+                continue
+
             telemost_url = _extract_telemost_url(item)
             if not telemost_url:
                 continue
@@ -131,7 +139,7 @@ def _fetch_events_sync(token_row: dict, calendar_ids: list[str], days: int = 7) 
                 "attendee_emails": _get_attendee_emails(item),
             })
 
-    return events
+    return events, cancelled_ids
 
 
 def _fetch_calendar_list_sync(token_row: dict) -> list[dict]:
@@ -257,7 +265,7 @@ async def sync_user_events(user_id: int) -> None:
         return
 
     loop = asyncio.get_running_loop()
-    events = await loop.run_in_executor(
+    events, cancelled_ids = await loop.run_in_executor(
         None, _fetch_events_sync, token_row, enabled_cal_ids
     )
 
@@ -265,6 +273,14 @@ async def sync_user_events(user_id: int) -> None:
     if token_row.get("_refreshed"):
         r = token_row["_refreshed"]
         await models.save_google_token(user_id, r["access_token"], None, r["expiry"])
+
+    # Cancelled events → drop the still-pending meeting (and don't recreate it).
+    # Guard: never delete an id that also came back as a live (confirmed) event —
+    # a rescheduled occurrence keeps its id but stays 'confirmed', not 'cancelled'.
+    live_ids = {ev["google_id"] for ev in events}
+    for gid in set(cancelled_ids) - live_ids:
+        if await models.delete_meeting_by_event_id(gid):
+            logger.info("Deleted pending meeting for cancelled event %s", gid)
 
     for ev in events:
         # Upsert meeting (dedup by google_event_id — one row per occurrence)
