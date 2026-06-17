@@ -162,11 +162,13 @@ export default function MeetingDetail() {
               audio: '🎵 Аудио',
               chat: '💬 AI-чат',
             }
+            // Gate tabs on DATA, not status — a meeting that errored at the
+            // analysis step still has a usable transcript/audio/chat.
             const disabled: Record<Tab, boolean> = {
-              protocol: meeting.status !== 'done' || !meeting.summary,
-              transcript: meeting.status !== 'done',
+              protocol: !meeting.summary,
+              transcript: !meeting.transcript,
               audio: !meeting.audio_path,
-              chat: meeting.status !== 'done',
+              chat: !meeting.transcript,
             }
             return (
               <button
