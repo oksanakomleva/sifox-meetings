@@ -120,6 +120,8 @@ export const api = {
       request<{ meetings: import('../types').Meeting[] }>('/admin/upcoming'),
     reanalyzeMeeting: (meetingId: string) =>
       request<void>(`/admin/meetings/${meetingId}/reanalyze`, { method: 'POST' }),
+    retranscribeMeeting: (meetingId: string) =>
+      request<void>(`/admin/meetings/${meetingId}/retranscribe`, { method: 'POST' }),
     grantAccess: (userId: number, meetingId: string) =>
       request<void>('/admin/grant-access', {
         method: 'POST',

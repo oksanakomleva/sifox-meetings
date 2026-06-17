@@ -10,6 +10,7 @@ export default function AdminMeetings() {
       fetchDone={() => api.admin.allMeetings(200).then(r => r.meetings)}
       fetchUpcoming={() => api.admin.upcoming().then(r => r.meetings)}
       onReanalyze={(id) => api.admin.reanalyzeMeeting(id)}
+      onRetranscribe={(id) => api.admin.retranscribeMeeting(id)}
     />
   )
 }

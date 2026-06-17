@@ -131,9 +131,10 @@ interface Props {
   fetchUpcoming: () => Promise<Meeting[]>
   admin?: boolean
   onReanalyze?: (meetingId: string) => Promise<unknown>
+  onRetranscribe?: (meetingId: string) => Promise<unknown>
 }
 
-export default function MeetingsView({ title, subtitle, fetchDone, fetchUpcoming, admin, onReanalyze }: Props) {
+export default function MeetingsView({ title, subtitle, fetchDone, fetchUpcoming, admin, onReanalyze, onRetranscribe }: Props) {
   const [tab, setTab] = useState<'done' | 'upcoming'>('done')
   const [doneMeetings, setDoneMeetings] = useState<Meeting[]>([])
   const [upcomingMeetings, setUpcomingMeetings] = useState<Meeting[]>([])
@@ -162,6 +163,12 @@ export default function MeetingsView({ title, subtitle, fetchDone, fetchUpcoming
   const handleReanalyze = async (id: string) => {
     if (!onReanalyze) return
     await onReanalyze(id)
+    setTimeout(load, 1500)
+  }
+
+  const handleRetranscribe = async (id: string) => {
+    if (!onRetranscribe) return
+    await onRetranscribe(id)
     setTimeout(load, 1500)
   }
 
@@ -286,6 +293,7 @@ export default function MeetingsView({ title, subtitle, fetchDone, fetchUpcoming
                     key={m.id} meeting={m}
                     onClick={() => navigate(`/meetings/${m.id}`)}
                     onReanalyze={admin && onReanalyze ? handleReanalyze : undefined}
+                    onRetranscribe={admin && onRetranscribe ? handleRetranscribe : undefined}
                   />
                 ))}
               </div>
@@ -339,10 +347,11 @@ export default function MeetingsView({ title, subtitle, fetchDone, fetchUpcoming
 
 // ── Meeting card ────────────────────────────────────────────────────────────────
 
-function MeetingCard({ meeting: m, onClick, onReanalyze }: {
+function MeetingCard({ meeting: m, onClick, onReanalyze, onRetranscribe }: {
   meeting: Meeting
   onClick: () => void
   onReanalyze?: (id: string) => Promise<unknown>
+  onRetranscribe?: (id: string) => Promise<unknown>
 }) {
   const [busy, setBusy] = useState(false)
   return (
@@ -384,6 +393,16 @@ function MeetingCard({ meeting: m, onClick, onReanalyze }: {
               disabled={busy}
               onClick={async (e) => { e.stopPropagation(); setBusy(true); await onReanalyze(m.id) }}
             >{busy ? '…' : 'Переанализировать'}</button>
+          )}
+          {/* No transcript yet (e.g. interrupted mid-transcription) — re-run the
+              full pipeline from the audio still on the volume. */}
+          {onRetranscribe && m.status === 'error' && !m.audio_path && (
+            <button
+              className="btn btn-secondary"
+              style={{ fontSize: 'var(--font-size-xs)', padding: '4px 10px' }}
+              disabled={busy}
+              onClick={async (e) => { e.stopPropagation(); setBusy(true); await onRetranscribe(m.id) }}
+            >{busy ? '…' : 'Перетранскрибировать'}</button>
           )}
         </div>
       </div>

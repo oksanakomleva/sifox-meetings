@@ -133,6 +133,27 @@ async def reanalyze_meeting(meeting_id: str, admin: AdminUser):
     return {"ok": True, "message": "Re-analysis started"}
 
 
+@router.post("/meetings/{meeting_id}/retranscribe")
+async def retranscribe_meeting(meeting_id: str, admin: AdminUser):
+    """Re-run the FULL transcribe→analyze pipeline from the meeting's audio file
+    on the volume. Unlike /reanalyze (which needs an existing transcript), this
+    recovers meetings that errored mid-transcription: the WAV/MP3 survives on the
+    persistent volume even when the DB never recorded audio_path."""
+    from services.recorder import find_audio_on_disk, spawn_tracked, _recover_pipeline
+
+    meeting = await models.get_meeting(meeting_id)
+    if not meeting:
+        raise HTTPException(404, "Meeting not found")
+    audio = find_audio_on_disk(meeting_id)
+    if audio is None:
+        raise HTTPException(400, "Аудиофайл встречи не найден в хранилище")
+
+    started = spawn_tracked(meeting_id, _recover_pipeline(meeting_id, audio), name=f"retranscribe-{meeting_id[:8]}")
+    if not started:
+        return {"ok": True, "message": "Уже обрабатывается"}
+    return {"ok": True, "message": "Перетранскрибация запущена", "audio": audio.name}
+
+
 @router.post("/meetings/{meeting_id}/force-error")
 async def force_error_meeting(meeting_id: str, admin: AdminUser):
     """Force a stuck recording/transcribing meeting into error state."""

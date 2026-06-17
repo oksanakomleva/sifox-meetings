@@ -56,15 +56,50 @@ async def wait_for_idle(timeout: float = 3300) -> bool:
         return False
 
 
+def find_audio_on_disk(meeting_id: str) -> "Path | None":
+    """Locate a meeting's audio on the volume by deterministic name.
+
+    The source WAV is present during transcription — it's deleted only after a
+    successful MP3 conversion — so prefer it, then fall back to the MP3 for
+    already-converted recordings. Crucially, the DB `audio_path` column isn't
+    written until AFTER transcription finishes, so recovery must NOT rely on it
+    (that bug marked mid-transcription meetings as "данные не сохранились" even
+    though the WAV was sitting right here on the persistent volume)."""
+    base = Path(config.AUDIO_DIR)
+    for ext in (".wav", ".mp3"):
+        p = base / f"{meeting_id}{ext}"
+        try:
+            if p.exists() and p.stat().st_size > 10_000:
+                return p
+        except OSError:
+            continue
+    return None
+
+
+def spawn_tracked(meeting_id: str, coro, *, name: str) -> bool:
+    """Run a coroutine as a background task that graceful shutdown will wait for
+    (registered in _active, exactly like a live recording). Returns False — and
+    closes the coroutine — if this meeting is already being processed."""
+    if meeting_id in _active:
+        coro.close()
+        return False
+    task = asyncio.create_task(coro, name=name)
+    _active[meeting_id] = task
+    task.add_done_callback(lambda _: _active.pop(meeting_id, None))
+    return True
+
+
 async def recover_interrupted_meetings() -> None:
     """
     Called on startup: re-queue recordings that were interrupted by a previous deploy.
-    - status='recording' → reset to 'pending' (bot will re-join if meeting still ongoing)
-    - status='transcribing' → re-run transcription if audio file exists
-    - status='analyzing' → re-run analysis if transcript exists in DB
+    - status='recording'    → reset to 'pending' (bot re-joins if meeting still ongoing)
+    - status='transcribing' → re-run the full pipeline from the WAV/MP3 on the volume
+    - status='analyzing'    → re-run analysis from the transcript in the DB
+
+    Resumed work is registered in _active so the NEXT graceful shutdown waits for
+    it too (otherwise a restart mid-recovery would silently kill it).
     """
     from database.connection import get_pool
-    from config import config as _config
     pool = await get_pool()
 
     async with pool.acquire() as conn:
@@ -80,7 +115,7 @@ async def recover_interrupted_meetings() -> None:
 
         # Find meetings stuck mid-processing
         stuck = await conn.fetch(
-            "SELECT id, title, status, audio_path, transcript FROM meetings WHERE status IN ('transcribing', 'analyzing')"
+            "SELECT id, title, status, transcript FROM meetings WHERE status IN ('transcribing', 'analyzing')"
         )
 
     if rec_count:
@@ -90,45 +125,39 @@ async def recover_interrupted_meetings() -> None:
         mid = str(row["id"])
         title = row["title"] or mid[:8]
         status = row["status"]
-        audio_path = row["audio_path"]
         transcript = row["transcript"]
 
-        if status == "transcribing" and audio_path:
-            full_path = Path(_config.AUDIO_DIR) / audio_path
-            if full_path.exists() and full_path.stat().st_size > 10_000:
-                logger.info("Recovering transcription for '%s' (%s)", title, mid[:8])
-                asyncio.create_task(_recover_transcribe(mid, str(full_path)), name=f"recover-{mid[:8]}")
-                continue
+        # Analysis step: the transcript is already saved — just re-run analysis.
         if status == "analyzing" and transcript:
             logger.info("Recovering analysis for '%s' (%s)", title, mid[:8])
-            asyncio.create_task(_recover_analyze(mid, transcript), name=f"reanalyze-{mid[:8]}")
+            spawn_tracked(mid, _recover_analyze(mid, transcript), name=f"reanalyze-{mid[:8]}")
             continue
 
-        # Audio/transcript missing — reset to error
+        # Transcription step (or analyzing without a saved transcript): the source
+        # audio is on the volume as {id}.wav/.mp3 even though the DB audio_path is
+        # still NULL. Find it by name and resume the full pipeline.
+        audio = find_audio_on_disk(mid)
+        if audio is not None:
+            logger.info("Recovering transcription for '%s' (%s) from %s", title, mid[:8], audio.name)
+            spawn_tracked(mid, _recover_pipeline(mid, audio), name=f"recover-{mid[:8]}")
+            continue
+
+        # Genuinely nothing to resume from (no audio on disk, no transcript).
         async with pool.acquire() as conn:
             await conn.execute(
                 "UPDATE meetings SET status='error', error_message='Прервано при деплое, данные не сохранились', updated_at=NOW() WHERE id=$1",
                 mid,
             )
-        logger.warning("Meeting '%s' (%s) stuck in %s without data — marked error", title, mid[:8], status)
+        logger.warning("Meeting '%s' (%s) stuck in %s without recoverable data — marked error", title, mid[:8], status)
 
 
-async def _recover_transcribe(meeting_id: str, audio_file: str) -> None:
-    """Resume pipeline from transcription step after interrupted deploy."""
+async def _recover_pipeline(meeting_id: str, audio_path: "Path") -> None:
+    """Resume transcription → analysis from an existing audio file on the volume.
+    transcribe_and_analyze raises on failure, so mark the meeting 'error' here."""
     try:
-        await models.update_meeting_status(meeting_id, "transcribing")
-        segments = await transcribe_audio(audio_file)
-        if not segments:
-            raise RuntimeError("Empty transcription on recovery")
-        transcript_text = _build_transcript(segments, [])
-        audio_filename = Path(audio_file).name
-        audio_size = Path(audio_file).stat().st_size
-        await models.save_transcript(meeting_id, transcript_text)
-        await models.save_meeting_audio(meeting_id, audio_filename, audio_size)
-        await models.resolve_participants_by_email(meeting_id)
-        await _recover_analyze(meeting_id, transcript_text)
+        await transcribe_and_analyze(meeting_id, audio_path)
     except Exception as e:
-        logger.error("Recovery transcription failed for %s: %s", meeting_id[:8], e)
+        logger.error("Recovery pipeline failed for %s: %s", meeting_id[:8], e)
         await models.update_meeting_status(meeting_id, "error", f"Ошибка при восстановлении: {str(e)[:400]}")
 
 
