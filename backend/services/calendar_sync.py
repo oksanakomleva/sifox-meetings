@@ -50,11 +50,24 @@ def _extract_telemost_url(event: dict) -> str | None:
 
 
 def _get_attendee_emails(event: dict) -> list[str]:
-    emails = []
+    emails: list[str] = []
+    seen: set[str] = set()
+
+    def add(email: str | None) -> None:
+        e = (email or "").lower()
+        if e and e not in seen:
+            seen.add(e)
+            emails.append(e)
+
     for att in event.get("attendees", []):
-        email = att.get("email", "").lower()
-        if email and not att.get("resource", False):
-            emails.append(email)
+        if not att.get("resource", False):
+            add(att.get("email"))
+    # The organizer/creator count as participants too — so a solo event (no
+    # invited guests) still belongs to its owner and shows in their "Мои встречи".
+    # No leak: for events on a team/shared calendar the organizer is the colleague
+    # who created them, not whoever records that calendar.
+    add((event.get("organizer") or {}).get("email"))
+    add((event.get("creator") or {}).get("email"))
     return emails
 
 

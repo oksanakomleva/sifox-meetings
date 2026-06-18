@@ -52,6 +52,20 @@ class TestGetAttendeeEmails:
     def test_no_attendees(self):
         assert _get_attendee_emails({}) == []
 
+    def test_solo_event_uses_organizer(self):
+        # No guests, but the organizer (creator) still counts as a participant.
+        event = {"organizer": {"email": "me@sifox.com", "self": True}}
+        assert _get_attendee_emails(event) == ["me@sifox.com"]
+
+    def test_organizer_creator_deduped_with_attendees(self):
+        event = {
+            "attendees": [{"email": "me@sifox.com"}, {"email": "guest@x.com"}],
+            "organizer": {"email": "ME@sifox.com"},
+            "creator": {"email": "other@sifox.com"},
+        }
+        # me@ already present (deduped), creator appended once.
+        assert _get_attendee_emails(event) == ["me@sifox.com", "guest@x.com", "other@sifox.com"]
+
 
 class TestNaiveExpiry:
     def test_none(self):
