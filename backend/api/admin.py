@@ -100,6 +100,17 @@ async def list_all_upcoming(admin: AdminUser):
     return {"meetings": meetings}
 
 
+@router.get("/meetings/{meeting_id}/live-qa")
+async def admin_live_qa(meeting_id: str, admin: AdminUser):
+    """Inspect the live in-meeting assistant Q&A for a meeting (+ flag state).
+    Accepts the X-Test-Api-Key header, so it's usable for validation."""
+    from config import config
+    return {
+        "live_assistant_enabled": config.LIVE_ASSISTANT_ENABLED,
+        "items": await models.get_live_qa(meeting_id),
+    }
+
+
 @router.post("/meetings/{meeting_id}/reanalyze")
 async def reanalyze_meeting(meeting_id: str, admin: AdminUser):
     """Re-run analysis on a meeting that already has a transcript."""
