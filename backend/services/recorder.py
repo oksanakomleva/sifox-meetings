@@ -250,16 +250,31 @@ async def _record_pipeline(meeting_id: str) -> None:
     audio_path.parent.mkdir(parents=True, exist_ok=True)
 
     sink_name = f"meet_{meeting_id[:8]}"
+    botmic_name: str | None = None   # virtual mic for voice answers (Phase 3)
     had_participants = False
     audio_proc: AudioCapture | None = None
     browser = None
     pw = None
+    speak_enabled = config.LIVE_ASSISTANT_ENABLED and config.LIVE_ASSISTANT_SPEAK
 
     try:
         # 1. PulseAudio sink
         await _create_pulse_sink(sink_name)
         await asyncio.sleep(0.5)
         await _set_default_sink(sink_name)
+
+        # 1b. Virtual microphone for the bot (Phase 3, voice answers). Its monitor
+        # becomes the default capture source BEFORE Chromium launches, so the bot's
+        # mic = this sink; paplay-ing TTS into it transmits to the meeting. Best
+        # effort — on any failure we just disable voice and keep recording.
+        if speak_enabled:
+            try:
+                botmic_name = f"botmic_{meeting_id[:8]}"
+                await _create_pulse_sink(botmic_name)
+                await _set_default_source(f"{botmic_name}.monitor")
+            except Exception as e:
+                logger.warning("Bot mic setup failed (%s) — voice disabled: %s", meeting_id[:8], e)
+                botmic_name = None
 
         # 2. Browser — check Xvfb is alive, then launch with timeout
         display = os.environ.get("DISPLAY", ":99")
@@ -308,6 +323,13 @@ async def _record_pipeline(meeting_id: str) -> None:
         participants = await _join_meeting(page, url)
         logger.info("Joined meeting %s, participants: %s", meeting_id[:8], participants)
 
+        # 3b. Turn the bot mic on (best effort) so voice answers are audible.
+        if botmic_name:
+            try:
+                await _enable_bot_mic(page)
+            except Exception as e:
+                logger.warning("Bot mic enable failed (%s): %s", meeting_id[:8], e)
+
         # 4. Start audio capture
         await models.update_meeting_status(meeting_id, "recording")
         audio_proc = await _start_audio_capture(str(audio_path), sink_name)
@@ -349,9 +371,15 @@ async def _record_pipeline(meeting_id: str) -> None:
         # never affect the recording — run_live_assistant swallows its own errors.
         live_task = None
         if config.LIVE_ASSISTANT_ENABLED:
-            from services.live_assistant import run_live_assistant
+            from services.live_assistant import run_live_assistant, speak_text
+            speak_cb = None
+            if botmic_name:
+                _mic = botmic_name
+                async def speak_cb(text: str):
+                    await speak_text(text, _mic)
             live_task = asyncio.create_task(
-                run_live_assistant(meeting_id, sink_name), name=f"live-{meeting_id[:8]}"
+                run_live_assistant(meeting_id, sink_name, speak=speak_cb),
+                name=f"live-{meeting_id[:8]}",
             )
 
         # 6. Wait for meeting end
@@ -408,6 +436,11 @@ async def _record_pipeline(meeting_id: str) -> None:
             except Exception:
                 pass
         await _delete_pulse_sink(sink_name)
+        if botmic_name:
+            try:
+                await _delete_pulse_sink(botmic_name)
+            except Exception:
+                pass
 
 
 # ── Shared post-capture pipeline ──────────────────────────────────────────────
@@ -676,6 +709,44 @@ async def _get_active_speakers(page) -> list[str]:
         return []
 
 
+# Candidate selectors for the Telemost in-call microphone toggle. Telemost uses
+# obfuscated class names, so this is a best guess — refined from the toolbar DOM
+# dump logged below. Failure to find it just means the answer isn't heard.
+_MIC_BUTTON_SELECTORS = [
+    "button[aria-label*='икрофон']",
+    "button[aria-label*='icrophone']",
+    "button[data-testid*='mic']",
+    "button[title*='икрофон']",
+    "[role='button'][aria-label*='икрофон']",
+]
+
+
+async def _enable_bot_mic(page) -> bool:
+    """Best-effort: turn the bot's microphone ON after joining (Telemost joins
+    muted). Also dumps the control bar DOM once so we can find the real selector
+    from logs. Returns True if a control was clicked."""
+    try:
+        toolbar = await page.evaluate(
+            "() => { const b = [...document.querySelectorAll(\"button,[role='button']\")]"
+            ".map(e => (e.getAttribute('aria-label')||e.getAttribute('title')||'').trim())"
+            ".filter(Boolean); return b.slice(0, 40); }"
+        )
+        logger.info("Telemost controls (aria/title labels): %s", toolbar)
+    except Exception:
+        pass
+    for sel in _MIC_BUTTON_SELECTORS:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() and await loc.is_visible():
+                await loc.click(timeout=2000)
+                logger.info("Bot mic: clicked %s", sel)
+                return True
+        except Exception:
+            continue
+    logger.warning("Bot mic: no known toggle selector matched — answer won't be heard")
+    return False
+
+
 async def _wait_for_meeting_end(page, initial_participants: set[str], scheduled_start=None) -> bool:
     """Block until the meeting ends. Returns whether any real participant (besides
     Protocaller) was ever present — False means nobody showed up (no_show)."""
@@ -910,6 +981,17 @@ async def _create_pulse_sink(name: str) -> None:
 async def _set_default_sink(name: str) -> None:
     proc = await asyncio.create_subprocess_exec(
         "pactl", "set-default-sink", name,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.wait()
+
+
+async def _set_default_source(name: str) -> None:
+    """Make `name` the default capture source — Chromium then uses it as the
+    bot's microphone (live assistant voice answers, Phase 3)."""
+    proc = await asyncio.create_subprocess_exec(
+        "pactl", "set-default-source", name,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )

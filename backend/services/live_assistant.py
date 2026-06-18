@@ -105,6 +105,53 @@ async def run_live_assistant(
                 pass
 
 
+async def speak_text(text: str, sink_name: str) -> None:
+    """Synthesize `text` and play it into `sink_name` (the bot's mic sink), so
+    Telemost transmits it to participants. OpenAI TTS with an espeak-ng fallback.
+    Best-effort: any failure is logged, never raised."""
+    import os
+    import tempfile
+    wav_path = None
+    try:
+        fd, wav_path = tempfile.mkstemp(suffix=".wav", prefix="tts_")
+        os.close(fd)
+        ok = False
+        if config.LIVE_TTS == "openai":
+            try:
+                from openai import AsyncOpenAI
+                client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+                resp = await client.audio.speech.create(
+                    model=config.LIVE_TTS_MODEL, voice=config.LIVE_TTS_VOICE,
+                    input=text, response_format="wav",
+                )
+                with open(wav_path, "wb") as f:
+                    f.write(resp.read())
+                ok = True
+            except Exception as e:
+                logger.warning("OpenAI TTS failed, falling back to espeak: %s", e)
+        if not ok:  # espeak-ng fallback (offline, already in the image)
+            p = await asyncio.create_subprocess_exec(
+                "espeak-ng", "-v", "ru", "-s", "160", "-w", wav_path, text,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await p.wait()
+        # Play into the bot's mic sink.
+        p = await asyncio.create_subprocess_exec(
+            "paplay", f"--device={sink_name}", wav_path,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await p.wait()
+        logger.info("Live assistant spoke answer into %s (%d chars)", sink_name, len(text))
+    except Exception as e:
+        logger.error("speak_text failed: %s", e)
+    finally:
+        if wav_path:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
+
+
 async def _handle_question(
     meeting_id: str,
     audio: bytes,

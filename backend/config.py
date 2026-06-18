@@ -56,6 +56,13 @@ class Config(BaseSettings):
     LIVE_WINDOW_SEC: int = 5                 # rolling window length per STT pass
     LIVE_QUESTION_MAX_SEC: int = 12          # max audio transcribed as the question
     LIVE_BUFFER_MIN: int = 10                # rolling live-transcript memory
+    # Phase 3 — speak the answer into the meeting (TTS). SEPARATE flag: the risky
+    # mic/voice path only engages when BOTH this and LIVE_ASSISTANT_ENABLED are on,
+    # so deploying it doesn't change the working listen+text behaviour.
+    LIVE_ASSISTANT_SPEAK: bool = False
+    LIVE_TTS: str = "openai"                  # "openai" | "espeak"
+    LIVE_TTS_MODEL: str = "tts-1"
+    LIVE_TTS_VOICE: str = "alloy"
 
     # ── Session ───────────────────────────────────────────────────────────
     SESSION_TTL_DAYS: int = 30
