@@ -89,6 +89,21 @@ ALTER TABLE meetings ADD COLUMN IF NOT EXISTS protocol_sent_at TIMESTAMPTZ;
 -- 'error'/'Empty transcription' — reclassify them as the benign 'no_show'.
 UPDATE meetings SET status='no_show', error_message=NULL
  WHERE status='error' AND error_message='Empty transcription';
+-- Live assistant: host opt-in to FULL data access on a meeting with external
+-- guests (NULL/false = auto scope by attendee domains).
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS assistant_full_access BOOLEAN DEFAULT FALSE;
+
+-- ── Live in-meeting assistant: Q&A audit log ─────────────────────────────────
+CREATE TABLE IF NOT EXISTS live_qa (
+    id          BIGSERIAL PRIMARY KEY,
+    meeting_id  UUID REFERENCES meetings(id) ON DELETE CASCADE,
+    asked_at    TIMESTAMPTZ DEFAULT NOW(),
+    question    TEXT NOT NULL,
+    answer      TEXT,
+    scope       TEXT,                    -- 'full' | 'meeting_only'
+    sources     TEXT[]                   -- which sources fed the answer
+);
+CREATE INDEX IF NOT EXISTS idx_live_qa_meeting ON live_qa(meeting_id, asked_at);
 CREATE INDEX IF NOT EXISTS idx_meetings_status    ON meetings(status);
 CREATE INDEX IF NOT EXISTS idx_meetings_start     ON meetings(start_time);
 CREATE INDEX IF NOT EXISTS idx_meetings_url       ON meetings(meeting_url);

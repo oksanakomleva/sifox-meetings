@@ -739,6 +739,43 @@ async def set_protocol_sent(meeting_id: str) -> None:
         )
 
 
+async def get_meeting_full_access(meeting_id: str) -> bool:
+    """Host opt-in flag: force FULL assistant data access on this meeting."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT assistant_full_access FROM meetings WHERE id = $1", meeting_id
+        )
+    return bool(row and row["assistant_full_access"])
+
+
+async def save_live_qa(
+    meeting_id: str, question: str, answer: str | None, scope: str, sources: list[str]
+) -> None:
+    """Audit log of a live in-meeting assistant Q&A."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO live_qa (meeting_id, question, answer, scope, sources)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            meeting_id, question, answer, scope, sources,
+        )
+
+
+async def get_live_qa(meeting_id: str) -> list[dict]:
+    """All assistant Q&A for a meeting, oldest first."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT question, answer, scope, sources, asked_at FROM live_qa "
+            "WHERE meeting_id = $1 ORDER BY asked_at ASC",
+            meeting_id,
+        )
+    return [dict(r) for r in rows]
+
+
 async def mark_no_show(meeting_id: str) -> None:
     """Terminal status for a meeting nobody joined ('Не состоялась') — distinct
     from 'error' so it's not flagged as a failure."""

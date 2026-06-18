@@ -46,6 +46,17 @@ class Config(BaseSettings):
     EMPTY_POLLS_TO_END: int = 3             # ~90s after everyone leaves
     MAX_RECORDING_HOURS: int = 4
 
+    # ── Live in-meeting assistant ("Протоколлер, …") ──────────────────────
+    # All gated behind LIVE_ASSISTANT_ENABLED (default off) — when off, the
+    # recorder behaves exactly as before.
+    LIVE_ASSISTANT_ENABLED: bool = False
+    LIVE_WAKE_WORD: str = "протоколлер"      # stem-matched (see live_assistant)
+    LIVE_WAKE_MODEL: str = "tiny"            # cheap continuous wake-word STT
+    LIVE_QUESTION_MODEL: str = "small"       # accurate STT for the question only
+    LIVE_WINDOW_SEC: int = 5                 # rolling window length per STT pass
+    LIVE_QUESTION_MAX_SEC: int = 12          # max audio transcribed as the question
+    LIVE_BUFFER_MIN: int = 10                # rolling live-transcript memory
+
     # ── Session ───────────────────────────────────────────────────────────
     SESSION_TTL_DAYS: int = 30
 

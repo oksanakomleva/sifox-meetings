@@ -345,9 +345,20 @@ async def _record_pipeline(meeting_id: str) -> None:
 
         tracker = asyncio.create_task(track_speakers())
 
+        # 5b. Live in-meeting assistant (isolated, opt-in via flag). Failures here
+        # never affect the recording — run_live_assistant swallows its own errors.
+        live_task = None
+        if config.LIVE_ASSISTANT_ENABLED:
+            from services.live_assistant import run_live_assistant
+            live_task = asyncio.create_task(
+                run_live_assistant(meeting_id, sink_name), name=f"live-{meeting_id[:8]}"
+            )
+
         # 6. Wait for meeting end
         had_participants = await _wait_for_meeting_end(page, participants, meeting.get("start_time"))
         tracker.cancel()
+        if live_task:
+            live_task.cancel()
 
         # 7. Stop recording
         end_time = datetime.now(timezone.utc)

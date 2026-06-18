@@ -275,6 +275,13 @@ async def update_meeting_tags(meeting_id: str, body: TagsUpdate, user: CurrentUs
     return {"tags": tags}
 
 
+@router.get("/{meeting_id}/live-qa")
+async def live_qa(meeting_id: str, user: CurrentUser):
+    """Questions asked to the live in-meeting assistant for this meeting."""
+    await _get_accessible_meeting(meeting_id, user)
+    return {"items": await models.get_live_qa(meeting_id)}
+
+
 @router.get("/{meeting_id}/protocol-recipients")
 async def protocol_recipients(meeting_id: str, user: CurrentUser):
     """Default recipient list for sending the protocol — all calendar attendees
