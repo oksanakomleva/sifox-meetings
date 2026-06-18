@@ -101,13 +101,14 @@ async def answer_question(
     scope: str,
     live_transcript: str = "",
     days: int = 90,
+    budget: int | None = None,
 ) -> tuple[str, list[str]]:
     """Returns (answer_text, sources_used)."""
     q = (question or "").strip()
     if not q:
         return "", []
 
-    budget = config.CHAT_MAX_CONTEXT_CHARS
+    budget = budget or config.CHAT_MAX_CONTEXT_CHARS
     sources_used: list[str] = []
 
     if scope == "meeting_only":
@@ -119,9 +120,11 @@ async def answer_question(
         now = datetime.now(timezone.utc)
         df = now - timedelta(days=days)
         items: list[tuple[float, object, str]] = []
-        # Meetings archive (no FTS — recency-ranked)
+        # Meetings archive (no FTS — recency-ranked). Cap to the most recent few
+        # so a live answer isn't slowed by dumping the whole archive into the LLM.
         try:
-            for m in await models.get_recent_meetings_with_transcripts(days=days):
+            recent = await models.get_recent_meetings_with_transcripts(days=days)
+            for m in recent[: config.LIVE_MEETINGS_LIMIT]:
                 if m.get("transcript"):
                     line = f"[ВСТРЕЧА] {_fmt_dt(m['start_time'])} «{m.get('title') or m.get('topic') or '—'}»: {m['transcript']}"
                     items.append((0.0, m["start_time"], line))

@@ -172,6 +172,7 @@ async def _handle_question(
 
         answer, sources = await qa_engine.answer_question(
             question, scope=scope, live_transcript=live_transcript,
+            budget=config.LIVE_CONTEXT_MAX_CHARS,
         )
         logger.info("Live assistant Q (%s, scope=%s): %r → A: %r", meeting_id[:8], scope, question, answer)
         await models.save_live_qa(meeting_id, question, answer, scope, sources)

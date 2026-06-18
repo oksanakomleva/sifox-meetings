@@ -63,6 +63,11 @@ class Config(BaseSettings):
     LIVE_TTS: str = "openai"                  # "openai" | "espeak"
     LIVE_TTS_MODEL: str = "tts-1"
     LIVE_TTS_VOICE: str = "alloy"
+    # Live answers must be FAST — keep the LLM context small (FTS-ranked email/MM
+    # survive; the huge meeting-transcript dump is trimmed). Far below the 1.2M
+    # used for the web chat, which made live answers take ~minute.
+    LIVE_CONTEXT_MAX_CHARS: int = 24_000
+    LIVE_MEETINGS_LIMIT: int = 20             # most-recent meetings considered live
 
     # ── Session ───────────────────────────────────────────────────────────
     SESSION_TTL_DAYS: int = 30
