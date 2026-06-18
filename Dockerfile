@@ -35,9 +35,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Install Playwright + Chromium
 RUN playwright install chromium
 
-# Pre-download Whisper model (avoids timeout on first run)
+# Pre-download Whisper models (avoids a slow runtime download on first use).
+# medium = post-meeting transcription; tiny/small = live in-meeting assistant
+# (continuous wake-word + question STT) — downloading these mid-meeting would
+# block the listen loop and miss the wake word.
 ARG WHISPER_MODEL=medium
-RUN python -c "from faster_whisper import WhisperModel; WhisperModel('${WHISPER_MODEL}', device='cpu', compute_type='int8')" || true
+RUN python -c "from faster_whisper import WhisperModel; [WhisperModel(m, device='cpu', compute_type='int8') for m in ['${WHISPER_MODEL}', 'tiny', 'small']]" || true
 
 # ── Frontend build ────────────────────────────────────────────────────────────
 COPY frontend/package.json frontend/package.json
