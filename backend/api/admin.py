@@ -350,6 +350,36 @@ async def delete_error_meetings(admin: AdminUser):
     return {"ok": True, "deleted": count}
 
 
+@router.delete("/meetings/{meeting_id}")
+async def delete_meeting(meeting_id: str, admin: AdminUser):
+    """Delete a single meeting: its DB row (cascades to participants / calendar
+    links / live_qa) and its audio file. For cleanup of test/junk meetings."""
+    import os
+    from config import config
+    from database.connection import get_pool
+
+    if "/" in meeting_id or "\\" in meeting_id or ".." in meeting_id:
+        raise HTTPException(400, "Invalid meeting_id")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM meetings WHERE id = $1", meeting_id)
+    if result.split()[-1] == "0":
+        raise HTTPException(404, "Meeting not found")
+
+    removed_files = []
+    for ext in (".mp3", ".wav"):
+        fpath = os.path.join(config.AUDIO_DIR, f"{meeting_id}{ext}")
+        if os.path.exists(fpath):
+            try:
+                os.remove(fpath)
+                removed_files.append(f"{meeting_id}{ext}")
+            except OSError:
+                pass
+    logger.info("Admin %s deleted meeting %s (files: %s)", admin["user_id"], meeting_id, removed_files)
+    return {"ok": True, "meeting_id": meeting_id, "files_removed": removed_files}
+
+
 # ── Storage ───────────────────────────────────────────────────────────────────
 
 @router.get("/storage")
