@@ -258,7 +258,12 @@ async def _record_pipeline(meeting_id: str) -> None:
     speak_enabled = config.LIVE_ASSISTANT_ENABLED and config.LIVE_ASSISTANT_SPEAK
 
     try:
-        # 1. PulseAudio sink
+        # 1. PulseAudio sink — one per meeting. The browser is bound to THIS sink
+        # per-process via PULSE_SINK below, which takes precedence over the global
+        # default — so concurrent recordings never share a sink and their audio
+        # can't mix. (Previously routing relied ONLY on the global default sink,
+        # which raced when several meetings recorded at once → overlapping audio.)
+        # set_default_sink stays as a fallback in case PULSE_SINK isn't honored.
         await _create_pulse_sink(sink_name)
         await asyncio.sleep(0.5)
         await _set_default_sink(sink_name)
@@ -310,7 +315,7 @@ async def _record_pipeline(meeting_id: str) -> None:
                         "--autoplay-policy=no-user-gesture-required",
                         "--use-fake-ui-for-media-stream",
                     ],
-                    env={**os.environ, "DISPLAY": display, "PULSE_SERVER": pulse},
+                    env={**os.environ, "DISPLAY": display, "PULSE_SERVER": pulse, "PULSE_SINK": sink_name},
                 ),
                 timeout=30,
             )
