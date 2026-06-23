@@ -859,6 +859,56 @@ async def delete_meeting_by_event_id(google_event_id: str) -> bool:
     return result.split()[-1] != "0"
 
 
+async def reconcile_disappeared_events(user_id: int, live_event_ids: list[str]) -> int:
+    """Remove pending meetings whose calendar event vanished (deleted, not just
+    'cancelled'). Considers only events we WOULD have fetched: links of this user
+    on still-enabled calendars, for meetings scheduled in the sync window
+    [now-30m, now+7d]. Drops the user's stale link; deletes the meeting only if no
+    calendar still references it (so a shared event on someone else's calendar is
+    kept). Returns the number of meetings deleted. No-op if live_event_ids is empty
+    (avoids mass-deletion on a transient empty/failed fetch)."""
+    if not live_event_ids:
+        return 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            gone = await conn.fetch(
+                """
+                SELECT cml.google_event_id, cml.meeting_id
+                FROM calendar_meeting_links cml
+                JOIN meetings m ON m.id = cml.meeting_id
+                JOIN calendars c ON c.owner_user_id = cml.user_id
+                                AND c.google_calendar_id = cml.calendar_id
+                                AND c.record_enabled = TRUE
+                WHERE cml.user_id = $1
+                  AND m.status = 'pending'
+                  AND m.start_time BETWEEN NOW() - interval '30 minutes' AND NOW() + interval '7 days'
+                  AND NOT (cml.google_event_id = ANY($2::text[]))
+                """,
+                user_id, live_event_ids,
+            )
+            if not gone:
+                return 0
+            event_ids = [r["google_event_id"] for r in gone]
+            meeting_ids = list({r["meeting_id"] for r in gone})
+            # Drop this user's links for the vanished events.
+            await conn.execute(
+                "DELETE FROM calendar_meeting_links WHERE user_id = $1 AND google_event_id = ANY($2::text[])",
+                user_id, event_ids,
+            )
+            # Delete the (still-pending) meetings that no calendar references anymore.
+            result = await conn.execute(
+                """
+                DELETE FROM meetings m
+                WHERE m.id = ANY($1::uuid[])
+                  AND m.status = 'pending'
+                  AND NOT EXISTS (SELECT 1 FROM calendar_meeting_links c WHERE c.meeting_id = m.id)
+                """,
+                meeting_ids,
+            )
+    return int(result.split()[-1])
+
+
 async def get_meetings_for_user(
     user_id: int,
     limit: int = 50,

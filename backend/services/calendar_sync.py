@@ -312,6 +312,14 @@ async def sync_user_events(user_id: int) -> None:
             attendee_emails=ev["attendee_emails"],
         )
 
+    # Reconcile DELETED events (vanished from the calendar, not flagged
+    # 'cancelled'): drop orphaned pending meetings this user's calendars no longer
+    # have. Only runs when the fetch returned events (avoids mass-deletion on a
+    # transient empty/failed fetch).
+    removed = await models.reconcile_disappeared_events(user_id, list(live_ids))
+    if removed:
+        logger.info("Reconcile: removed %d pending meeting(s) gone from user %d's calendar", removed, user_id)
+
     logger.info("Synced %d events for user %d", len(events), user_id)
 
 
