@@ -9,9 +9,6 @@ export default function AdminMeetings() {
 
   return (
     <>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', padding: 'var(--space-5) var(--space-5) 0' }}>
-        <button className="btn btn-primary" onClick={() => setShowUpload(true)}>⬆ Загрузить запись</button>
-      </div>
       <MeetingsView
         key={reloadKey}
         title="Все встречи"
@@ -21,6 +18,11 @@ export default function AdminMeetings() {
         fetchUpcoming={() => api.admin.upcoming().then(r => r.meetings)}
         onReanalyze={(id) => api.admin.reanalyzeMeeting(id)}
         onRetranscribe={(id) => api.admin.retranscribeMeeting(id)}
+        headerAction={
+          <button className="btn btn-primary" onClick={() => setShowUpload(true)}>
+            ⬆ Загрузить запись
+          </button>
+        }
       />
       {showUpload && (
         <UploadRecordingModal

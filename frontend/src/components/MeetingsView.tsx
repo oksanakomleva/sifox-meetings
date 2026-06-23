@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import StatusBadge from './StatusBadge'
 import type { Meeting } from '../types'
@@ -132,9 +132,10 @@ interface Props {
   admin?: boolean
   onReanalyze?: (meetingId: string) => Promise<unknown>
   onRetranscribe?: (meetingId: string) => Promise<unknown>
+  headerAction?: ReactNode
 }
 
-export default function MeetingsView({ title, subtitle, fetchDone, fetchUpcoming, admin, onReanalyze, onRetranscribe }: Props) {
+export default function MeetingsView({ title, subtitle, fetchDone, fetchUpcoming, admin, onReanalyze, onRetranscribe, headerAction }: Props) {
   const [tab, setTab] = useState<'done' | 'upcoming'>('done')
   const [doneMeetings, setDoneMeetings] = useState<Meeting[]>([])
   const [upcomingMeetings, setUpcomingMeetings] = useState<Meeting[]>([])
@@ -206,8 +207,13 @@ export default function MeetingsView({ title, subtitle, fetchDone, fetchUpcoming
   return (
     <div className="main-content">
       <div className="page-header">
-        <h1 className="page-title">{title}</h1>
-        <p className="page-subtitle">{subtitle}</p>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--space-4)', flexWrap: 'wrap' }}>
+          <div>
+            <h1 className="page-title">{title}</h1>
+            <p className="page-subtitle">{subtitle}</p>
+          </div>
+          {headerAction}
+        </div>
       </div>
 
       <div className="page-body">
