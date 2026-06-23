@@ -255,6 +255,7 @@ export default function MeetingDetail() {
           <div style={{ maxWidth: 560 }}>
             <AudioPlayer
               src={api.meetings.audioUrl(meeting.id)}
+              downloadHref={api.meetings.audioDownloadUrl(meeting.id)}
               title={meeting.title || meeting.topic || undefined}
             />
             {meeting.audio_size && (

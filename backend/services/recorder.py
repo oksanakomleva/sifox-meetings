@@ -1071,9 +1071,12 @@ def _build_transcript(segments, speaker_timeline: list[tuple[float, str]]) -> st
     """
     Build transcript merging consecutive segments from the same speaker
     if the gap between them is less than PAUSE_THRESHOLD seconds.
-    A new block starts when: speaker changes OR there is a long pause.
+    A new block starts when: speaker changes, there is a long pause, OR the
+    current block already spans MAX_BLOCK_SECONDS (so a long monologue — e.g. an
+    upload with no speaker timeline — still breaks into readable paragraphs).
     """
-    PAUSE_THRESHOLD = 4.0  # seconds — gap that starts a new paragraph
+    PAUSE_THRESHOLD = 4.0     # seconds — gap that starts a new paragraph
+    MAX_BLOCK_SECONDS = 45.0  # cap on one block so long monologues still split
 
     if not segments:
         return ""
@@ -1095,11 +1098,12 @@ def _build_transcript(segments, speaker_timeline: list[tuple[float, str]]) -> st
 
     for seg, speaker in labeled[1:]:
         gap = seg.start - prev_end
-        if speaker == curr_speaker and gap < PAUSE_THRESHOLD:
-            # Same speaker, short gap — append to current block
+        block_len = seg.start - curr_start
+        if speaker == curr_speaker and gap < PAUSE_THRESHOLD and block_len < MAX_BLOCK_SECONDS:
+            # Same speaker, short gap, block not too long — append to current block
             curr_texts.append(seg.text.strip())
         else:
-            # Speaker changed or long pause — flush current block
+            # Speaker changed, long pause, or block hit the length cap — flush it
             blocks.append((curr_start, curr_speaker, " ".join(curr_texts)))
             curr_speaker = speaker
             curr_start   = seg.start

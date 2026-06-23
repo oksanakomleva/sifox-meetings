@@ -112,8 +112,11 @@ async def admin_live_qa(meeting_id: str, admin: AdminUser):
 
 
 @router.post("/meetings/{meeting_id}/reanalyze")
-async def reanalyze_meeting(meeting_id: str, admin: AdminUser):
-    """Re-run analysis on a meeting that already has a transcript."""
+async def reanalyze_meeting(meeting_id: str, admin: AdminUser, meeting_type: str | None = None):
+    """Re-run analysis on a meeting that already has a transcript.
+
+    Optional `meeting_type` query param pins the protocol structure (and stored
+    type) to a specific kind instead of relying on auto-detection."""
     import asyncio
     from services.analyzer import analyze_meeting
 
@@ -127,7 +130,7 @@ async def reanalyze_meeting(meeting_id: str, admin: AdminUser):
     async def _run():
         try:
             await models.update_meeting_status(meeting_id, "analyzing")
-            analysis = await analyze_meeting(transcript, meeting.get("title"))
+            analysis = await analyze_meeting(transcript, meeting.get("title"), force_type=meeting_type)
             await models.save_analysis(
                 meeting_id,
                 summary=analysis["summary"],

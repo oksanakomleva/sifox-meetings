@@ -44,7 +44,7 @@ class TestNormalizeTags:
 
 class TestProtocolPrompts:
     def test_all_types_present(self):
-        required = {"sales", "internal", "planning", "review", "interview", "partner", "other"}
+        required = {"sales", "internal", "planning", "review", "interview", "partner", "demo", "other"}
         assert required.issubset(set(_PROTOCOL_PROMPTS.keys()))
 
     def test_all_have_structure(self):

@@ -32,7 +32,9 @@ def _build_tagging_prompt(transcript: str, title: str | None, known_tags: list[s
     return (
         "Ты — AI-ассистент для анализа рабочих встреч компании Sifox.\n\n"
         "На основе НАЗВАНИЯ встречи и транскрипта определи:\n"
-        "1. Тип встречи (одно из: sales / internal / planning / review / interview / partner / other)\n"
+        "1. Тип встречи (одно из: sales / internal / planning / review / interview / partner / demo / other).\n"
+        "   demo — презентация/демонстрация: демо-дни, показ проектов или продукта аудитории, "
+        "когда выступающие по очереди представляют свои работы.\n"
         "2. Краткую тему (1 строка)\n"
         "3. Теги (1–5 штук).\n\n"
         "Правила для тегов:\n"
@@ -104,6 +106,22 @@ _PROTOCOL_PROMPTS = {
 ## Договорённости
 ## Следующие шаги""",
 
+    "demo": """Ты — AI-ассистент. Составь протокол демо-дня / встречи-презентации, на которой по очереди представляли НЕСКОЛЬКО проектов.
+
+Структура:
+## Участники
+## Обзор (что за демо-день, сколько проектов представлено)
+## Проекты
+Для КАЖДОГО представленного проекта — отдельный подраздел:
+### <Название проекта или команды>
+- Что демонстрировали / суть
+- Ключевые идеи и решения
+- Вопросы и обратная связь от аудитории
+- Дальнейшие шаги / договорённости
+## Общие итоги и решения
+
+Важно: выдели каждый проект отдельным подразделом `###`, не сливай всё в один список. Если название проекта не прозвучало — назови его по теме демонстрации.""",
+
     "other": """Ты — AI-ассистент. Составь краткий протокол встречи.
 
 Структура:
@@ -114,7 +132,12 @@ _PROTOCOL_PROMPTS = {
 }
 
 
-def _analyze_sync(transcript: str, title: str | None, known_tags: list[str]) -> dict:
+def _analyze_sync(
+    transcript: str,
+    title: str | None,
+    known_tags: list[str],
+    force_type: str | None = None,
+) -> dict:
     from openai import OpenAI
 
     client = OpenAI(api_key=config.OPENAI_API_KEY)
@@ -141,6 +164,11 @@ def _analyze_sync(transcript: str, title: str | None, known_tags: list[str]) -> 
     meeting_type = meta.get("type", "other")
     topic = meta.get("topic", "")
     tags = normalize_tags(meta.get("tags", []))
+
+    # Optional manual override: pin the protocol structure (and stored type) to a
+    # specific kind regardless of what the classifier picked.
+    if force_type and force_type in _PROTOCOL_PROMPTS:
+        meeting_type = force_type
 
     if len(transcript) > config.CHAT_MAX_CONTEXT_CHARS:
         logger.warning(
@@ -170,11 +198,16 @@ def _analyze_sync(transcript: str, title: str | None, known_tags: list[str]) -> 
     }
 
 
-async def analyze_meeting(transcript: str, title: str | None = None) -> dict:
+async def analyze_meeting(
+    transcript: str,
+    title: str | None = None,
+    *,
+    force_type: str | None = None,
+) -> dict:
     # Fetch the existing tag vocabulary here (async) so the model can reuse tags.
     from database import models
     known_tags = await models.get_known_tags()
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _executor, _analyze_sync, transcript, title, known_tags
+        _executor, _analyze_sync, transcript, title, known_tags, force_type
     )

@@ -22,7 +22,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     headers: { 'Content-Type': 'application/json', ...extraHeaders },
   })
   if (res.status === 401) {
-    if (!window.location.pathname.startsWith('/login')) {
+    // Don't bounce to /login on the public, password-gated share page — an
+    // anonymous visitor's /auth/me 401 must not hijack /share/:token.
+    const p = window.location.pathname
+    if (!p.startsWith('/login') && !p.startsWith('/share/')) {
       window.location.href = '/login'
     }
     throw new Error('Unauthorized')
@@ -99,6 +102,7 @@ export const api = {
         body: JSON.stringify(payload),
       }),
     audioUrl: (id: string) => `/api/meetings/${id}/audio`,
+    audioDownloadUrl: (id: string) => `/api/meetings/${id}/audio?download=1`,
     calendarStatus: () =>
       request<{ connected: boolean; has_enabled_calendar: boolean; calendar_count: number }>('/meetings/calendar-status'),
     week: () => {

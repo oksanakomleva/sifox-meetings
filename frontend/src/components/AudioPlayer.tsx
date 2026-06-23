@@ -3,9 +3,11 @@ import { useRef, useState, useEffect } from 'react'
 interface Props {
   src: string
   title?: string
+  /** URL for the download link; falls back to `src` (which is served inline). */
+  downloadHref?: string
 }
 
-export default function AudioPlayer({ src, title }: Props) {
+export default function AudioPlayer({ src, title, downloadHref }: Props) {
   const audioRef = useRef<HTMLAudioElement>(null)
   const [playing, setPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
@@ -124,7 +126,7 @@ export default function AudioPlayer({ src, title }: Props) {
 
         {/* Download */}
         <a
-          href={src}
+          href={downloadHref || src}
           download
           title="Скачать аудио"
           style={{ color: 'var(--color-text-secondary)', flexShrink: 0 }}

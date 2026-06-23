@@ -91,6 +91,16 @@ class TestBuildTranscript:
         assert "Alice: Hi" in result
         assert "Bob: Reply" in result
 
+    def test_long_monologue_splits_into_paragraphs(self):
+        # Single speaker (e.g. an upload with no timeline), continuous speech with
+        # tiny gaps over ~150s → must break into multiple blocks via the length cap,
+        # not collapse into one wall of text.
+        segments = [_Seg(float(i) * 3, float(i) * 3 + 2.5, f"s{i}") for i in range(50)]
+        result = _build_transcript(segments, [])  # no timeline → all "Участник"
+        assert result.count("Участник:") > 1
+        # Every segment's text is still present.
+        assert "s0" in result and "s49" in result
+
 
 class TestFmtTime:
     def test_seconds_only(self):
