@@ -561,12 +561,10 @@ async def claim_meeting_for_recording(meeting_id: str) -> bool:
     Returns True if successfully claimed, False if already taken.
 
     Refuses the claim if another meeting sharing the same Telemost URL is
-    already being recorded/processed (or was just recorded) within a 15-minute
-    window. This prevents sending several protocallers into the same room when
-    two calendar events point at one permanent Telemost link (e.g. a recurring
-    series plus a manually duplicated event). Genuinely different meetings that
-    reuse a room are normally scheduled far apart, so the window leaves them
-    untouched.
+    ALREADY RECORDING right now (a bot is in that room — regardless of schedule
+    gap; covers back-to-back meetings on one permanent link where the first
+    overran), OR was just recorded/processed within a 15-minute window (same-time
+    duplicate events). Prevents sending a second protocaller into an occupied room.
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -578,8 +576,15 @@ async def claim_meeting_for_recording(meeting_id: str) -> bool:
                   SELECT 1 FROM meetings o
                   WHERE o.meeting_url = meetings.meeting_url
                     AND o.id <> meetings.id
-                    AND o.status IN ('recording', 'transcribing', 'analyzing', 'done')
-                    AND abs(extract(epoch FROM (o.start_time - meetings.start_time))) < 900
+                    AND (
+                        -- another bot is actively recording the SAME room right
+                        -- now → never send a second protocaller, no matter the
+                        -- schedule gap (covers back-to-back meetings on one link)
+                        o.status = 'recording'
+                        -- ...or a same-time sibling just recorded/processed it
+                        OR (o.status IN ('transcribing', 'analyzing', 'done')
+                            AND abs(extract(epoch FROM (o.start_time - meetings.start_time))) < 900)
+                    )
               )
             """,
             meeting_id,
@@ -608,8 +613,11 @@ async def mark_duplicate_if_sibling_active(meeting_id: str) -> bool:
                   SELECT 1 FROM meetings o
                   WHERE o.meeting_url = m.meeting_url
                     AND o.id <> m.id
-                    AND o.status IN ('recording', 'transcribing', 'analyzing', 'done')
-                    AND abs(extract(epoch FROM (o.start_time - m.start_time))) < 900
+                    AND (
+                        o.status = 'recording'
+                        OR (o.status IN ('transcribing', 'analyzing', 'done')
+                            AND abs(extract(epoch FROM (o.start_time - m.start_time))) < 900)
+                    )
               )
             """,
             meeting_id,
