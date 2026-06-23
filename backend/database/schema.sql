@@ -92,6 +92,20 @@ UPDATE meetings SET status='no_show', error_message=NULL
 -- Live assistant: host opt-in to FULL data access on a meeting with external
 -- guests (NULL/false = auto scope by attendee domains).
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS assistant_full_access BOOLEAN DEFAULT FALSE;
+-- Make a meeting visible in EVERY user's "Мои встречи" (for company-wide /
+-- uploaded shared recordings). Per-user grants live in meeting_access_grants.
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS visible_to_all BOOLEAN DEFAULT FALSE;
+
+-- ── Public share links (view a meeting by direct link + password, no login) ──
+CREATE TABLE IF NOT EXISTS meeting_shares (
+    token         TEXT PRIMARY KEY,         -- secrets.token_urlsafe(24)
+    meeting_id    UUID NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+    password_hash TEXT NOT NULL,            -- pbkdf2: 'iterations$salt_hex$hash_hex'
+    created_by    BIGINT REFERENCES users(id),
+    created_at    TIMESTAMPTZ DEFAULT NOW(),
+    expires_at    TIMESTAMPTZ               -- NULL = never expires
+);
+CREATE INDEX IF NOT EXISTS idx_meeting_shares_meeting ON meeting_shares(meeting_id);
 
 -- ── Live in-meeting assistant: Q&A audit log ─────────────────────────────────
 CREATE TABLE IF NOT EXISTS live_qa (

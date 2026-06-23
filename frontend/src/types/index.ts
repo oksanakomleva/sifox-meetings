@@ -54,6 +54,7 @@ export interface Meeting {
   error_message: string | null
   created_at: string
   protocol_sent_at?: string | null
+  visible_to_all?: boolean
   participants?: Participant[]
   transcript?: string
 }

@@ -3,7 +3,7 @@ import asyncio
 import logging
 import os
 import sys
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from typing import Annotated
 
@@ -378,6 +378,84 @@ async def delete_meeting(meeting_id: str, admin: AdminUser):
                 pass
     logger.info("Admin %s deleted meeting %s (files: %s)", admin["user_id"], meeting_id, removed_files)
     return {"ok": True, "meeting_id": meeting_id, "files_removed": removed_files}
+
+
+# ── Recording upload (admin) ──────────────────────────────────────────────────
+
+@router.post("/recordings/upload", status_code=202)
+async def upload_recording(
+    admin: AdminUser,
+    file: UploadFile = File(...),
+    title: str | None = Form(None),
+    started_at: str | None = Form(None),
+):
+    """Upload an external recording (e.g. a Zoom mp4) → standard pipeline
+    (transcribe + summarize); audio is stored as mp3. Returns 202 immediately."""
+    from services.uploads import save_upload_and_process
+    meeting_id = await save_upload_and_process(
+        file, title=title, recorder_user_id=admin["user_id"], started_at=started_at,
+    )
+    return {"meeting_id": meeting_id, "status": "processing"}
+
+
+# ── Public share links + visibility ───────────────────────────────────────────
+
+class CreateShareRequest(BaseModel):
+    password: str
+    expires_at: str | None = None
+
+
+@router.post("/meetings/{meeting_id}/share")
+async def create_meeting_share(meeting_id: str, body: CreateShareRequest, admin: AdminUser):
+    """Create a public, password-protected view link for a meeting."""
+    from datetime import datetime
+    from config import config
+    from services import share as share_svc
+
+    if not await models.get_meeting(meeting_id):
+        raise HTTPException(404, "Meeting not found")
+    if not body.password or len(body.password) < 4:
+        raise HTTPException(400, "Пароль слишком короткий (минимум 4 символа)")
+    exp = None
+    if body.expires_at:
+        try:
+            exp = datetime.fromisoformat(body.expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    token = share_svc.new_share_token()
+    await models.create_meeting_share(
+        token, meeting_id, share_svc.hash_password(body.password), admin.get("user_id"), exp,
+    )
+    return {"token": token, "url": f"{config.BASE_URL}/share/{token}"}
+
+
+@router.get("/meetings/{meeting_id}/shares")
+async def list_meeting_shares(meeting_id: str, admin: AdminUser):
+    from config import config
+    shares = await models.list_meeting_shares(meeting_id)
+    for s in shares:
+        s["url"] = f"{config.BASE_URL}/share/{s['token']}"
+    return {"shares": shares}
+
+
+@router.delete("/meetings/share/{token}")
+async def revoke_meeting_share(token: str, admin: AdminUser):
+    if not await models.delete_meeting_share(token):
+        raise HTTPException(404, "Share not found")
+    return {"ok": True}
+
+
+class VisibleToAllRequest(BaseModel):
+    value: bool
+
+
+@router.post("/meetings/{meeting_id}/visible-to-all")
+async def set_visible_to_all(meeting_id: str, body: VisibleToAllRequest, admin: AdminUser):
+    """Show/hide a meeting in EVERY user's 'Мои встречи' (company-wide recording)."""
+    if not await models.get_meeting(meeting_id):
+        raise HTTPException(404, "Meeting not found")
+    await models.set_meeting_visible_to_all(meeting_id, body.value)
+    return {"ok": True, "visible_to_all": body.value}
 
 
 # ── Storage ───────────────────────────────────────────────────────────────────

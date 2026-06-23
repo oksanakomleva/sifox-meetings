@@ -747,6 +747,56 @@ async def set_protocol_sent(meeting_id: str) -> None:
         )
 
 
+async def set_meeting_visible_to_all(meeting_id: str, value: bool) -> None:
+    """Toggle whether a meeting shows in EVERY user's 'Мои встречи'."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE meetings SET visible_to_all = $1, updated_at = NOW() WHERE id = $2",
+            value, meeting_id,
+        )
+
+
+async def create_meeting_share(
+    token: str, meeting_id: str, password_hash: str,
+    created_by: int | None, expires_at=None,
+) -> None:
+    """Create a public share link (password-protected) for a meeting."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO meeting_shares (token, meeting_id, password_hash, created_by, expires_at)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            token, meeting_id, password_hash, created_by, expires_at,
+        )
+
+
+async def get_meeting_share(token: str) -> dict | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM meeting_shares WHERE token = $1", token)
+    return dict(row) if row else None
+
+
+async def list_meeting_shares(meeting_id: str) -> list[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT token, created_at, expires_at FROM meeting_shares WHERE meeting_id = $1 ORDER BY created_at DESC",
+            meeting_id,
+        )
+    return [dict(r) for r in rows]
+
+
+async def delete_meeting_share(token: str) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM meeting_shares WHERE token = $1", token)
+    return result.split()[-1] != "0"
+
+
 async def get_meeting_full_access(meeting_id: str) -> bool:
     """Host opt-in flag: force FULL assistant data access on this meeting."""
     pool = await get_pool()
@@ -854,6 +904,9 @@ async def get_meetings_for_user(
                 OR
                 -- the user who recorded/uploaded it (e.g. browser extension)
                 m.recorder_user_id = $1
+                OR
+                -- shared with everyone (company-wide / uploaded recording)
+                m.visible_to_all = TRUE
               )
             ORDER BY m.start_time DESC
             LIMIT $3 OFFSET $4
@@ -956,6 +1009,7 @@ async def get_recent_meetings_with_transcripts_for_user(
                     SELECT 1 FROM meeting_access_grants g
                     WHERE g.meeting_id = m.id AND g.user_id = $1
                 )
+                OR m.visible_to_all = TRUE
               )
             ORDER BY m.start_time DESC
             LIMIT $4
@@ -1308,6 +1362,7 @@ async def get_meetings_this_week(user_id: int, is_admin: bool) -> list[dict]:
                         SELECT 1 FROM meeting_access_grants g
                         WHERE g.meeting_id = m.id AND g.user_id = $1
                     )
+                    OR m.visible_to_all = TRUE
                   )
                 ORDER BY m.start_time DESC
                 LIMIT 20

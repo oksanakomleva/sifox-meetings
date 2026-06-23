@@ -6,7 +6,10 @@ import AudioPlayer from '../components/AudioPlayer'
 import ChatWidget from '../components/ChatWidget'
 import TagEditor from '../components/TagEditor'
 import SendProtocolModal from '../components/SendProtocolModal'
+import ShareAccessModal from '../components/ShareAccessModal'
+import MarkdownRenderer from '../components/MarkdownRenderer'
 import { isDemoOn } from '../demo/demo'
+import { useAuth } from '../hooks/useAuth'
 import type { Meeting, ChatMessage } from '../types'
 
 type Tab = 'protocol' | 'transcript' | 'audio' | 'chat'
@@ -21,6 +24,8 @@ export default function MeetingDetail() {
   const [tab, setTab] = useState<Tab>('protocol')
   const [error, setError] = useState('')
   const [showSend, setShowSend] = useState(false)
+  const [showShare, setShowShare] = useState(false)
+  const { user } = useAuth()
 
   useEffect(() => {
     if (!id) return
@@ -107,7 +112,14 @@ export default function MeetingDetail() {
               )}
             </p>
           </div>
-          <StatusBadge status={meeting.status} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+            {user?.is_admin && !isDemoOn() && (
+              <button className="btn btn-secondary" onClick={() => setShowShare(true)}>
+                🔗 Доступ и публикация
+              </button>
+            )}
+            <StatusBadge status={meeting.status} />
+          </div>
         </div>
 
         {/* Meta row */}
@@ -269,47 +281,14 @@ export default function MeetingDetail() {
           onSent={() => setMeeting(m => (m ? { ...m, protocol_sent_at: new Date().toISOString() } : m))}
         />
       )}
+
+      {showShare && id && (
+        <ShareAccessModal
+          meetingId={id}
+          initialVisibleToAll={!!meeting.visible_to_all}
+          onClose={() => setShowShare(false)}
+        />
+      )}
     </div>
   )
-}
-
-/** Very minimal Markdown renderer for headings, bold, lists */
-function MarkdownRenderer({ text }: { text: string }) {
-  const lines = text.split('\n')
-  return (
-    <>
-      {lines.map((line, i) => {
-        if (line.startsWith('## ')) return (
-          <h2 key={i} style={{ fontSize: 'var(--font-size-lg)', fontWeight: 700, margin: '16px 0 8px' }}>
-            {line.slice(3)}
-          </h2>
-        )
-        if (line.startsWith('### ')) return (
-          <h3 key={i} style={{ fontSize: 'var(--font-size-base)', fontWeight: 600, margin: '12px 0 4px' }}>
-            {line.slice(4)}
-          </h3>
-        )
-        if (line.startsWith('- ') || line.startsWith('* ')) return (
-          <div key={i} style={{ display: 'flex', gap: 8, margin: '2px 0' }}>
-            <span style={{ flexShrink: 0, color: 'var(--color-primary)' }}>•</span>
-            <span dangerouslySetInnerHTML={{ __html: boldify(line.slice(2)) }} />
-          </div>
-        )
-        if (/^\d+\. /.test(line)) return (
-          <div key={i} style={{ display: 'flex', gap: 8, margin: '2px 0' }}>
-            <span style={{ flexShrink: 0, minWidth: 20, color: 'var(--color-text-secondary)' }}>
-              {line.match(/^(\d+)\./)?.[1]}.
-            </span>
-            <span dangerouslySetInnerHTML={{ __html: boldify(line.replace(/^\d+\. /, '')) }} />
-          </div>
-        )
-        if (line === '') return <div key={i} style={{ height: 8 }} />
-        return <p key={i} style={{ margin: '2px 0' }} dangerouslySetInnerHTML={{ __html: boldify(line) }} />
-      })}
-    </>
-  )
-}
-
-function boldify(s: string) {
-  return s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
 }

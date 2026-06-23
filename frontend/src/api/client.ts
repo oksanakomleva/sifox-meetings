@@ -54,6 +54,26 @@ export const api = {
     connectGmailSendUrl: (next: string) => `/api/auth/connect-gmail-send?next=${encodeURIComponent(next)}`,
   },
 
+  // ── Public share (no auth; raw fetch so a 401 doesn't redirect to /login) ──
+  share: {
+    unlock: async (token: string, password: string) => {
+      const r = await fetch(`/api/share/${token}/unlock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      })
+      if (!r.ok) {
+        const detail = (await r.json().catch(() => ({}))).detail
+        throw new Error(detail || (r.status === 401 ? 'Неверный пароль' : 'Ошибка'))
+      }
+      return r.json() as Promise<{
+        title: string | null; start_time: string | null; end_time: string | null
+        summary: string | null; transcript: string | null
+        has_audio: boolean; audio_url: string | null
+      }>
+    },
+  },
+
   // ── Meetings ──────────────────────────────────────────────────────────────────
   meetings: {
     // In demo mode: real meetings, but only those tagged "демо", with the "демо"
@@ -136,6 +156,31 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ user_id: userId, meeting_id: meetingId }),
       }),
+    setVisibleToAll: (meetingId: string, value: boolean) =>
+      request<{ ok: boolean; visible_to_all: boolean }>(`/admin/meetings/${meetingId}/visible-to-all`, {
+        method: 'POST',
+        body: JSON.stringify({ value }),
+      }),
+    createShare: (meetingId: string, password: string, expires_at?: string) =>
+      request<{ token: string; url: string }>(`/admin/meetings/${meetingId}/share`, {
+        method: 'POST',
+        body: JSON.stringify({ password, expires_at }),
+      }),
+    listShares: (meetingId: string) =>
+      request<{ shares: { token: string; url: string; created_at: string; expires_at: string | null }[] }>(`/admin/meetings/${meetingId}/shares`),
+    revokeShare: (token: string) =>
+      request<void>(`/admin/meetings/share/${token}`, { method: 'DELETE' }),
+    // Upload an external recording (mp4/mp3/…) — multipart, not JSON.
+    uploadRecording: (file: File, title: string) => {
+      const fd = new FormData()
+      fd.append('file', file)
+      if (title) fd.append('title', title)
+      return fetch('/api/admin/recordings/upload', { method: 'POST', credentials: 'include', body: fd })
+        .then(async r => {
+          if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || 'Ошибка загрузки')
+          return r.json() as Promise<{ meeting_id: string; status: string }>
+        })
+    },
     // Invitations
     listInvitations: () =>
       request<{ invitations: import('../types').Invitation[] }>('/admin/invitations'),

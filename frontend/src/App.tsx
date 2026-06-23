@@ -7,6 +7,7 @@ import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Meetings from './pages/Meetings'
 import MeetingDetail from './pages/MeetingDetail'
+import ShareView from './pages/ShareView'
 import CallsFeed from './pages/demo/CallsFeed'
 import CallDetail from './pages/demo/CallDetail'
 import AdminCalendars from './pages/admin/AdminCalendars'
@@ -72,6 +73,8 @@ export default function App() {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
+          {/* Public, password-gated meeting view — outside the auth guard */}
+          <Route path="/share/:token" element={<ShareView />} />
           <Route path="/*" element={<ProtectedLayout />} />
         </Routes>
       </AuthProvider>
