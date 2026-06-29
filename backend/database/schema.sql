@@ -297,3 +297,29 @@ CREATE TABLE IF NOT EXISTS sync_state (
     last_synced_at TIMESTAMPTZ,
     last_cursor    TEXT                       -- MM: last post create_at (ms); Gmail: historyId
 );
+
+-- ── Imported phone calls (rec.megafon.ru → demo "Звонки" section) ─────────────
+-- Separate from meetings: call-specific metadata + full transcribe/analyze
+-- pipeline. Dedup/incremental import keyed by external_id (MegaFon's call id).
+CREATE TABLE IF NOT EXISTS calls (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    external_id   TEXT UNIQUE NOT NULL,      -- MegaFon call id → dedup / incremental
+    title         TEXT,                      -- AI-generated short call title
+    phone         TEXT,
+    direction     TEXT,                      -- 'in' / 'out'
+    started_at    TIMESTAMPTZ,
+    duration_sec  INTEGER,
+    audio_path    TEXT,                      -- relative to AUDIO_DIR (mp3)
+    audio_size    BIGINT,
+    status        TEXT DEFAULT 'pending',    -- pending → transcribing → analyzing → done | error
+    transcript    TEXT,                      -- timecoded + speaker-labelled (как _build_transcript)
+    summary       TEXT,
+    tasks         JSONB,                     -- for the "Задачи" UI block
+    reminders     JSONB,                     -- for the "Напоминания" UI block
+    tags          TEXT[],
+    analysis      JSONB,                     -- optional scores (переговоры/коммуникация/собеседник)
+    error_message TEXT,
+    created_at    TIMESTAMPTZ DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_calls_started ON calls(started_at DESC);

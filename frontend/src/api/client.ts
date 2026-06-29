@@ -217,6 +217,27 @@ export const api = {
     }) => request<{ answer: string | null; error?: string }>('/admin/ai/chat', {
       method: 'POST', body: JSON.stringify(body),
     }),
+
+    // ── MegaFon call import (interactive: start → OTP → poll status) ──
+    megafonStart: (phone?: string) =>
+      request<{ job_id: string; status: string }>('/admin/megafon/start', {
+        method: 'POST', body: JSON.stringify({ phone }),
+      }),
+    megafonOtp: (job_id: string, code: string) =>
+      request<{ job_id: string; status: string }>('/admin/megafon/otp', {
+        method: 'POST', body: JSON.stringify({ job_id, code }),
+      }),
+    megafonStatus: (job_id: string) =>
+      request<{ status: string; stats: { imported?: number } | null; error: string | null }>(
+        `/admin/megafon/status/${job_id}`
+      ),
+  },
+
+  // ── Calls (demo "Звонки" — imported from rec.megafon.ru) ───────────────────────
+  calls: {
+    list: () => request<{ calls: import('../types').Call[] }>('/calls'),
+    get: (id: string) => request<import('../types').Call>(`/calls/${id}`),
+    audioUrl: (id: string) => `/api/calls/${id}/audio`,
   },
 
   // ── Extension (browser recorder) ───────────────────────────────────────────────

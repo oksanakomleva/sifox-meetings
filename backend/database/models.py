@@ -1,4 +1,5 @@
 """All asyncpg queries for telemost-web."""
+import json
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -1696,3 +1697,136 @@ async def comms_stats() -> dict:
             "SELECT source, last_synced_at, last_cursor FROM sync_state ORDER BY source"
         )
     return {"mm_messages": mm, "email_messages": em, "sync_state": [dict(r) for r in ss]}
+
+
+# ── Calls (imported from rec.megafon.ru) ──────────────────────────────────────
+# JSONB columns (tasks/reminders/analysis) — asyncpg has no codec registered, so
+# we json.dumps on write (with ::jsonb casts) and json.loads on read.
+
+def _row_to_call(row) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    d = dict(row)
+    for k in ("tasks", "reminders", "analysis"):
+        v = d.get(k)
+        if isinstance(v, str):
+            try:
+                d[k] = json.loads(v)
+            except (ValueError, TypeError):
+                d[k] = None
+    return d
+
+
+async def call_external_ids_existing(external_ids: list[str]) -> set[str]:
+    """Which of the given MegaFon call ids are already imported (for incremental sync)."""
+    if not external_ids:
+        return set()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT external_id FROM calls WHERE external_id = ANY($1::text[])",
+            external_ids,
+        )
+    return {r["external_id"] for r in rows}
+
+
+async def create_call(
+    external_id: str,
+    *,
+    phone: str | None = None,
+    direction: str | None = None,
+    started_at: datetime | None = None,
+    duration_sec: int | None = None,
+) -> dict[str, Any]:
+    """Insert a new call row (status='pending'). Idempotent by external_id —
+    returns the existing row on conflict so re-runs don't duplicate."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO calls (external_id, phone, direction, started_at, duration_sec)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (external_id) DO NOTHING
+            RETURNING *
+            """,
+            external_id, phone, direction, started_at, duration_sec,
+        )
+        if row is None:  # already existed
+            row = await conn.fetchrow("SELECT * FROM calls WHERE external_id = $1", external_id)
+    return _row_to_call(row)
+
+
+async def update_call_status(call_id: str, status: str, error_message: str | None = None) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE calls SET status = $2, error_message = $3, updated_at = NOW() WHERE id = $1",
+            call_id, status, error_message,
+        )
+
+
+async def save_call_transcript(call_id: str, transcript: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE calls SET transcript = $2, updated_at = NOW() WHERE id = $1",
+            call_id, transcript,
+        )
+
+
+async def save_call_audio(call_id: str, audio_path: str, audio_size: int) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE calls SET audio_path = $2, audio_size = $3, updated_at = NOW() WHERE id = $1",
+            call_id, audio_path, audio_size,
+        )
+
+
+async def save_call_analysis(
+    call_id: str,
+    *,
+    title: str | None = None,
+    summary: str | None,
+    tasks: Any = None,
+    reminders: Any = None,
+    tags: list[str] | None = None,
+    analysis: Any = None,
+) -> None:
+    """Store AI analysis and mark the call done. tasks/reminders/analysis → JSONB."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE calls
+            SET title = COALESCE($7, title), summary = $2,
+                tasks = $3::jsonb, reminders = $4::jsonb,
+                tags = $5, analysis = $6::jsonb, status = 'done', updated_at = NOW()
+            WHERE id = $1
+            """,
+            call_id,
+            summary,
+            json.dumps(tasks) if tasks is not None else None,
+            json.dumps(reminders) if reminders is not None else None,
+            tags or [],
+            json.dumps(analysis) if analysis is not None else None,
+            title,
+        )
+
+
+async def get_calls(limit: int = 200) -> list[dict[str, Any]]:
+    """All imported calls, newest first (for the demo 'Звонки' list)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM calls ORDER BY started_at DESC NULLS LAST, created_at DESC LIMIT $1",
+            limit,
+        )
+    return [_row_to_call(r) for r in rows]
+
+
+async def get_call(call_id: str) -> dict[str, Any] | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM calls WHERE id = $1", call_id)
+    return _row_to_call(row)

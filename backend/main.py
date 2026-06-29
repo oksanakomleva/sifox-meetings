@@ -89,6 +89,7 @@ from api.admin import router as admin_router
 from api.extension import router as extension_router
 from api.communications import router as communications_router
 from api.share import router as share_router
+from api.calls import router as calls_router, admin_router as megafon_admin_router
 
 app.include_router(auth_router)
 app.include_router(meetings_router)
@@ -97,6 +98,8 @@ app.include_router(admin_router)
 app.include_router(extension_router)
 app.include_router(communications_router)
 app.include_router(share_router)
+app.include_router(calls_router)
+app.include_router(megafon_admin_router)
 
 
 @app.get("/health")

@@ -1,12 +1,25 @@
-import { useState, type ReactNode } from 'react'
+import { useState, useEffect, type ReactNode } from 'react'
 import { useNavigate, Navigate } from 'react-router-dom'
 import { isDemoOn } from '../../demo/demo'
-import { DEMO_CALLS, type DemoCall } from '../../demo/calls'
+import { DEMO_CALLS, apiCallToDemoCall, type DemoCall } from '../../demo/calls'
+import { api } from '../../api/client'
 import CallAnalysisPanel from '../../components/demo/CallAnalysisPanel'
 
 export default function CallsFeed() {
   const navigate = useNavigate()
   const [analysisCall, setAnalysisCall] = useState<DemoCall | null>(null)
+  const [calls, setCalls] = useState<DemoCall[]>([])
+  const [loading, setLoading] = useState(true)
+
+  // Real imported calls; fall back to the illustrative demo set if none yet.
+  useEffect(() => {
+    let alive = true
+    api.calls.list()
+      .then(r => { if (alive) setCalls(r.calls.length ? r.calls.map(apiCallToDemoCall) : DEMO_CALLS) })
+      .catch(() => { if (alive) setCalls(DEMO_CALLS) })
+      .finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [])
 
   // Demo-only section.
   if (!isDemoOn()) return <Navigate to="/" replace />
@@ -19,8 +32,9 @@ export default function CallsFeed() {
       </div>
 
       <div className="page-body">
+        {loading && <div style={{ color: 'var(--color-text-muted)' }}>Загрузка…</div>}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-          {DEMO_CALLS.map(c => (
+          {calls.map(c => (
             <div key={c.id} className="card" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
               <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--space-3)' }}>
                 <div style={{ flex: 1, minWidth: 0 }}>

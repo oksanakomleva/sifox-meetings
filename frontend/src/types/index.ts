@@ -101,3 +101,25 @@ export interface Invitation {
   created_by_name: string | null
   url?: string
 }
+
+export interface CallTask {
+  assignee?: string
+  items?: string[]
+}
+
+export interface Call {
+  id: string
+  external_id: string
+  title: string | null
+  phone: string | null
+  direction: string | null
+  started_at: string | null
+  duration_sec: number | null
+  audio_path: string | null
+  status: string
+  transcript: string | null
+  summary: string | null
+  tasks: CallTask[] | null
+  reminders: string[] | null
+  tags: string[] | null
+}

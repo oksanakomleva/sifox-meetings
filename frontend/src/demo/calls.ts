@@ -1,5 +1,8 @@
-// Fake "Calls" dataset — DEMO ONLY. Powers the demo-only Звонки section
-// (call feed → call detail → AI analysis). No backend, no real data.
+// "Calls" types + a fake fallback dataset for the demo-only Звонки section.
+// Real calls imported from rec.megafon.ru are fetched from the API and mapped
+// into the DemoCall shape via apiCallToDemoCall() so the same UI renders both.
+
+import type { Call } from '../types'
 
 export interface CallLine {
   time: string
@@ -158,6 +161,55 @@ export const DEMO_CALLS: DemoCall[] = [
 
 export function demoCallById(id: string): DemoCall | undefined {
   return DEMO_CALLS.find(c => c.id === id)
+}
+
+// ── Map a real backend Call → the DemoCall shape the UI renders ────────────────
+
+function fmtDuration(sec: number | null): string {
+  const s = Math.max(0, sec || 0)
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+const LINE_RE = /^\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*(?:([^:]+):\s*)?(.*)$/
+
+function parseTranscript(text: string | null): CallLine[] {
+  if (!text) return []
+  return text.split('\n').map(raw => raw.trim()).filter(Boolean).map(line => {
+    const m = LINE_RE.exec(line)
+    if (!m) return { time: '', speaker: 'Собеседник' as const, text: line }
+    const who = (m[2] || '').trim()
+    return {
+      time: m[1] || '',
+      speaker: who === 'Вы' ? ('Вы' as const) : ('Собеседник' as const),
+      text: m[3] || '',
+    }
+  })
+}
+
+export function apiCallToDemoCall(c: Call): DemoCall {
+  const tasks: CallTaskGroup[] = (c.tasks || []).map(t => ({
+    assignee: t.assignee || 'Участник',
+    role: '',
+    items: t.items || [],
+  }))
+  const reminders = c.reminders || []
+  const datetime = c.started_at
+    ? new Date(c.started_at).toLocaleString('ru-RU', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+    : ''
+  return {
+    id: c.id,
+    title: c.title || (c.phone ? `Звонок ${c.phone}` : 'Звонок'),
+    phone: c.phone || '',
+    duration: fmtDuration(c.duration_sec),
+    date: c.started_at || '',
+    datetime,
+    tasksCount: tasks.reduce((n, g) => n + g.items.length, 0) || undefined,
+    remindersCount: reminders.length || undefined,
+    transcript: parseTranscript(c.transcript),
+    summary: c.summary || '',
+    tasks,
+    reminders,
+  }
 }
 
 // ── Structured AI analysis (static demo content) ──────────────────────────────

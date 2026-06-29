@@ -121,6 +121,9 @@ export default function Sidebar() {
             <NavLink to="/admin/storage" className={({ isActive }) => isActive ? 'active' : ''}>
               <IconStorage /> Хранилище
             </NavLink>
+            <NavLink to="/admin/megafon" className={({ isActive }) => isActive ? 'active' : ''}>
+              <IconStorage /> Импорт звонков
+            </NavLink>
           </>
         )}
       </nav>

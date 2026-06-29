@@ -211,3 +211,50 @@ async def analyze_meeting(
     return await loop.run_in_executor(
         _executor, _analyze_sync, transcript, title, known_tags, force_type
     )
+
+
+# ── Phone-call analysis (imported rec.megafon.ru calls → demo "Звонки") ────────
+
+_CALL_ANALYSIS_PROMPT = """Ты — AI-ассистент, анализируешь транскрипт ТЕЛЕФОННОГО РАЗГОВОРА.
+Собеседники: «Вы» (владелец номера) и «Собеседник». Верни СТРОГО JSON:
+{
+  "title": "короткий заголовок звонка (о чём он), 3-7 слов",
+  "summary": "сжатый протокол разговора в 2-5 предложениях",
+  "tasks": [{"assignee": "Вы" | "Собеседник", "items": ["конкретная задача/договорённость", "..."]}],
+  "reminders": ["напоминание о сроке/перезвоне/событии", "..."],
+  "tags": ["клиент/тема/продукт", "..."]
+}
+Правила: tasks — только реальные договорённости и действия (если нет — пустой массив).
+reminders — то, о чём стоит не забыть (даты, перезвоны). tags — 1-5 коротких строчных тегов.
+Если разговор пустой/без содержания — summary опиши кратко, остальные массивы пустые."""
+
+
+def _analyze_call_sync(transcript: str) -> dict:
+    from openai import OpenAI
+
+    client = OpenAI(api_key=config.OPENAI_API_KEY)
+    capped = transcript[: config.CHAT_MAX_CONTEXT_CHARS]
+    resp = client.chat.completions.create(
+        model=config.CHAT_MODEL,
+        messages=[
+            {"role": "system", "content": _CALL_ANALYSIS_PROMPT},
+            {"role": "user", "content": f"Транскрипт звонка:\n{capped}"},
+        ],
+        response_format={"type": "json_object"},
+        max_tokens=1500,
+        temperature=0.3,
+    )
+    data = json.loads(resp.choices[0].message.content)
+    return {
+        "title": (data.get("title") or "").strip(),
+        "summary": (data.get("summary") or "").strip(),
+        "tasks": data.get("tasks") or [],
+        "reminders": data.get("reminders") or [],
+        "tags": normalize_tags(data.get("tags", [])),
+    }
+
+
+async def analyze_call(transcript: str) -> dict:
+    """Analyze a phone-call transcript → {title, summary, tasks, reminders, tags}."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_executor, _analyze_call_sync, transcript)

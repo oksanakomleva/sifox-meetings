@@ -1,7 +1,9 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams, useNavigate, Navigate } from 'react-router-dom'
 import { isDemoOn } from '../../demo/demo'
-import { demoCallById } from '../../demo/calls'
+import { demoCallById, apiCallToDemoCall, type DemoCall } from '../../demo/calls'
+import { api } from '../../api/client'
+import AudioPlayer from '../../components/AudioPlayer'
 import CallAnalysisPanel from '../../components/demo/CallAnalysisPanel'
 
 type RightTab = 'summary' | 'ai'
@@ -10,9 +12,25 @@ export default function CallDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const [rightTab, setRightTab] = useState<RightTab>('summary')
+  const [call, setCall] = useState<DemoCall | null>(null)
+  const [loading, setLoading] = useState(true)
+  // Static demo calls have no backend audio; real imported calls do.
+  const isReal = !!id && !demoCallById(id)
+
+  useEffect(() => {
+    if (!id) return
+    let alive = true
+    const demo = demoCallById(id)
+    if (demo) { setCall(demo); setLoading(false); return }
+    api.calls.get(id)
+      .then(c => { if (alive) setCall(apiCallToDemoCall(c)) })
+      .catch(() => { if (alive) setCall(null) })
+      .finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [id])
 
   if (!isDemoOn()) return <Navigate to="/" replace />
-  const call = id ? demoCallById(id) : undefined
+  if (loading) return <div className="main-content"><div className="page-body" style={{ color: 'var(--color-text-muted)' }}>Загрузка…</div></div>
   if (!call) return <Navigate to="/calls" replace />
 
   return (
@@ -35,20 +53,24 @@ export default function CallDetail() {
       <div className="page-body" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 420px)', gap: 'var(--space-5)', alignItems: 'start' }}>
         {/* Left: audio + transcript */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
-          <div className="card">
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 'var(--space-3)' }}>
-              <span style={{ fontWeight: 600 }}>Аудиозапись</span>
-              <span style={{ color: 'var(--color-text-muted)', fontSize: 'var(--font-size-sm)' }}>{call.duration}</span>
+          {isReal ? (
+            <AudioPlayer src={api.calls.audioUrl(call.id)} title="Аудиозапись" />
+          ) : (
+            <div className="card">
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 'var(--space-3)' }}>
+                <span style={{ fontWeight: 600 }}>Аудиозапись</span>
+                <span style={{ color: 'var(--color-text-muted)', fontSize: 'var(--font-size-sm)' }}>{call.duration}</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                <span style={{
+                  width: 40, height: 40, borderRadius: '50%', background: 'var(--color-accent)', color: '#fff',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                }}>▶</span>
+                <div style={{ flex: 1, height: 4, background: 'var(--color-border)', borderRadius: 2 }} />
+                <span style={{ color: 'var(--color-text-muted)', fontSize: 'var(--font-size-xs)' }}>{call.duration}</span>
+              </div>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
-              <span style={{
-                width: 40, height: 40, borderRadius: '50%', background: 'var(--color-accent)', color: '#fff',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-              }}>▶</span>
-              <div style={{ flex: 1, height: 4, background: 'var(--color-border)', borderRadius: 2 }} />
-              <span style={{ color: 'var(--color-text-muted)', fontSize: 'var(--font-size-xs)' }}>{call.duration}</span>
-            </div>
-          </div>
+          )}
 
           <div className="card">
             <div style={{ fontWeight: 600, marginBottom: 'var(--space-4)' }}>Расшифровка</div>

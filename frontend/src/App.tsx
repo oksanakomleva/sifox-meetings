@@ -15,6 +15,7 @@ import AdminUsers from './pages/admin/AdminUsers'
 import AdminMeetings from './pages/admin/AdminMeetings'
 import AdminStorage from './pages/admin/AdminStorage'
 import Communications from './pages/admin/Communications'
+import MegafonImport from './pages/admin/MegafonImport'
 import ExtensionTokens from './pages/settings/ExtensionTokens'
 
 function ProtectedLayout() {
@@ -59,6 +60,7 @@ function ProtectedLayout() {
             <Route path="/admin/meetings" element={<AdminMeetings />} />
             <Route path="/admin/communications" element={<Communications />} />
             <Route path="/admin/storage" element={<AdminStorage />} />
+            <Route path="/admin/megafon" element={<MegafonImport />} />
           </>
         )}
         <Route path="*" element={<Navigate to="/" replace />} />

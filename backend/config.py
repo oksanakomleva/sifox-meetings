@@ -81,6 +81,16 @@ class Config(BaseSettings):
     MM_SYNC_MINUTES: int = 15
     GMAIL_SYNC_MINUTES: int = 30
 
+    # ── MegaFon call import (rec.megafon.ru → demo "Звонки") ──────────────
+    # Off by default. Phone may be set here or entered per-import in the admin UI.
+    MEGAFON_ENABLED: bool = False
+    MEGAFON_PHONE: str | None = None
+    MEGAFON_API_BASE: str = "https://openapi.megafon.ru/api/product/rec/v1"
+    MEGAFON_KEYCLOAK_URL: str = "https://account.megafon.ru/auth"
+    MEGAFON_REALM: str = "Subscribers"
+    MEGAFON_CLIENT_ID: str = "rec"
+    MEGAFON_REDIRECT_URI: str = "https://rec.megafon.ru"
+
     # ── E2E Testing ───────────────────────────────────────────────────────
     TEST_API_KEY: str | None = None          # static key for automated E2E tests
     TEST_MEETING_URL: str | None = None      # permanent Telemost room URL
