@@ -10,6 +10,7 @@ calls never touches MegaFon — they live in our `calls` table.
 import asyncio
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -40,6 +41,16 @@ def get_status(job_id: str) -> dict | None:
     if not s:
         return None
     return {"status": s.get("status"), "stats": s.get("stats"), "error": s.get("error")}
+
+
+def _national_digits(phone: str) -> str:
+    """Reduce any phone form to the 10 national digits the imask field expects
+    (it renders the +7 prefix itself). '+7 925 005 87 80' / '89250058780' →
+    '9250058780'."""
+    d = re.sub(r"\D", "", phone or "")
+    if len(d) == 11 and d[0] in ("7", "8"):
+        d = d[1:]
+    return d
 
 
 def _direction(raw: str | None) -> str | None:
@@ -128,11 +139,37 @@ async def start_login(phone: str) -> str:
         inp = page.locator("input[type='tel']").first
         await inp.wait_for(timeout=20_000)
         await inp.click()
-        await inp.type(phone.strip(), delay=25)  # type() so the imask mask applies
-        await page.get_by_role("button", name="Продолжить").click()
+        # Feed only the 10 national digits — the imask field renders +7 itself,
+        # so typing a literal "+7…" collides with the mask and the form won't
+        # advance (was the cause of the "Код из SMS" timeout).
+        await inp.press("Control+a")
+        await inp.press("Delete")
+        await inp.type(_national_digits(phone), delay=45)
+
+        btn = page.get_by_role("button", name="Продолжить")
+        try:
+            await btn.click(timeout=6_000)
+        except Exception:  # noqa: BLE001 — button may be styled/disabled; submit via Enter
+            await inp.press("Enter")
 
         otp = page.get_by_placeholder("Код из SMS")
-        await otp.wait_for(timeout=25_000)
+        try:
+            await otp.wait_for(timeout=30_000)
+        except Exception:  # noqa: BLE001 — surface what the page is actually showing
+            info = ""
+            try:
+                body = (await page.locator("body").inner_text())[:200].replace("\n", " ")
+                info = f" | страница: {body.strip()}"
+            except Exception:  # noqa: BLE001
+                pass
+            raise MegafonError(f"Экран ввода кода не появился — проверьте номер.{info}")
+    except MegafonError:
+        try:
+            await browser.close()
+            await pw.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        raise
     except Exception as e:  # noqa: BLE001
         try:
             await browser.close()
