@@ -90,6 +90,9 @@ class Config(BaseSettings):
     MEGAFON_REALM: str = "Subscribers"
     MEGAFON_CLIENT_ID: str = "rec"
     MEGAFON_REDIRECT_URI: str = "https://rec.megafon.ru"
+    # Stereo call recordings have one party per channel. Which channel is "Вы"
+    # (0=left, 1=right). Flip via env if speakers come out swapped.
+    MEGAFON_YOU_CHANNEL: int = 0
 
     # ── E2E Testing ───────────────────────────────────────────────────────
     TEST_API_KEY: str | None = None          # static key for automated E2E tests

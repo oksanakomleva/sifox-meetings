@@ -97,3 +97,20 @@ async def megafon_status(job_id: str, admin: AdminUser):
     if st is None:
         raise HTTPException(404, "Job not found")
     return st
+
+
+@admin_router.post("/reset")
+async def megafon_reset(admin: AdminUser):
+    """Delete all imported calls + their audio (so the next import re-downloads
+    and re-processes from scratch, e.g. to apply speaker diarization)."""
+    paths = await models.delete_all_calls()
+    removed = 0
+    for p in paths:
+        try:
+            os.remove(os.path.join(config.AUDIO_DIR, p))
+            removed += 1
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+    return {"deleted_rows": len(paths), "removed_files": removed}

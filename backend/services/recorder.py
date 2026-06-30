@@ -938,12 +938,13 @@ async def _stop_audio_capture(cap: AudioCapture) -> None:
     )
 
 
-async def _convert_to_mp3(src_path: Path, mp3_path: Path) -> None:
-    """Convert any ffmpeg-readable audio → MP3 (libmp3lame, 64 kbps mono).
+async def _convert_to_mp3(src_path: Path, mp3_path: Path, *, mono: bool = True) -> None:
+    """Convert any ffmpeg-readable audio → MP3 (libmp3lame, 64 kbps).
 
     Used for live recordings (WAV input) and for browser-extension uploads
     (webm/opus input) — ffmpeg decodes either. ~28 MB/hour for speech.
-    Raises RuntimeError if ffmpeg fails or the output is missing/empty.
+    mono=True downmixes to one channel; calls keep stereo (mono=False) so the
+    two parties stay separable. Raises RuntimeError on failure/empty output.
     """
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg",
@@ -951,7 +952,7 @@ async def _convert_to_mp3(src_path: Path, mp3_path: Path) -> None:
         "-i", str(src_path),
         "-codec:a", "libmp3lame",
         "-b:a", "64k",
-        "-ac", "1",
+        *(("-ac", "1") if mono else ()),
         str(mp3_path),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,

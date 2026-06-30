@@ -1830,3 +1830,12 @@ async def get_call(call_id: str) -> dict[str, Any] | None:
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM calls WHERE id = $1", call_id)
     return _row_to_call(row)
+
+
+async def delete_all_calls() -> list[str]:
+    """Delete every call row; return their audio_paths so the caller can remove
+    the files. Used to re-import from scratch (e.g. to re-diarize)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("DELETE FROM calls RETURNING audio_path")
+    return [r["audio_path"] for r in rows if r["audio_path"]]
