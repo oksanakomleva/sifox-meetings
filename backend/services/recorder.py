@@ -255,20 +255,22 @@ async def _record_pipeline(meeting_id: str) -> None:
     botmic_module: int | None = None
     had_participants = False
     audio_proc: AudioCapture | None = None
+    pin_task: "asyncio.Task | None" = None
     browser = None
     pw = None
     speak_enabled = config.LIVE_ASSISTANT_ENABLED and config.LIVE_ASSISTANT_SPEAK
 
     try:
-        # 1. PulseAudio sink — one per meeting. The browser is bound to THIS sink
-        # per-process via PULSE_SINK below, which takes precedence over the global
-        # default — so concurrent recordings never share a sink and their audio
-        # can't mix. (Previously routing relied ONLY on the global default sink,
-        # which raced when several meetings recorded at once → overlapping audio.)
-        # set_default_sink stays as a fallback in case PULSE_SINK isn't honored.
+        # 1. PulseAudio sink — one per meeting. The browser is launched with
+        # PULSE_SINK=this sink, and a background loop (_audio_pin_loop) force-moves
+        # its audio stream onto this sink. We deliberately DON'T point the global
+        # default sink at a meeting (as before): Chromium doesn't always honour
+        # PULSE_SINK, and a shared mutable default raced under concurrency — a
+        # browser's audio could land on another meeting's sink and bleed into its
+        # recording. Unpinned streams fall back to the throwaway default_sink
+        # (recorded by nobody); the pin loop then routes them to the right sink.
         sink_module = await _create_pulse_sink(sink_name)
         await asyncio.sleep(0.5)
-        await _set_default_sink(sink_name)
 
         # 1b. Virtual microphone for the bot (Phase 3, voice answers). Its monitor
         # becomes the default capture source BEFORE Chromium launches, so the bot's
@@ -340,6 +342,9 @@ async def _record_pipeline(meeting_id: str) -> None:
         # 4. Start audio capture
         await models.update_meeting_status(meeting_id, "recording")
         audio_proc = await _start_audio_capture(str(audio_path), sink_name)
+        # Keep this browser's audio pinned to its own sink (Chromium may ignore
+        # PULSE_SINK / land on the default → would bleed across concurrent meetings).
+        pin_task = asyncio.create_task(_audio_pin_loop(sink_name))
 
         # 5. Speaker timeline
         speaker_timeline: list[tuple[float, str]] = []
@@ -442,6 +447,8 @@ async def _record_pipeline(meeting_id: str) -> None:
                 await pw.stop()
             except Exception:
                 pass
+        if pin_task:
+            pin_task.cancel()
         await _delete_pulse_sink(sink_name, sink_module)
         if botmic_name:
             try:
@@ -1010,6 +1017,65 @@ async def _set_default_source(name: str) -> None:
         stderr=asyncio.subprocess.DEVNULL,
     )
     await proc.wait()
+
+
+async def _pin_browser_audio(sink_name: str) -> None:
+    """Force this meeting's browser audio onto its own sink.
+
+    Chromium doesn't reliably honour the PULSE_SINK env and can land on the global
+    default — so with concurrent meetings one browser's audio could end up on
+    another meeting's sink and bleed into its recording. Each recording browser is
+    launched with a unique PULSE_SINK env; we match sink-inputs to this meeting via
+    the owning process's environ and move them onto the correct sink."""
+    try:
+        needle = f"PULSE_SINK={sink_name}".encode()
+        mypids: set[str] = set()
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid}/environ", "rb") as fh:
+                    if needle in fh.read():
+                        mypids.add(pid)
+            except OSError:
+                continue
+        if not mypids:
+            return
+
+        proc = await asyncio.create_subprocess_exec(
+            "pactl", "list", "sink-inputs",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        idx: str | None = None
+        to_move: list[str] = []
+        for raw in out.decode(errors="replace").splitlines():
+            s = raw.strip()
+            if s.startswith("Sink Input #"):
+                idx = s.split("#", 1)[1].strip()
+            elif idx and "application.process.id" in s and '"' in s:
+                if s.split('"')[1] in mypids:
+                    to_move.append(idx)
+                idx = None
+        for i in to_move:
+            mv = await asyncio.create_subprocess_exec(
+                "pactl", "move-sink-input", i, sink_name,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await mv.wait()
+    except Exception as e:  # noqa: BLE001 — best effort, never break recording
+        logger.debug("pin audio %s: %s", sink_name, e)
+
+
+async def _audio_pin_loop(sink_name: str) -> None:
+    """Re-pin the browser's audio periodically — the audio stream appears a few
+    seconds after joining and Chromium may recreate it mid-meeting."""
+    try:
+        while True:
+            await _pin_browser_audio(sink_name)
+            await asyncio.sleep(5)
+    except asyncio.CancelledError:
+        pass
 
 
 async def _find_sink_module(sink_name: str) -> int | None:
