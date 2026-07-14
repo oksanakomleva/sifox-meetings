@@ -250,7 +250,9 @@ async def _record_pipeline(meeting_id: str) -> None:
     audio_path.parent.mkdir(parents=True, exist_ok=True)
 
     sink_name = f"meet_{meeting_id[:8]}"
+    sink_module: int | None = None   # pulse module index, for reliable unload
     botmic_name: str | None = None   # virtual mic for voice answers (Phase 3)
+    botmic_module: int | None = None
     had_participants = False
     audio_proc: AudioCapture | None = None
     browser = None
@@ -264,7 +266,7 @@ async def _record_pipeline(meeting_id: str) -> None:
         # can't mix. (Previously routing relied ONLY on the global default sink,
         # which raced when several meetings recorded at once → overlapping audio.)
         # set_default_sink stays as a fallback in case PULSE_SINK isn't honored.
-        await _create_pulse_sink(sink_name)
+        sink_module = await _create_pulse_sink(sink_name)
         await asyncio.sleep(0.5)
         await _set_default_sink(sink_name)
 
@@ -275,7 +277,7 @@ async def _record_pipeline(meeting_id: str) -> None:
         if speak_enabled:
             try:
                 botmic_name = f"botmic_{meeting_id[:8]}"
-                await _create_pulse_sink(botmic_name)
+                botmic_module = await _create_pulse_sink(botmic_name)
                 await _set_default_source(f"{botmic_name}.monitor")
             except Exception as e:
                 logger.warning("Bot mic setup failed (%s) — voice disabled: %s", meeting_id[:8], e)
@@ -440,10 +442,10 @@ async def _record_pipeline(meeting_id: str) -> None:
                 await pw.stop()
             except Exception:
                 pass
-        await _delete_pulse_sink(sink_name)
+        await _delete_pulse_sink(sink_name, sink_module)
         if botmic_name:
             try:
-                await _delete_pulse_sink(botmic_name)
+                await _delete_pulse_sink(botmic_name, botmic_module)
             except Exception:
                 pass
 
@@ -974,14 +976,20 @@ async def _convert_to_mp3(src_path: Path, mp3_path: Path, *, mono: bool = True) 
 
 # ── PulseAudio ────────────────────────────────────────────────────────────────
 
-async def _create_pulse_sink(name: str) -> None:
+async def _create_pulse_sink(name: str) -> int | None:
+    """Load a null-sink and return its module index (needed to unload it later —
+    unloading is what stops PulseAudio leaking file descriptors across recordings)."""
     proc = await asyncio.create_subprocess_exec(
         "pactl", "load-module", "module-null-sink",
         f"sink_name={name}", f"sink_properties=device.description={name}",
-        stdout=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
-    await proc.wait()
+    out, _ = await proc.communicate()
+    try:
+        return int(out.decode().strip())
+    except (ValueError, AttributeError):
+        return None
 
 
 async def _set_default_sink(name: str) -> None:
@@ -1004,9 +1012,35 @@ async def _set_default_source(name: str) -> None:
     await proc.wait()
 
 
-async def _delete_pulse_sink(name: str) -> None:
+async def _find_sink_module(sink_name: str) -> int | None:
+    """Resolve a loaded null-sink's module index by its sink_name (fallback when
+    the index wasn't captured at load time)."""
     proc = await asyncio.create_subprocess_exec(
-        "pactl", "unload-module", f"sink_name={name}",
+        "pactl", "list", "modules", "short",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    out, _ = await proc.communicate()
+    for line in out.decode(errors="replace").splitlines():
+        if "module-null-sink" in line and f"sink_name={sink_name}" in line:
+            try:
+                return int(line.split()[0])
+            except (ValueError, IndexError):
+                continue
+    return None
+
+
+async def _delete_pulse_sink(name: str, module_id: int | None = None) -> None:
+    """Unload the meeting's null-sink module. `pactl unload-module` takes a module
+    INDEX (or name) — NOT `sink_name=…` (that silently failed and leaked FDs until
+    PulseAudio hit its open-file limit and stopped creating sinks). Prefer the
+    index captured at load; fall back to resolving it by sink_name."""
+    if module_id is None:
+        module_id = await _find_sink_module(name)
+    if module_id is None:
+        logger.warning("Pulse module for sink %s not found — not unloaded", name)
+        return
+    proc = await asyncio.create_subprocess_exec(
+        "pactl", "unload-module", str(module_id),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
