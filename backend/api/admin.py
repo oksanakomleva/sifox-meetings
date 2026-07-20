@@ -158,7 +158,7 @@ async def retranscribe_meeting(meeting_id: str, admin: AdminUser):
     meeting = await models.get_meeting(meeting_id)
     if not meeting:
         raise HTTPException(404, "Meeting not found")
-    audio = find_audio_on_disk(meeting_id)
+    audio = await asyncio.to_thread(find_audio_on_disk, meeting_id)
     if audio is None:
         raise HTTPException(400, "Аудиофайл встречи не найден в хранилище")
 

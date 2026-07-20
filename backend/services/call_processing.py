@@ -13,6 +13,7 @@ from pathlib import Path
 
 from config import config
 from database import models
+from services import fsio
 from services.analyzer import analyze_call
 from services.transcriber import transcribe_audio
 
@@ -87,10 +88,7 @@ async def _transcribe_stereo(audio_path: Path, call_id: str) -> str:
         return _build_call_transcript(you_segs, other_segs)
     finally:
         for p in (you_wav, other_wav):
-            try:
-                p.unlink()
-            except FileNotFoundError:
-                pass
+            await fsio.unlink_quiet(p)
 
 
 async def process_call(call_id: str, audio_path: Path) -> None:
@@ -100,7 +98,7 @@ async def process_call(call_id: str, audio_path: Path) -> None:
 
     try:
         await models.update_call_status(call_id, "transcribing")
-        if not audio_path.exists() or audio_path.stat().st_size < 1000:
+        if await fsio.size(audio_path) < 1000:
             raise RuntimeError(f"Call audio missing or too small: {audio_path}")
 
         # 1. Transcribe. Stereo → split channels → "Вы"/"Собеседник"; mono → flat.
@@ -116,14 +114,11 @@ async def process_call(call_id: str, audio_path: Path) -> None:
         mp3_path = Path(config.AUDIO_DIR) / f"{call_id}.mp3"
         try:
             await _convert_to_mp3(audio_path, mp3_path, mono=False)
-            stored_name, stored_size = mp3_path.name, mp3_path.stat().st_size
-            try:
-                audio_path.unlink()
-            except FileNotFoundError:
-                pass
+            stored_name, stored_size = mp3_path.name, await fsio.size(mp3_path)
+            await fsio.unlink_quiet(audio_path)
         except Exception as e:  # noqa: BLE001 — keep source if conversion fails
             logger.error("Call %s mp3 conversion failed: %s — keeping source", call_id[:8], e)
-            stored_name, stored_size = audio_path.name, audio_path.stat().st_size
+            stored_name, stored_size = audio_path.name, await fsio.size(audio_path)
         await models.save_call_audio(call_id, stored_name, stored_size)
 
         # 3. Analyze (skip if nothing was said).

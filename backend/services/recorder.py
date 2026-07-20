@@ -15,6 +15,7 @@ from datetime import datetime, timezone, timedelta
 
 from config import config
 from database import models
+from services import fsio
 from services.transcriber import transcribe_audio
 from services.analyzer import analyze_meeting
 
@@ -141,7 +142,7 @@ async def recover_interrupted_meetings() -> None:
         # Transcription step (or analyzing without a saved transcript): the source
         # audio is on the volume as {id}.wav/.mp3 even though the DB audio_path is
         # still NULL. Find it by name and resume the full pipeline.
-        audio = find_audio_on_disk(mid)
+        audio = await asyncio.to_thread(find_audio_on_disk, mid)
         if audio is not None:
             logger.info("Recovering transcription for '%s' (%s) from %s", title, mid[:8], audio.name)
             spawn_tracked(mid, _recover_pipeline(mid, audio), name=f"recover-{mid[:8]}")
@@ -162,13 +163,7 @@ async def _finalize_no_show(meeting_id: str) -> None:
     await models.mark_no_show(meeting_id)
     base = Path(config.AUDIO_DIR)
     for ext in (".wav", ".mp3"):
-        p = base / f"{meeting_id}{ext}"
-        try:
-            p.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as e:
-            logger.warning("Could not delete empty recording %s: %s", p.name, e)
+        await fsio.unlink_quiet(base / f"{meeting_id}{ext}")
 
 
 async def _recover_pipeline(meeting_id: str, audio_path: "Path") -> None:
@@ -247,7 +242,7 @@ async def _record_pipeline(meeting_id: str) -> None:
     url = meeting["meeting_url"]
     audio_filename = f"{meeting_id}.wav"
     audio_path = Path(config.AUDIO_DIR) / audio_filename
-    audio_path.parent.mkdir(parents=True, exist_ok=True)
+    await fsio.mkdir_p(audio_path.parent)
 
     sink_name = f"meet_{meeting_id[:8]}"
     sink_module: int | None = None   # pulse module index, for reliable unload
@@ -478,7 +473,7 @@ async def transcribe_and_analyze(
 
     await models.update_meeting_status(meeting_id, "transcribing")
 
-    if not audio_path.exists() or audio_path.stat().st_size < 10_000:
+    if await fsio.size(audio_path) < 10_000:
         raise EmptyRecordingError(f"Audio file missing or too small: {audio_path}")
 
     meeting = await models.get_meeting(meeting_id)
@@ -496,14 +491,10 @@ async def transcribe_and_analyze(
     mp3_filename = f"{meeting_id}.mp3"
     mp3_path = Path(config.AUDIO_DIR) / mp3_filename
     try:
-        src_size = audio_path.stat().st_size
+        src_size = await fsio.size(audio_path)
         await _convert_to_mp3(audio_path, mp3_path)
         stored_filename = mp3_filename
-        stored_size = mp3_path.stat().st_size
-        try:
-            audio_path.unlink()
-        except FileNotFoundError:
-            pass
+        stored_size = await fsio.size(mp3_path)
         logger.info(
             "Converted %s → %s (%d → %d bytes, %.0f%% smaller)",
             audio_path.name, mp3_path.name, src_size, stored_size,
@@ -513,7 +504,11 @@ async def transcribe_and_analyze(
         # Conversion failed — keep the source so audio is at least preserved
         logger.error("MP3 conversion failed for %s: %s — keeping source", meeting_id[:8], e)
         stored_filename = audio_path.name
-        stored_size = audio_path.stat().st_size
+        stored_size = await fsio.size(audio_path)
+    else:
+        # Conversion + metadata OK — drop the (large) source WAV. Best effort:
+        # a slow/failed delete must not undo a successful conversion.
+        await fsio.unlink_quiet(audio_path)
 
     await models.save_meeting_audio(meeting_id, stored_filename, stored_size)
 
@@ -977,7 +972,7 @@ async def _convert_to_mp3(src_path: Path, mp3_path: Path, *, mono: bool = True) 
         tail = (stderr.decode(errors="replace") if stderr else "")[-500:]
         raise RuntimeError(f"ffmpeg exited {proc.returncode}: {tail}")
 
-    if not mp3_path.exists() or mp3_path.stat().st_size < 1000:
+    if await fsio.size(mp3_path) < 1000:
         raise RuntimeError(f"MP3 output missing or too small: {mp3_path}")
 
 

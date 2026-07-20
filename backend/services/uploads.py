@@ -6,7 +6,6 @@ container; transcribe_and_analyze converts to mp3 (dropping the source video).
 """
 import asyncio
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +13,7 @@ from fastapi import HTTPException, UploadFile
 
 from config import config
 from database import models
+from services import fsio
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +62,14 @@ async def save_upload_and_process(
     await models.set_meeting_recorder_user(meeting_id, recorder_user_id)
     await models.update_meeting_status(meeting_id, "transcribing")
 
-    os.makedirs(config.AUDIO_DIR, exist_ok=True)
+    await fsio.mkdir_p(Path(config.AUDIO_DIR))
     dest = Path(config.AUDIO_DIR) / f"{meeting_id}{suffix}"
     written = 0
     try:
-        with open(dest, "wb") as out:
+        # open/write/close on the /audio network volume run in a worker thread so
+        # a storage stall can't freeze the event loop (see fsio.py).
+        out = await asyncio.to_thread(open, dest, "wb")
+        try:
             while True:
                 chunk = await file.read(1024 * 1024)
                 if not chunk:
@@ -74,16 +77,18 @@ async def save_upload_and_process(
                 written += len(chunk)
                 if written > MAX_UPLOAD_BYTES:
                     raise HTTPException(413, "Файл слишком большой (макс. 500 МБ). Загрузите извлечённое аудио.")
-                out.write(chunk)
+                await asyncio.to_thread(out.write, chunk)
+        finally:
+            await asyncio.to_thread(out.close)
     except HTTPException:
-        dest.unlink(missing_ok=True)
+        await fsio.unlink_quiet(dest)
         await models.update_meeting_status(meeting_id, "error", "Upload too large")
         raise
     finally:
         await file.close()
 
     if written < 1000:
-        dest.unlink(missing_ok=True)
+        await fsio.unlink_quiet(dest)
         await models.update_meeting_status(meeting_id, "error", "Empty or tiny upload")
         raise HTTPException(400, "Файл пустой")
 
