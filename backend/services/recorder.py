@@ -98,7 +98,8 @@ def spawn_tracked(meeting_id: str, coro, *, name: str) -> bool:
 async def recover_interrupted_meetings() -> None:
     """
     Called on startup: re-queue recordings that were interrupted by a previous deploy.
-    - status='recording'    → reset to 'pending' (bot re-joins if meeting still ongoing)
+    - status='recording'    → salvage a partial WAV if one survived on disk, else
+                              reset to 'pending' (bot re-joins if still ongoing)
     - status='transcribing' → re-run the full pipeline from the WAV/MP3 on the volume
     - status='analyzing'    → re-run analysis from the transcript in the DB
 
@@ -109,23 +110,45 @@ async def recover_interrupted_meetings() -> None:
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        # Reset stuck recordings to pending
-        rec_result = await conn.execute(
-            """
-            UPDATE meetings
-               SET status = 'pending', start_time = NOW(), error_message = NULL, updated_at = NOW()
-             WHERE status = 'recording'
-            """
+        recording = await conn.fetch(
+            "SELECT id, title FROM meetings WHERE status = 'recording'"
         )
-        rec_count = int(rec_result.split()[-1])
-
         # Find meetings stuck mid-processing
         stuck = await conn.fetch(
             "SELECT id, title, status, transcript FROM meetings WHERE status IN ('transcribing', 'analyzing')"
         )
 
-    if rec_count:
-        logger.warning("Reset %d interrupted recordings back to pending", rec_count)
+    # Interrupted recordings: if a partial WAV survived on the volume, SALVAGE it
+    # (transcribe what we have) rather than resetting to 'pending'. A blind reset
+    # sets start_time=NOW(), so the bot re-joins the (often already-finished)
+    # meeting, OVERWRITES the partial with an empty re-record, then deletes it via
+    # no_show — that destroyed real recordings on restart (2026-07-22). Only reset
+    # meetings with nothing to lose (no usable partial on disk).
+    reset_ids = []
+    for row in recording:
+        mid = str(row["id"])
+        title = row["title"] or mid[:8]
+        audio = await asyncio.to_thread(find_audio_on_disk, mid)
+        if audio is not None:
+            logger.warning(
+                "Interrupted recording '%s' (%s) has a partial on disk (%s) — salvaging, not re-recording",
+                title, mid[:8], audio.name,
+            )
+            spawn_tracked(mid, _recover_pipeline(mid, audio), name=f"salvage-{mid[:8]}")
+        else:
+            reset_ids.append(row["id"])
+
+    if reset_ids:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE meetings
+                   SET status = 'pending', start_time = NOW(), error_message = NULL, updated_at = NOW()
+                 WHERE id = ANY($1::uuid[])
+                """,
+                reset_ids,
+            )
+        logger.warning("Reset %d interrupted recordings (no partial audio) back to pending", len(reset_ids))
 
     for row in stuck:
         mid = str(row["id"])

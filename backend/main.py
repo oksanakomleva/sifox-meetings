@@ -50,6 +50,11 @@ async def lifespan(app: FastAPI):
     mm_task = asyncio.create_task(run_mm_sync_loop(), name="mm-sync")
     gmail_task = asyncio.create_task(run_gmail_sync_loop(), name="gmail-sync")
 
+    # Force a clean restart if the event loop ever wedges (instead of hanging
+    # forever until a manual redeploy — see 2026-07-22).
+    from services.watchdog import start_watchdog
+    start_watchdog()
+
     logger.info("telemost-web started")
     yield
 

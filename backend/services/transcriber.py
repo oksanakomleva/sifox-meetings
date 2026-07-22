@@ -1,6 +1,9 @@
 """faster-whisper transcription — same approach as telemost-bot."""
 import asyncio
+import json
 import logging
+import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
@@ -11,6 +14,14 @@ logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper")
 _transcribe_semaphore = asyncio.Semaphore(1)  # one at a time to prevent OOM
 
+# Post-meeting transcription runs faster-whisper in a SEPARATE PROCESS
+# (transcribe_worker.py). A native hang/deadlock in CTranslate2 during inference
+# used to hold the GIL and freeze the whole event loop → total service outage
+# (2026-07-22). A subprocess cannot do that, and we can kill it on timeout.
+# Generous cap: medium/int8 runs several× faster than realtime, so this covers
+# multi-hour recordings while still bounding a truly wedged worker.
+_WORKER_TIMEOUT = 7200  # seconds
+
 
 @dataclass
 class TranscriptSegment:
@@ -19,38 +30,49 @@ class TranscriptSegment:
     text: str
 
 
-def _transcribe_sync(audio_path: str) -> list[TranscriptSegment]:
-    from faster_whisper import WhisperModel
-
-    logger.info("Loading Whisper %s for %s", config.WHISPER_MODEL, audio_path)
-    model = WhisperModel(
-        config.WHISPER_MODEL,
-        device="cpu",
-        compute_type="int8",
-    )
-    segments, info = model.transcribe(
-        audio_path,
-        language="ru",
-        beam_size=5,
-        vad_filter=True,
-    )
-    result = [
-        TranscriptSegment(start=s.start, end=s.end, text=s.text.strip())
-        for s in segments
-        if s.text.strip()
-    ]
-    del model
-    logger.info(
-        "Transcribed %s: %d segments, lang=%s",
-        audio_path, len(result), info.language,
-    )
-    return result
-
-
 async def transcribe_audio(audio_path: str) -> list[TranscriptSegment]:
+    """Transcribe a file with faster-whisper in an isolated, killable subprocess."""
     async with _transcribe_semaphore:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_executor, _transcribe_sync, audio_path)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "services.transcribe_worker",
+            audio_path, config.WHISPER_MODEL, "ru", "5",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"},
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=_WORKER_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise RuntimeError(
+                f"Whisper worker timed out after {_WORKER_TIMEOUT}s — killed (audio: {audio_path})"
+            )
+
+        if proc.returncode != 0:
+            tail = (stderr.decode(errors="replace") if stderr else "")[-800:]
+            raise RuntimeError(f"Whisper worker exited {proc.returncode}: {tail}")
+
+        # The worker prints one JSON object as its LAST stdout line.
+        out = stdout.decode(errors="replace").strip()
+        last = out.splitlines()[-1] if out else ""
+        try:
+            data = json.loads(last)
+        except Exception as e:
+            raise RuntimeError(
+                f"Whisper worker returned unparseable output ({e}); got: {out[:300]!r}"
+            )
+        result = [
+            TranscriptSegment(start=s["start"], end=s["end"], text=s["text"])
+            for s in data.get("segments", [])
+        ]
+        logger.info(
+            "Transcribed %s: %d segments, lang=%s",
+            audio_path, len(result), data.get("language"),
+        )
+        return result
 
 
 # ── Live assistant: cached small models + raw-PCM transcription ────────────────
