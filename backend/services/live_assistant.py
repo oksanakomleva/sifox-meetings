@@ -10,17 +10,15 @@ live_qa + logged). Speaking the answer into the meeting (TTS) is Phase 3 and is
 injected via the optional `speak` callback.
 """
 import asyncio
-import io
 import logging
 import time
-import wave
 from collections import deque
 from typing import Awaitable, Callable
 
 from config import config
 from database import models
 from services import qa_engine
-from services.transcriber import transcribe_pcm
+from services.transcriber import transcribe_openai_pcm, transcribe_pcm
 
 logger = logging.getLogger(__name__)
 
@@ -105,40 +103,32 @@ async def _audio_reader(stream, queue: asyncio.Queue[bytes]) -> None:
         queue.put_nowait(b"")
 
 
-def _pcm_wav(pcm: bytes) -> io.BytesIO:
-    target = io.BytesIO()
-    with wave.open(target, "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(_SAMPLE_RATE)
-        wav.writeframes(pcm)
-    target.seek(0)
-    target.name = "live-question.wav"
-    return target
-
-
 async def transcribe_question(pcm: bytes) -> str:
     """Use cloud STT for proper nouns/latency, falling back to isolated local STT."""
     if config.LIVE_QUESTION_STT.lower() == "openai":
         try:
-            from openai import AsyncOpenAI
-
-            client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
-            response = await asyncio.wait_for(
-                client.audio.transcriptions.create(
-                    model=config.LIVE_QUESTION_STT_MODEL,
-                    file=_pcm_wav(pcm),
-                    language="ru",
-                    response_format="text",
-                ),
-                timeout=config.LIVE_STT_TIMEOUT_SEC,
+            return await transcribe_openai_pcm(
+                pcm,
+                config.LIVE_QUESTION_STT_MODEL,
+                prompt=config.LIVE_WAKE_WORD,
             )
-            if isinstance(response, str):
-                return response.strip()
-            return str(getattr(response, "text", response) or "").strip()
         except Exception as exc:
             logger.warning("OpenAI question STT failed; using local model: %s", exc)
     return await transcribe_pcm(pcm, config.LIVE_QUESTION_MODEL, beam_size=3)
+
+
+async def transcribe_wake_window(pcm: bytes) -> str:
+    """Recognize a wake-word window accurately, with an isolated local fallback."""
+    if config.LIVE_WAKE_STT.lower() == "openai":
+        try:
+            return await transcribe_openai_pcm(
+                pcm,
+                config.LIVE_WAKE_STT_MODEL,
+                prompt=config.LIVE_WAKE_WORD,
+            )
+        except Exception as exc:
+            logger.warning("OpenAI wake STT failed; using local model: %s", exc)
+    return await transcribe_pcm(pcm, config.LIVE_WAKE_MODEL, beam_size=1)
 
 
 async def run_live_assistant(
@@ -190,7 +180,7 @@ async def run_live_assistant(
                 continue
 
             try:
-                text = await transcribe_pcm(segment, config.LIVE_WAKE_MODEL, beam_size=1)
+                text = await transcribe_wake_window(segment)
             except Exception as e:
                 logger.warning("Live wake STT failed (%s): %s", meeting_id[:8], e)
                 continue

@@ -58,6 +58,11 @@ class Config(BaseSettings):
     # successful pilot if every recorded meeting should get the assistant.
     LIVE_ASSISTANT_ALL_MEETINGS: bool = False
     LIVE_WAKE_WORD: str = "протоколлер"      # stem-matched (see live_assistant)
+    # Short wake-word windows need the same recognition quality as the final
+    # transcript. The tiny local model repeatedly missed "Протоколлер" in real
+    # Telemost audio, even though the post-meeting model heard the whole phrase.
+    LIVE_WAKE_STT: str = "openai"             # "openai" | "local"
+    LIVE_WAKE_STT_MODEL: str = "whisper-1"
     LIVE_WAKE_MODEL: str = "tiny"            # cheap continuous wake-word STT
     LIVE_QUESTION_MODEL: str = "small"       # accurate STT for the question only
     LIVE_WINDOW_SEC: int = 5                 # rolling window length per STT pass

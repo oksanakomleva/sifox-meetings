@@ -1,10 +1,12 @@
 """faster-whisper transcription — same approach as telemost-bot."""
 import asyncio
+import io
 import json
 import logging
 import os
 import sys
 import uuid
+import wave
 from contextlib import suppress
 from dataclasses import dataclass
 
@@ -13,6 +15,7 @@ from config import config
 logger = logging.getLogger(__name__)
 
 _transcribe_semaphore = asyncio.Semaphore(1)  # one at a time to prevent OOM
+_openai_stt_client = None
 
 # Post-meeting transcription runs faster-whisper in a SEPARATE PROCESS
 # (transcribe_worker.py). A native hang/deadlock in CTranslate2 during inference
@@ -196,5 +199,51 @@ async def transcribe_pcm(pcm: bytes, model_size: str, *, beam_size: int = 1) -> 
         _transcribe_semaphore.release()
 
 
+def _pcm_wav(pcm: bytes) -> io.BytesIO:
+    target = io.BytesIO()
+    with wave.open(target, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16_000)
+        wav.writeframes(pcm)
+    target.seek(0)
+    target.name = "live-audio.wav"
+    return target
+
+
+async def transcribe_openai_pcm(
+    pcm: bytes,
+    model: str,
+    *,
+    prompt: str | None = None,
+) -> str:
+    """Transcribe a short PCM window using the shared cloud STT client."""
+    global _openai_stt_client
+    if _openai_stt_client is None:
+        from openai import AsyncOpenAI
+
+        _openai_stt_client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+
+    kwargs = {
+        "model": model,
+        "file": _pcm_wav(pcm),
+        "language": "ru",
+        "response_format": "text",
+    }
+    if prompt and model == "whisper-1":
+        kwargs["prompt"] = prompt
+    response = await asyncio.wait_for(
+        _openai_stt_client.audio.transcriptions.create(**kwargs),
+        timeout=config.LIVE_STT_TIMEOUT_SEC,
+    )
+    if isinstance(response, str):
+        return response.strip()
+    return str(getattr(response, "text", response) or "").strip()
+
+
 async def close_live_transcriber() -> None:
+    global _openai_stt_client
     await _live_worker.stop()
+    client, _openai_stt_client = _openai_stt_client, None
+    if client is not None:
+        await client.close()
