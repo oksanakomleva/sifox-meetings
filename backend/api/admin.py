@@ -738,15 +738,6 @@ async def inject_test_audio(req: InjectAudioRequest, caller: TestOrAdminUser):
     audio_file = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "tests", "e2e", "test_audio.wav")
     )
-    live_audio_file = os.path.abspath(
-        os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "tests",
-            "e2e",
-            "live_assistant_test_audio.wav",
-        )
-    )
     if not os.path.exists(audio_file):
         raise HTTPException(400, f"test_audio.wav not found at {audio_file}")
 
@@ -826,6 +817,15 @@ async def debug_test_speaker(caller: TestOrAdminUser):
     )
     audio_file = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "tests", "e2e", "test_audio.wav")
+    )
+    live_audio_file = os.path.abspath(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "tests",
+            "e2e",
+            "live_assistant_test_audio.wav",
+        )
     )
     result = {
         "speaker_script_exists": os.path.exists(speaker_script),
