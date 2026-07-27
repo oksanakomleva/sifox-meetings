@@ -566,7 +566,9 @@ async def claim_meeting_for_recording(meeting_id: str) -> bool:
     ALREADY RECORDING right now (a bot is in that room — regardless of schedule
     gap; covers back-to-back meetings on one permanent link where the first
     overran), OR was just recorded/processed within a 15-minute window (same-time
-    duplicate events). Prevents sending a second protocaller into an occupied room.
+    duplicate events). Completed E2E tests are exempt from the time-window rule
+    so the permanent test room can be rerun immediately; active recordings still
+    block every caller. Prevents sending a second protocaller into an occupied room.
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -586,6 +588,10 @@ async def claim_meeting_for_recording(meeting_id: str) -> bool:
                         -- ...or a same-time sibling just recorded/processed it
                         OR (o.status IN ('transcribing', 'analyzing', 'done')
                             AND abs(extract(epoch FROM (o.start_time - meetings.start_time))) < 900)
+                            AND NOT (
+                                COALESCE(meetings.title, '') LIKE '[E2E Test]%'
+                                AND COALESCE(o.title, '') LIKE '[E2E Test]%'
+                            )
                     )
               )
             """,
@@ -598,9 +604,10 @@ async def mark_duplicate_if_sibling_active(meeting_id: str) -> bool:
     """
     Mark a pending meeting as a duplicate (status='error') if another meeting
     with the same Telemost URL is already recording/processing/done within a
-    15-minute window. Keeps duplicate calendar events for one room from
-    lingering as pending and later sending a lone protocaller into an
-    already-finished meeting. Returns True if it was marked.
+    15-minute window. Completed E2E pairs are exempt so a permanent test room
+    can be rerun immediately; an actively recording sibling always wins. Keeps
+    real duplicate calendar events from lingering as pending and later sending
+    a lone protocaller into an already-finished meeting. Returns True if marked.
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -619,6 +626,10 @@ async def mark_duplicate_if_sibling_active(meeting_id: str) -> bool:
                         o.status = 'recording'
                         OR (o.status IN ('transcribing', 'analyzing', 'done')
                             AND abs(extract(epoch FROM (o.start_time - m.start_time))) < 900)
+                            AND NOT (
+                                COALESCE(m.title, '') LIKE '[E2E Test]%'
+                                AND COALESCE(o.title, '') LIKE '[E2E Test]%'
+                            )
                     )
               )
             """,
