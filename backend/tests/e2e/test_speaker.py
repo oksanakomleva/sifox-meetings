@@ -22,6 +22,52 @@ DISPLAY = os.environ.get("DISPLAY", ":99")
 PULSE_SERVER = os.environ.get("PULSE_SERVER", "unix:/tmp/pulse.sock")
 
 
+async def _dismiss_modals(page) -> None:
+    """Dismiss Telemost informational overlays that can cover media/join buttons."""
+    selectors = [
+        "button:has-text('Понятно')",
+        "button:has-text('Хорошо')",
+        "button:has-text('Продолжить')",
+        "button:has-text('Закрыть')",
+        "button:has-text('OK')",
+        "button:has-text('Got it')",
+        "button:has-text('Continue')",
+        "button[aria-label*='Закрыть' i]",
+        "button[aria-label*='Close' i]",
+    ]
+    for _ in range(3):
+        dismissed = False
+        for selector in selectors:
+            try:
+                button = page.locator(selector).last
+                if await button.count() and await button.is_visible():
+                    await button.click(force=True, timeout=2_000)
+                    logger.info("Dismissed Telemost modal via %s", selector)
+                    await page.wait_for_timeout(500)
+                    dismissed = True
+                    break
+            except Exception:
+                continue
+        if not dismissed:
+            return
+
+
+async def _capture_debug(page, filename: str) -> None:
+    try:
+        dialogs = await page.locator(
+            "[role='dialog'], div[class*='Modal'], div[class*='Overlay']"
+        ).all_inner_texts()
+        logger.error("Visible Telemost dialogs/overlays: %s", dialogs[-10:])
+    except Exception:
+        pass
+    try:
+        debug_dir = Path("/tmp/recorder-debug")
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        await page.screenshot(path=str(debug_dir / filename), full_page=True)
+    except Exception as exc:
+        logger.warning("Could not save E2E speaker screenshot: %s", exc)
+
+
 async def _log_controls(page) -> list[dict]:
     try:
         controls = await page.evaluate(
@@ -55,6 +101,7 @@ async def _ensure_microphone_on(page) -> bool:
     controls = page.locator("button,[role='button']")
     clicked_unknown = False
     for _ in range(3):
+        await _dismiss_modals(page)
         unknown_control = None
         clicked = False
         for index in range(await controls.count()):
@@ -220,9 +267,10 @@ async def speak_in_meeting(meeting_url: str, duration_minutes: int = 5) -> bool:
             # previous code could turn an already-disabled camera back on.
             await _ensure_camera_off(page)
 
-            # Telemost starts guests muted. Enable the fake WAV microphone on
-            # the pre-join screen when the control is available.
-            await _ensure_microphone_on(page)
+            # Do not enable the microphone on the pre-join screen. Telemost may
+            # open a permission/info modal there; that overlay then intercepts
+            # the Join click. Join muted first, enable mic in the in-call toolbar.
+            await _dismiss_modals(page)
 
             # Join the meeting — mic ON (we want to speak)
             join_btn = page.locator(
@@ -232,18 +280,13 @@ async def speak_in_meeting(meeting_url: str, duration_minutes: int = 5) -> bool:
                 "button:has-text('Join')"
             ).first
             await join_btn.wait_for(state="visible", timeout=20_000)
-            await join_btn.click()
+            await join_btn.click(force=True)
             await page.wait_for_timeout(5_000)
 
             # The in-call toolbar may be a different DOM tree from pre-join.
             # Verify once more and fail loudly instead of reporting a false pass.
             if not await _ensure_microphone_on(page):
-                debug_dir = Path("/tmp/recorder-debug")
-                debug_dir.mkdir(parents=True, exist_ok=True)
-                await page.screenshot(
-                    path=str(debug_dir / "e2e-speaker-mic-failed.png"),
-                    full_page=True,
-                )
+                await _capture_debug(page, "e2e-speaker-mic-failed.png")
                 raise RuntimeError("Test Speaker joined, but its microphone is still muted")
 
             debug_dir = Path("/tmp/recorder-debug")
@@ -261,6 +304,8 @@ async def speak_in_meeting(meeting_url: str, duration_minutes: int = 5) -> bool:
             logger.info("Test Speaker cancelled — leaving meeting")
         except Exception as e:
             logger.error("Test Speaker error: %s", e)
+            await _log_controls(page)
+            await _capture_debug(page, "e2e-speaker-error.png")
             return False
         finally:
             try:
