@@ -13,6 +13,7 @@ import asyncio
 import logging
 import time
 from collections import deque
+from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 from config import config
@@ -26,6 +27,33 @@ _SAMPLE_RATE = 16000
 _BYTES_PER_SEC = _SAMPLE_RATE * 2  # s16le mono
 _LIVE_TRANSCRIPT_MAX_CHARS = 20_000
 _COOLDOWN_SEC = 3.0  # ignore wake right after answering
+_diagnostics: dict[str, dict] = {}
+_MAX_DIAGNOSTICS = 100
+
+
+def _diagnostic_update(meeting_id: str, **values) -> None:
+    if meeting_id not in _diagnostics and len(_diagnostics) >= _MAX_DIAGNOSTICS:
+        oldest = next(iter(_diagnostics))
+        _diagnostics.pop(oldest, None)
+    current = _diagnostics.setdefault(
+        meeting_id,
+        {
+            "status": "starting",
+            "bytes_received": 0,
+            "windows_transcribed": 0,
+            "last_text": "",
+            "last_error": None,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    current.update(values)
+    current["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+
+def get_live_diagnostic(meeting_id: str) -> dict | None:
+    """Return a copy of bounded, admin-only runtime diagnostics."""
+    item = _diagnostics.get(meeting_id)
+    return dict(item) if item else None
 
 
 class RollingPCMBuffer:
@@ -140,6 +168,7 @@ async def run_live_assistant(
     """Listen on the meeting sink and answer wake-word questions until cancelled."""
     proc = None
     reader_task = None
+    _diagnostic_update(meeting_id, status="starting", sink=f"{sink_name}.monitor")
     try:
         proc = await asyncio.create_subprocess_exec(
             "parec",
@@ -148,6 +177,7 @@ async def run_live_assistant(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
+        _diagnostic_update(meeting_id, status="listening", parec_pid=proc.pid)
         logger.info("Live assistant listening on %s.monitor (meeting %s)", sink_name, meeting_id[:8])
 
         window_bytes = max(1, config.LIVE_WINDOW_SEC) * _BYTES_PER_SEC
@@ -167,9 +197,18 @@ async def run_live_assistant(
         while True:
             chunk = await audio_queue.get()
             if not chunk:
+                _diagnostic_update(
+                    meeting_id,
+                    status="audio_source_ended",
+                    parec_returncode=proc.returncode,
+                )
                 break
             rolling.append(chunk)
             bytes_since_poll += len(chunk)
+            _diagnostic_update(
+                meeting_id,
+                bytes_received=_diagnostics[meeting_id]["bytes_received"] + len(chunk),
+            )
             if len(rolling) < window_bytes or bytes_since_poll < poll_bytes:
                 continue
 
@@ -182,8 +221,19 @@ async def run_live_assistant(
             try:
                 text = await transcribe_wake_window(segment)
             except Exception as e:
+                _diagnostic_update(
+                    meeting_id,
+                    windows_transcribed=_diagnostics[meeting_id]["windows_transcribed"] + 1,
+                    last_error=f"{type(e).__name__}: {e}"[:500],
+                )
                 logger.warning("Live wake STT failed (%s): %s", meeting_id[:8], e)
                 continue
+            _diagnostic_update(
+                meeting_id,
+                windows_transcribed=_diagnostics[meeting_id]["windows_transcribed"] + 1,
+                last_text=text[-300:],
+                last_error=None,
+            )
             if not text:
                 continue
 
@@ -194,6 +244,7 @@ async def run_live_assistant(
                 continue
 
             logger.info("Live assistant wake detected (%s): %r", meeting_id[:8], text)
+            _diagnostic_update(meeting_id, status="wake_detected")
             # Capture the question: this window (has wake word + maybe start of
             # question) plus the following audio up to LIVE_QUESTION_MAX_SEC.
             qbuf = bytearray(segment)
@@ -211,11 +262,18 @@ async def run_live_assistant(
                 rolling.tail(config.LIVE_CONTEXT_AUDIO_SEC),
                 speak,
             )
+            _diagnostic_update(meeting_id, status="listening")
             mute_until = time.monotonic() + _COOLDOWN_SEC
 
     except asyncio.CancelledError:
+        _diagnostic_update(meeting_id, status="cancelled")
         raise
     except Exception as e:
+        _diagnostic_update(
+            meeting_id,
+            status="error",
+            last_error=f"{type(e).__name__}: {e}"[:500],
+        )
         logger.error("Live assistant crashed (%s): %s", meeting_id[:8], e, exc_info=True)
     finally:
         if reader_task:
@@ -231,6 +289,11 @@ async def run_live_assistant(
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
+        _diagnostic_update(
+            meeting_id,
+            parec_returncode=proc.returncode if proc else None,
+            ended_at=datetime.now(timezone.utc).isoformat(),
+        )
 
 
 async def speak_text(text: str, sink_name: str) -> bool:

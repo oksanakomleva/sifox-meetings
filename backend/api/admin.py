@@ -108,10 +108,16 @@ async def admin_live_qa(meeting_id: str, admin: AdminUser):
     """Inspect the live in-meeting assistant Q&A for a meeting (+ flag state).
     Accepts the X-Test-Api-Key header, so it's usable for validation."""
     from config import config
+    from services.live_assistant import get_live_diagnostic
+    meeting = await models.get_meeting(meeting_id)
     return {
         "live_assistant_enabled": config.LIVE_ASSISTANT_ENABLED,
         "live_assistant_speak": config.LIVE_ASSISTANT_SPEAK,
         "live_assistant_all_meetings": config.LIVE_ASSISTANT_ALL_MEETINGS,
+        "meeting_assistant_enabled": bool(
+            meeting and meeting.get("assistant_enabled")
+        ),
+        "diagnostic": get_live_diagnostic(meeting_id),
         "items": await models.get_live_qa(meeting_id),
     }
 

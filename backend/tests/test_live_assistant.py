@@ -10,6 +10,8 @@ from config import config
 from services import live_assistant
 from services.live_assistant import (
     RollingPCMBuffer,
+    _diagnostic_update,
+    get_live_diagnostic,
     merge_live_transcript,
     transcribe_wake_window,
 )
@@ -43,6 +45,18 @@ def test_mic_action_labels_map_to_current_state():
     assert _mic_control_state("Выключить микрофон") == "on"
     assert _mic_control_state("Mute microphone") == "on"
     assert _mic_control_state("mic-button opaque") == "unknown"
+
+
+def test_live_diagnostic_is_copied_and_updated():
+    meeting_id = "diagnostic-test"
+    _diagnostic_update(meeting_id, status="listening", bytes_received=123)
+
+    diagnostic = get_live_diagnostic(meeting_id)
+    assert diagnostic["status"] == "listening"
+    assert diagnostic["bytes_received"] == 123
+
+    diagnostic["status"] = "tampered"
+    assert get_live_diagnostic(meeting_id)["status"] == "listening"
 
 
 def test_wake_window_uses_accurate_cloud_stt(monkeypatch):
