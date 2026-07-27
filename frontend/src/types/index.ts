@@ -55,6 +55,8 @@ export interface Meeting {
   created_at: string
   protocol_sent_at?: string | null
   visible_to_all?: boolean
+  assistant_enabled?: boolean
+  assistant_full_access?: boolean
   participants?: Participant[]
   transcript?: string
 }

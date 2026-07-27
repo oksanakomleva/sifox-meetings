@@ -4,14 +4,14 @@ import json
 import logging
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 
 from config import config
 
 logger = logging.getLogger(__name__)
 
-_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper")
 _transcribe_semaphore = asyncio.Semaphore(1)  # one at a time to prevent OOM
 
 # Post-meeting transcription runs faster-whisper in a SEPARATE PROCESS
@@ -33,6 +33,10 @@ class TranscriptSegment:
 async def transcribe_audio(audio_path: str) -> list[TranscriptSegment]:
     """Transcribe a file with faster-whisper in an isolated, killable subprocess."""
     async with _transcribe_semaphore:
+        # Free cached tiny/small models before loading the much larger post-call
+        # model. The semaphore alone prevents concurrent inference but would
+        # still leave both workers' model memory resident and risk an OOM.
+        await _live_worker.stop()
         proc = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "services.transcribe_worker",
             audio_path, config.WHISPER_MODEL, "ru", "5",
@@ -75,39 +79,122 @@ async def transcribe_audio(audio_path: str) -> list[TranscriptSegment]:
         return result
 
 
-# ── Live assistant: cached small models + raw-PCM transcription ────────────────
-# Used only by the live in-meeting assistant. Models are cached (unlike the
-# post-meeting path which loads+frees) because the wake-word loop runs every few
-# seconds. Routed through the SAME semaphore/executor so we never run two whisper
-# inferences at once (OOM guard).
-
-_model_cache: dict[str, "object"] = {}
+# ── Live assistant: isolated persistent small-model worker ────────────────────
 
 
-def _get_cached_model(size: str):
-    from faster_whisper import WhisperModel
-    m = _model_cache.get(size)
-    if m is None:
-        logger.info("Loading cached Whisper '%s' for live assistant", size)
-        m = WhisperModel(size, device="cpu", compute_type="int8")
-        _model_cache[size] = m
-    return m
+class _LiveSTTWorker:
+    def __init__(self) -> None:
+        self.proc: asyncio.subprocess.Process | None = None
+        self.stderr_task: asyncio.Task | None = None
+
+    async def _start(self) -> None:
+        if self.proc and self.proc.returncode is None:
+            return
+        self.proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "services.live_transcribe_worker",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"},
+        )
+        self.stderr_task = asyncio.create_task(
+            self._drain_stderr(),
+            name="live-stt-stderr",
+        )
+        logger.info("Started isolated live-STT worker pid=%s", self.proc.pid)
+
+    async def _drain_stderr(self) -> None:
+        proc = self.proc
+        if not proc or not proc.stderr:
+            return
+        while True:
+            raw = await proc.stderr.readline()
+            if not raw:
+                return
+            logger.warning(
+                "live-STT worker: %s",
+                raw.decode(errors="replace").rstrip()[-800:],
+            )
+
+    async def stop(self) -> None:
+        proc, self.proc = self.proc, None
+        stderr_task, self.stderr_task = self.stderr_task, None
+        if proc and proc.returncode is None:
+            proc.kill()
+            with suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=5)
+        if stderr_task:
+            stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
+
+    async def transcribe(
+        self,
+        pcm: bytes,
+        model_size: str,
+        beam_size: int,
+        timeout: float,
+    ) -> str:
+        await self._start()
+        assert self.proc and self.proc.stdin and self.proc.stdout
+        request_id = uuid.uuid4().hex
+        header = json.dumps(
+            {
+                "id": request_id,
+                "bytes": len(pcm),
+                "model": model_size,
+                "beam_size": beam_size,
+            }
+        ).encode() + b"\n"
+        try:
+            self.proc.stdin.write(header)
+            self.proc.stdin.write(pcm)
+            await self.proc.stdin.drain()
+            raw = await asyncio.wait_for(self.proc.stdout.readline(), timeout=timeout)
+            if not raw:
+                raise RuntimeError(
+                    f"live-STT worker exited unexpectedly ({self.proc.returncode})"
+                )
+            response = json.loads(raw)
+            if response.get("id") != request_id:
+                raise RuntimeError("live-STT worker protocol desynchronized")
+            if response.get("error"):
+                raise RuntimeError(response["error"])
+            return str(response.get("text") or "")
+        except asyncio.CancelledError:
+            # The unread response would desynchronize the next request.
+            await self.stop()
+            raise
+        except Exception:
+            await self.stop()
+            raise
 
 
-def _transcribe_pcm_sync(pcm: bytes, model_size: str, beam_size: int) -> str:
-    import numpy as np
-    if not pcm:
-        return ""
-    model = _get_cached_model(model_size)
-    audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-    segments, _info = model.transcribe(
-        audio, language="ru", beam_size=beam_size, vad_filter=True,
-    )
-    return " ".join(s.text.strip() for s in segments if s.text.strip()).strip()
+_live_worker = _LiveSTTWorker()
 
 
 async def transcribe_pcm(pcm: bytes, model_size: str, *, beam_size: int = 1) -> str:
-    """Transcribe raw 16 kHz mono s16le PCM with a cached model. Returns plain text."""
-    async with _transcribe_semaphore:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_executor, _transcribe_pcm_sync, pcm, model_size, beam_size)
+    """Transcribe raw PCM outside the web process with bounded queue/runtime."""
+    queue_timeout = (
+        config.LIVE_STT_TIMEOUT_SEC
+        if beam_size > 1
+        else config.LIVE_STT_QUEUE_TIMEOUT_SEC
+    )
+    try:
+        await asyncio.wait_for(_transcribe_semaphore.acquire(), timeout=queue_timeout)
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError("live-STT queue is busy; dropping stale audio") from exc
+    try:
+        return await _live_worker.transcribe(
+            pcm,
+            model_size,
+            beam_size,
+            timeout=config.LIVE_STT_TIMEOUT_SEC,
+        )
+    finally:
+        _transcribe_semaphore.release()
+
+
+async def close_live_transcriber() -> None:
+    await _live_worker.stop()

@@ -92,6 +92,9 @@ UPDATE meetings SET status='no_show', error_message=NULL
 -- Live assistant: host opt-in to FULL data access on a meeting with external
 -- guests (NULL/false = auto scope by attendee domains).
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS assistant_full_access BOOLEAN DEFAULT FALSE;
+-- Per-meeting live-assistant opt-in. The global environment flag remains the
+-- emergency kill switch; this field prevents a pilot from affecting all calls.
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS assistant_enabled BOOLEAN DEFAULT FALSE;
 -- Make a meeting visible in EVERY user's "Мои встречи" (for company-wide /
 -- uploaded shared recordings). Per-user grants live in meeting_access_grants.
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS visible_to_all BOOLEAN DEFAULT FALSE;
@@ -117,6 +120,9 @@ CREATE TABLE IF NOT EXISTS live_qa (
     scope       TEXT,                    -- 'full' | 'meeting_only'
     sources     TEXT[]                   -- which sources fed the answer
 );
+ALTER TABLE live_qa ADD COLUMN IF NOT EXISTS spoken BOOLEAN DEFAULT FALSE;
+ALTER TABLE live_qa ADD COLUMN IF NOT EXISTS latency_ms INTEGER;
+ALTER TABLE live_qa ADD COLUMN IF NOT EXISTS error TEXT;
 CREATE INDEX IF NOT EXISTS idx_live_qa_meeting ON live_qa(meeting_id, asked_at);
 CREATE INDEX IF NOT EXISTS idx_meetings_status    ON meetings(status);
 CREATE INDEX IF NOT EXISTS idx_meetings_start     ON meetings(start_time);

@@ -32,10 +32,8 @@ class TestWakeWord:
     def test_unrelated(self):
         assert not contains_wake_word("обсудим бюджет на квартал", WAKE)
 
-    def test_stem_matches_protokol(self):
-        # Tolerant stem-matching intentionally also fires on bare «протокол»
-        # (acceptable: rare in speech, avoids missing the real wake word).
-        assert contains_wake_word("протокол встречи готов", WAKE)
+    def test_ordinary_protocol_does_not_trigger(self):
+        assert not contains_wake_word("протокол встречи готов", WAKE)
 
 
 class TestStripWakeWord:
@@ -81,3 +79,10 @@ class TestPackContext:
         out = pack_context(items, budget=60)  # only one line fits
         assert "X" * 50 in out
         assert "Y" * 50 not in out
+
+    def test_oversized_item_does_not_hide_smaller_item(self):
+        items = [
+            (10.0, "2026-03-01", "X" * 200),
+            (9.0, "2026-02-01", "useful"),
+        ]
+        assert pack_context(items, budget=50) == "useful"

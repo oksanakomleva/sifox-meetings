@@ -302,7 +302,12 @@ async def _record_pipeline(meeting_id: str) -> None:
     pin_task: "asyncio.Task | None" = None
     browser = None
     pw = None
-    speak_enabled = config.LIVE_ASSISTANT_ENABLED and config.LIVE_ASSISTANT_SPEAK
+    live_task: "asyncio.Task | None" = None
+    assistant_enabled = config.LIVE_ASSISTANT_ENABLED and (
+        config.LIVE_ASSISTANT_ALL_MEETINGS
+        or bool(meeting.get("assistant_enabled"))
+    )
+    speak_enabled = assistant_enabled and config.LIVE_ASSISTANT_SPEAK
 
     try:
         # 1. PulseAudio sink — one per meeting. The browser is launched with
@@ -324,7 +329,6 @@ async def _record_pipeline(meeting_id: str) -> None:
             try:
                 botmic_name = f"botmic_{meeting_id[:8]}"
                 botmic_module = await _create_pulse_sink(botmic_name)
-                await _set_default_source(f"{botmic_name}.monitor")
             except Exception as e:
                 logger.warning("Bot mic setup failed (%s) — voice disabled: %s", meeting_id[:8], e)
                 botmic_name = None
@@ -383,25 +387,24 @@ async def _record_pipeline(meeting_id: str) -> None:
         except asyncio.TimeoutError:
             raise RuntimeError("chromium.launch() timed out after 30s — Xvfb/Chromium issue")
         logger.info("Browser launched OK")
-        page = await browser.new_page()
+        context = await browser.new_context(permissions=["microphone"])
+        page = await context.new_page()
 
         # 3. Join meeting
         participants = await _join_meeting(page, url)
         logger.info("Joined meeting %s, participants: %s", meeting_id[:8], participants)
-
-        # 3b. Turn the bot mic on (best effort) so voice answers are audible.
-        if botmic_name:
-            try:
-                await _enable_bot_mic(page)
-            except Exception as e:
-                logger.warning("Bot mic enable failed (%s): %s", meeting_id[:8], e)
 
         # 4. Start audio capture
         await models.update_meeting_status(meeting_id, "recording")
         audio_proc = await _start_audio_capture(str(audio_path), sink_name)
         # Keep this browser's audio pinned to its own sink (Chromium may ignore
         # PULSE_SINK / land on the default → would bleed across concurrent meetings).
-        pin_task = asyncio.create_task(_audio_pin_loop(sink_name))
+        pin_task = asyncio.create_task(
+            _audio_pin_loop(
+                sink_name,
+                f"{botmic_name}.monitor" if botmic_name else None,
+            )
+        )
 
         # 5. Speaker timeline
         speaker_timeline: list[tuple[float, str]] = []
@@ -438,14 +441,26 @@ async def _record_pipeline(meeting_id: str) -> None:
 
         # 5b. Live in-meeting assistant (isolated, opt-in via flag). Failures here
         # never affect the recording — run_live_assistant swallows its own errors.
-        live_task = None
-        if config.LIVE_ASSISTANT_ENABLED:
+        if assistant_enabled:
             from services.live_assistant import run_live_assistant, speak_text
             speak_cb = None
             if botmic_name:
                 _mic = botmic_name
+
                 async def speak_cb(text: str):
-                    await speak_text(text, _mic)
+                    if not await _set_bot_mic(page, enabled=True):
+                        raise RuntimeError("Telemost microphone could not be enabled")
+                    try:
+                        await _pin_browser_microphone(f"{_mic}.monitor")
+                        if not await speak_text(text, _mic):
+                            raise RuntimeError("TTS playback into the bot microphone failed")
+                    finally:
+                        if not await _set_bot_mic(page, enabled=False):
+                            logger.warning(
+                                "Bot mic could not be muted after speaking (%s)",
+                                meeting_id[:8],
+                            )
+
             live_task = asyncio.create_task(
                 run_live_assistant(meeting_id, sink_name, speak=speak_cb),
                 name=f"live-{meeting_id[:8]}",
@@ -461,6 +476,8 @@ async def _record_pipeline(meeting_id: str) -> None:
         tracker.cancel()
         if live_task:
             live_task.cancel()
+            await asyncio.gather(live_task, return_exceptions=True)
+            live_task = None
 
         # 7. Stop recording
         end_time = datetime.now(timezone.utc)
@@ -511,6 +528,9 @@ async def _record_pipeline(meeting_id: str) -> None:
                 pass
         if pin_task:
             pin_task.cancel()
+        if live_task:
+            live_task.cancel()
+            await asyncio.gather(live_task, return_exceptions=True)
         await _delete_pulse_sink(sink_name, sink_module)
         if botmic_name:
             try:
@@ -786,22 +806,54 @@ async def _get_active_speakers(page) -> list[str]:
         return []
 
 
-# Candidate selectors for the Telemost in-call microphone toggle. Telemost uses
-# obfuscated class names, so this is a best guess — refined from the toolbar DOM
-# dump logged below. Failure to find it just means the answer isn't heard.
-_MIC_BUTTON_SELECTORS = [
-    "button[aria-label*='икрофон']",
-    "button[aria-label*='icrophone']",
-    "button[data-testid*='mic']",
-    "button[title*='икрофон']",
-    "[role='button'][aria-label*='икрофон']",
-]
+def _mic_control_state(label: str) -> str:
+    """Interpret a Telemost mic control. Labels describe the available action."""
+    normalized = f" {(label or '').lower()} "
+    if any(term in normalized for term in ("включить", "unmute", "turn on", "enable")):
+        return "off"
+    if any(
+        term in normalized
+        for term in ("выключить", "mute microphone", "turn off", "disable")
+    ):
+        return "on"
+    if any(token in normalized for token in (" muted", " off", " disabled", " inactive")):
+        return "off"
+    if any(token in normalized for token in (" unmuted", " on", " enabled", " active")):
+        return "on"
+    return "unknown"
 
 
-async def _enable_bot_mic(page) -> bool:
-    """Best-effort: turn the bot's microphone ON after joining (Telemost joins
-    muted). Also dumps the control bar DOM once so we can find the real selector
-    from logs. Returns True only when the resulting UI state is known to be ON."""
+async def _dismiss_media_modals(page) -> None:
+    for selector in [
+        "button:has-text('Понятно')",
+        "button:has-text('Хорошо')",
+        "button:has-text('Продолжить')",
+        "button:has-text('Закрыть')",
+        "button:has-text('OK')",
+        "button:has-text('Got it')",
+        "button:has-text('Continue')",
+        "button[aria-label*='Закрыть' i]",
+        "button[aria-label*='Close' i]",
+    ]:
+        try:
+            button = page.locator(selector).last
+            if await button.count() and await button.is_visible():
+                await button.click(force=True, timeout=2_000)
+                await page.wait_for_timeout(500)
+                logger.info("Dismissed media modal via %s", selector)
+                return
+        except Exception:
+            continue
+
+
+async def _set_bot_mic(page, *, enabled: bool) -> bool:
+    """Set the in-call Telemost microphone to a verified state.
+
+    Telemost can leave both pre-join and in-call controls in the DOM. Prefer a
+    control whose nearby DOM also contains the Leave button, then verify that
+    the action label flips after the click. Never report success after a blind
+    click: a false positive here means participants hear silence.
+    """
     try:
         toolbar = await page.evaluate(
             "() => { const b = [...document.querySelectorAll(\"button,[role='button']\")]"
@@ -812,64 +864,85 @@ async def _enable_bot_mic(page) -> bool:
     except Exception:
         pass
 
-    enable_terms = ("включить", "unmute", "turn on", "enable")
-    disable_terms = ("выключить", "mute microphone", "turn off", "disable")
-    clicked_unknown = False
+    mic_terms = ("микроф", "microphone", " mic")
     for _ in range(3):
-        unknown_loc = None
-        clicked = False
-        for sel in _MIC_BUTTON_SELECTORS:
+        await _dismiss_media_modals(page)
+        controls = page.locator("button,[role='button']")
+        candidates: list[tuple[int, int, object, str]] = []
+        for index in range(await controls.count()):
+            control = controls.nth(index)
             try:
-                loc = page.locator(sel).first
-                if not await loc.count() or not await loc.is_visible():
+                if not await control.is_visible():
                     continue
                 label = " ".join(filter(None, [
-                    await loc.get_attribute("aria-label"),
-                    await loc.get_attribute("title"),
-                    await loc.get_attribute("data-testid"),
-                    await loc.get_attribute("data-state"),
-                    await loc.get_attribute("data-status"),
-                    await loc.get_attribute("class"),
+                    await control.get_attribute("aria-label"),
+                    await control.get_attribute("title"),
+                    await control.get_attribute("data-testid"),
+                    await control.get_attribute("data-state"),
+                    await control.get_attribute("data-status"),
+                    await control.get_attribute("aria-pressed"),
+                    await control.get_attribute("class"),
                 ])).strip()
-                normalized = label.lower()
-                # Labels describe the action, not the current state.
-                if any(term in normalized for term in enable_terms):
-                    await loc.click(timeout=2000)
-                    logger.info("Bot mic was muted; clicked %r", label)
-                    await page.wait_for_timeout(1500)
-                    clicked = True
-                    break
-                if any(term in normalized for term in disable_terms):
-                    logger.info("Bot mic is ON (%r)", label)
-                    return True
-                if any(token in normalized for token in (" muted", " off", " disabled", " inactive")):
-                    await loc.click(timeout=2000)
-                    logger.info("Bot mic state was OFF; clicked %r", label)
-                    await page.wait_for_timeout(1500)
-                    clicked = True
-                    break
-                if any(token in normalized for token in (" unmuted", " on", " enabled", " active")):
-                    logger.info("Bot mic state is ON (%r)", label)
-                    return True
-                unknown_loc = loc
+                if not any(term in f" {label.lower()}" for term in mic_terms):
+                    continue
+                in_call = await control.evaluate(
+                    """e => {
+                      let p = e;
+                      for (let i = 0; p && i < 7; i++, p = p.parentElement) {
+                        const labels = [...p.querySelectorAll('button,[role="button"]')]
+                          .map(x => `${x.getAttribute('aria-label') || ''} ${x.getAttribute('title') || ''}`.toLowerCase());
+                        if (labels.some(x => x.includes('выйти') || x.includes('leave'))) return true;
+                      }
+                      return false;
+                    }"""
+                )
+                box = await control.bounding_box()
+                viewport = page.viewport_size or {"height": 0}
+                lower_toolbar = bool(
+                    box
+                    and viewport.get("height")
+                    and box["y"] >= viewport["height"] * 0.45
+                )
+                score = (100 if in_call else 0) + (10 if lower_toolbar else 0)
+                candidates.append((score, index, control, label))
             except Exception:
                 continue
 
-        if clicked:
-            continue
-        if unknown_loc is not None and not clicked_unknown:
-            logger.warning("Bot mic state is opaque; performing one fallback click")
-            await unknown_loc.click(timeout=2000)
-            await page.wait_for_timeout(1500)
-            clicked_unknown = True
-            continue
-        if clicked_unknown:
-            logger.warning("Bot mic control remains opaque after one click; assuming ON")
-            return True
-        if unknown_loc is None:
-            break
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        desired = "on" if enabled else "off"
+        opposite = "off" if enabled else "on"
+        for score, _index, control, label in candidates:
+            state = _mic_control_state(label)
+            if state == desired:
+                logger.info("Bot mic verified %s (%r, score=%d)", desired, label, score)
+                return True
+            if state != opposite:
+                continue
+            try:
+                await control.click(timeout=3_000)
+                logger.info(
+                    "Bot mic switching %s via %r (score=%d)",
+                    desired,
+                    label,
+                    score,
+                )
+                await page.wait_for_timeout(1_500)
+                refreshed = " ".join(filter(None, [
+                    await control.get_attribute("aria-label"),
+                    await control.get_attribute("title"),
+                    await control.get_attribute("data-testid"),
+                    await control.get_attribute("data-state"),
+                    await control.get_attribute("data-status"),
+                    await control.get_attribute("aria-pressed"),
+                    await control.get_attribute("class"),
+                ])).strip()
+                if _mic_control_state(refreshed) == desired:
+                    logger.info("Bot mic state changed to %s (%r)", desired, refreshed)
+                    return True
+            except Exception:
+                continue
 
-    logger.warning("Bot mic: could not verify ON state — answer won't be heard")
+    logger.warning("Bot mic: could not verify state=%s", "ON" if enabled else "OFF")
     return False
 
 
@@ -1130,17 +1203,6 @@ async def _set_default_sink(name: str) -> None:
     await proc.wait()
 
 
-async def _set_default_source(name: str) -> None:
-    """Make `name` the default capture source — Chromium then uses it as the
-    bot's microphone (live assistant voice answers, Phase 3)."""
-    proc = await asyncio.create_subprocess_exec(
-        "pactl", "set-default-source", name,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    await proc.wait()
-
-
 async def _pin_browser_audio(sink_name: str) -> None:
     """Force this meeting's browser audio onto its own sink.
 
@@ -1189,12 +1251,72 @@ async def _pin_browser_audio(sink_name: str) -> None:
         logger.debug("pin audio %s: %s", sink_name, e)
 
 
-async def _audio_pin_loop(sink_name: str) -> None:
+async def _pin_browser_microphone(source_name: str) -> None:
+    """Force Chromium's WebRTC capture stream onto its per-meeting bot mic."""
+    try:
+        needle = f"PULSE_SOURCE={source_name}".encode()
+        mypids: set[str] = set()
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid}/environ", "rb") as source:
+                    if needle in source.read():
+                        mypids.add(pid)
+            except OSError:
+                continue
+        if not mypids:
+            return
+
+        proc = await asyncio.create_subprocess_exec(
+            "pactl",
+            "list",
+            "source-outputs",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        current: str | None = None
+        moves: list[str] = []
+        for raw in stdout.decode(errors="replace").splitlines():
+            line = raw.strip()
+            if line.startswith("Source Output #"):
+                current = line.split("#", 1)[1].strip()
+            elif current and "application.process.id" in line and '"' in line:
+                if line.split('"')[1] in mypids:
+                    moves.append(current)
+                current = None
+        for source_output in moves:
+            move = await asyncio.create_subprocess_exec(
+                "pactl",
+                "move-source-output",
+                source_output,
+                source_name,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await move.wait()
+            if move.returncode != 0:
+                logger.warning(
+                    "Could not pin source-output %s to %s",
+                    source_output,
+                    source_name,
+                )
+    except Exception as exc:
+        logger.debug("pin microphone %s: %s", source_name, exc)
+
+
+async def _audio_pin_loop(
+    sink_name: str,
+    source_name: str | None = None,
+) -> None:
     """Re-pin the browser's audio periodically — the audio stream appears a few
     seconds after joining and Chromium may recreate it mid-meeting."""
     try:
         while True:
             await _pin_browser_audio(sink_name)
+            if source_name:
+                await _pin_browser_microphone(source_name)
             await asyncio.sleep(5)
     except asyncio.CancelledError:
         pass

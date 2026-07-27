@@ -54,12 +54,21 @@ class Config(BaseSettings):
     # All gated behind LIVE_ASSISTANT_ENABLED (default off) — when off, the
     # recorder behaves exactly as before.
     LIVE_ASSISTANT_ENABLED: bool = False
+    # Keep per-meeting opt-in as the default rollout mode. Set this only after a
+    # successful pilot if every recorded meeting should get the assistant.
+    LIVE_ASSISTANT_ALL_MEETINGS: bool = False
     LIVE_WAKE_WORD: str = "протоколлер"      # stem-matched (see live_assistant)
     LIVE_WAKE_MODEL: str = "tiny"            # cheap continuous wake-word STT
     LIVE_QUESTION_MODEL: str = "small"       # accurate STT for the question only
     LIVE_WINDOW_SEC: int = 5                 # rolling window length per STT pass
+    LIVE_POLL_SEC: int = 2                   # overlapping wake-word checks
     LIVE_QUESTION_MAX_SEC: int = 12          # max audio transcribed as the question
     LIVE_BUFFER_MIN: int = 10                # rolling live-transcript memory
+    LIVE_CONTEXT_AUDIO_SEC: int = 180        # accurate re-STT cap for meeting-only Q&A
+    LIVE_STT_TIMEOUT_SEC: int = 45           # kill/restart a wedged native worker
+    LIVE_STT_QUEUE_TIMEOUT_SEC: int = 5      # shed load instead of building stale audio
+    LIVE_QUESTION_STT: str = "openai"        # "openai" | "local"
+    LIVE_QUESTION_STT_MODEL: str = "whisper-1"
     # Phase 3 — speak the answer into the meeting (TTS). SEPARATE flag: the risky
     # mic/voice path only engages when BOTH this and LIVE_ASSISTANT_ENABLED are on,
     # so deploying it doesn't change the working listen+text behaviour.

@@ -8,6 +8,7 @@ Used by the live in-meeting assistant. Two access scopes:
 Pure helpers (wake-word match, scope selection, context packing) are separated
 out so they can be unit-tested without a DB or audio.
 """
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -25,22 +26,33 @@ def _normalize(text: str) -> str:
 
 
 def wake_stem(wake_word: str) -> str:
-    """A tolerant stem of the wake word — ASR often mangles the ending
-    («протоколлер» → «протокол лер» / «протоколер»). Match on the first letters."""
-    w = _normalize(wake_word).replace(" ", "")
-    return w[: max(5, len(w) - 3)] if w else ""
+    """Normalized wake word kept for backwards-compatible helper imports."""
+    return _normalize(wake_word).replace(" ", "")
+
+
+def _wake_variants(wake_word: str) -> tuple[str, ...]:
+    """Known ASR-safe variants without matching the ordinary word «протокол»."""
+    exact = wake_stem(wake_word)
+    if not exact:
+        return ()
+    variants = {exact}
+    # Whisper often collapses a doubled consonant: протоколлер → протоколер.
+    for doubled in ("лл", "нн", "сс", "тт"):
+        variants.add(exact.replace(doubled, doubled[0]))
+    return tuple(sorted((v for v in variants if v), key=len, reverse=True))
 
 
 def contains_wake_word(text: str, wake_word: str) -> bool:
-    return bool(wake_stem(wake_word)) and wake_stem(wake_word) in _normalize(text).replace(" ", "")
+    collapsed = _normalize(text).replace(" ", "")
+    return any(variant in collapsed for variant in _wake_variants(wake_word))
 
 
 def strip_wake_word(text: str, wake_word: str) -> str:
     """Return the part of `text` AFTER the wake word (the actual question)."""
-    stem = wake_stem(wake_word)
+    variants = _wake_variants(wake_word)
     norm = _normalize(text)
-    idx = norm.replace(" ", "").find(stem) if stem else -1
-    if idx < 0:
+    collapsed = norm.replace(" ", "")
+    if not any(variant in collapsed for variant in variants):
         return text.strip()
     # Map the collapsed-index back roughly: drop tokens up to the one containing the stem.
     tokens = norm.split()
@@ -49,7 +61,7 @@ def strip_wake_word(text: str, wake_word: str) -> str:
     for tok in tokens:
         if not cut:
             seen += tok
-            if stem in seen:
+            if any(variant in seen for variant in variants):
                 cut = True
             continue
         out.append(tok)
@@ -76,7 +88,7 @@ def pack_context(items: list[tuple[float, object, str]], budget: int) -> str:
     used, kept = 0, []
     for _rank, dtv, line in items:
         if used + len(line) > budget:
-            break
+            continue
         kept.append((dtv, line))
         used += len(line)
     kept.sort(key=lambda x: x[0], reverse=True)
@@ -120,33 +132,38 @@ async def answer_question(
         now = datetime.now(timezone.utc)
         df = now - timedelta(days=days)
         items: list[tuple[float, object, str]] = []
+        recent_result, mm_result, email_result = await asyncio.gather(
+            models.get_recent_meetings_with_transcripts(days=days),
+            models.search_mm_messages(q, df, now, None, 200),
+            models.search_email_messages(q, df, now, None, 200),
+            return_exceptions=True,
+        )
         # Meetings archive (no FTS — recency-ranked). Cap to the most recent few
         # so a live answer isn't slowed by dumping the whole archive into the LLM.
-        try:
-            recent = await models.get_recent_meetings_with_transcripts(days=days)
-            for m in recent[: config.LIVE_MEETINGS_LIMIT]:
+        if isinstance(recent_result, Exception):
+            logger.warning("qa: meetings retrieval failed: %s", recent_result)
+        else:
+            for m in recent_result[: config.LIVE_MEETINGS_LIMIT]:
                 if m.get("transcript"):
                     line = f"[ВСТРЕЧА] {_fmt_dt(m['start_time'])} «{m.get('title') or m.get('topic') or '—'}»: {m['transcript']}"
                     items.append((0.0, m["start_time"], line))
                     sources_used.append("meetings")
-        except Exception as e:
-            logger.warning("qa: meetings retrieval failed: %s", e)
         # Mattermost (FTS)
-        try:
-            for mm in await models.search_mm_messages(q, df, now, None, 200):
+        if isinstance(mm_result, Exception):
+            logger.warning("qa: mm search failed: %s", mm_result)
+        else:
+            for mm in mm_result:
                 line = f"[MM] {_fmt_dt(mm['created_at'])} @{mm.get('username') or '—'} в #{mm.get('channel_name') or mm['channel_id']}: {mm['message']}"
                 items.append((float(mm.get("rank") or 0), mm["created_at"], line))
                 sources_used.append("mattermost")
-        except Exception as e:
-            logger.warning("qa: mm search failed: %s", e)
         # Email (FTS)
-        try:
-            for em in await models.search_email_messages(q, df, now, None, 200):
+        if isinstance(email_result, Exception):
+            logger.warning("qa: email search failed: %s", email_result)
+        else:
+            for em in email_result:
                 line = f"[EMAIL] {_fmt_dt(em['received_at'])} от {em.get('from_email') or '—'} / Тема: {em.get('subject') or ''} / {(em.get('body_text') or '')[:1000]}"
                 items.append((float(em.get("rank") or 0), em["received_at"], line))
                 sources_used.append("email")
-        except Exception as e:
-            logger.warning("qa: email search failed: %s", e)
 
         live = (live_transcript or "").strip()
         if live:

@@ -80,6 +80,8 @@ async def lifespan(app: FastAPI):
     #    55 min covers: longest meeting (45 min) + transcription (10 min).
     await wait_for_idle(timeout=3300)
 
+    from services.transcriber import close_live_transcriber
+    await close_live_transcriber()
     await close_db()
     logger.info("telemost-web stopped")
 

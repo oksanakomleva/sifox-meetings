@@ -809,18 +809,50 @@ async def get_meeting_full_access(meeting_id: str) -> bool:
     return bool(row and row["assistant_full_access"])
 
 
+async def set_meeting_assistant_enabled(meeting_id: str, value: bool) -> bool:
+    """Opt one meeting into/out of the globally gated live assistant."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE meetings
+               SET assistant_enabled = $1, updated_at = NOW()
+             WHERE id = $2
+            """,
+            value,
+            meeting_id,
+        )
+    return result.split()[-1] != "0"
+
+
 async def save_live_qa(
-    meeting_id: str, question: str, answer: str | None, scope: str, sources: list[str]
+    meeting_id: str,
+    question: str,
+    answer: str | None,
+    scope: str,
+    sources: list[str],
+    *,
+    spoken: bool = False,
+    latency_ms: int | None = None,
+    error: str | None = None,
 ) -> None:
     """Audit log of a live in-meeting assistant Q&A."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO live_qa (meeting_id, question, answer, scope, sources)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO live_qa
+              (meeting_id, question, answer, scope, sources, spoken, latency_ms, error)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             """,
-            meeting_id, question, answer, scope, sources,
+            meeting_id,
+            question,
+            answer,
+            scope,
+            sources,
+            spoken,
+            latency_ms,
+            error,
         )
 
 
@@ -829,7 +861,8 @@ async def get_live_qa(meeting_id: str) -> list[dict]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT question, answer, scope, sources, asked_at FROM live_qa "
+            "SELECT question, answer, scope, sources, spoken, latency_ms, error, "
+            "asked_at FROM live_qa "
             "WHERE meeting_id = $1 ORDER BY asked_at ASC",
             meeting_id,
         )
