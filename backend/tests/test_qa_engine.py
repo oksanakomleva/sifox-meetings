@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from services.qa_engine import (
+    _SYSTEM_VOICE,
     contains_wake_word,
     strip_wake_word,
     select_scope,
@@ -34,6 +35,12 @@ class TestWakeWord:
 
     def test_ordinary_protocol_does_not_trigger(self):
         assert not contains_wake_word("протокол встречи готов", WAKE)
+
+
+def test_voice_prompt_prioritizes_current_meeting_and_excludes_wake_name():
+    assert "[ТЕКУЩАЯ ВСТРЕЧА]" in _SYSTEM_VOICE
+    assert "игнорируй противоречащие сведения" in _SYSTEM_VOICE
+    assert "никогда не является частью названия проекта" in _SYSTEM_VOICE
 
 
 class TestStripWakeWord:

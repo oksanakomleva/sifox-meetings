@@ -15,7 +15,7 @@ from services.live_assistant import (
     merge_live_transcript,
     transcribe_wake_window,
 )
-from services.recorder import _mic_control_state
+from services.recorder import _create_pulse_source, _mic_control_state
 
 
 def test_rolling_pcm_buffer_keeps_only_configured_history():
@@ -58,6 +58,35 @@ def test_mic_action_labels_map_to_current_state():
     assert _mic_control_state("Выключить микрофон") == "on"
     assert _mic_control_state("Mute microphone") == "on"
     assert _mic_control_state("mic-button opaque") == "unknown"
+
+
+def test_virtual_mic_uses_remapped_source(monkeypatch):
+    captured = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b"42\n", b""
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = args
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    module_id = asyncio.run(
+        _create_pulse_source("botmic_source_test", "botmic_test.monitor")
+    )
+
+    assert module_id == 42
+    assert captured["args"][:3] == (
+        "pactl",
+        "load-module",
+        "module-remap-source",
+    )
+    assert "master=botmic_test.monitor" in captured["args"]
+    assert "source_name=botmic_source_test" in captured["args"]
 
 
 def test_live_diagnostic_is_copied_and_updated():

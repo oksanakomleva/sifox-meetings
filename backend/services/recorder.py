@@ -297,6 +297,8 @@ async def _record_pipeline(meeting_id: str) -> None:
     sink_module: int | None = None   # pulse module index, for reliable unload
     botmic_name: str | None = None   # virtual mic for voice answers (Phase 3)
     botmic_module: int | None = None
+    botmic_source_name: str | None = None
+    botmic_source_module: int | None = None
     had_participants = False
     audio_proc: AudioCapture | None = None
     pin_task: "asyncio.Task | None" = None
@@ -321,17 +323,29 @@ async def _record_pipeline(meeting_id: str) -> None:
         sink_module = await _create_pulse_sink(sink_name)
         await asyncio.sleep(0.5)
 
-        # 1b. Virtual microphone for the bot (Phase 3, voice answers). Its monitor
-        # becomes the default capture source BEFORE Chromium launches, so the bot's
-        # mic = this sink; paplay-ing TTS into it transmits to the meeting. Best
-        # effort — on any failure we just disable voice and keep recording.
+        # 1b. Virtual microphone for the bot (Phase 3, voice answers). A remapped
+        # source over this sink's monitor becomes Chromium's capture device before
+        # launch; paplay-ing TTS into the sink then transmits it to the meeting.
+        # Best effort — on any failure we disable voice and keep recording.
         if speak_enabled:
             try:
                 botmic_name = f"botmic_{meeting_id[:8]}"
                 botmic_module = await _create_pulse_sink(botmic_name)
+                if botmic_module is None:
+                    raise RuntimeError("could not create bot microphone sink")
+                botmic_source_name = f"botmic_source_{meeting_id[:8]}"
+                botmic_source_module = await _create_pulse_source(
+                    botmic_source_name,
+                    f"{botmic_name}.monitor",
+                )
             except Exception as e:
                 logger.warning("Bot mic setup failed (%s) — voice disabled: %s", meeting_id[:8], e)
+                if botmic_module is not None and botmic_name:
+                    await _delete_pulse_sink(botmic_name, botmic_module)
                 botmic_name = None
+                botmic_module = None
+                botmic_source_name = None
+                botmic_source_module = None
 
         # 2. Browser — check Xvfb is alive, then launch with timeout
         display = os.environ.get("DISPLAY", ":99")
@@ -371,11 +385,11 @@ async def _record_pipeline(meeting_id: str) -> None:
                 "PULSE_SERVER": pulse,
                 "PULSE_SINK": sink_name,
             }
-            if botmic_name:
+            if botmic_source_name:
                 # Bind this Chromium instance to its own virtual microphone.
                 # Relying only on PulseAudio's process-global default source
                 # races when two meetings start at the same time.
-                browser_env["PULSE_SOURCE"] = f"{botmic_name}.monitor"
+                browser_env["PULSE_SOURCE"] = botmic_source_name
             browser = await asyncio.wait_for(
                 pw.chromium.launch(
                     headless=False,
@@ -402,7 +416,7 @@ async def _record_pipeline(meeting_id: str) -> None:
         pin_task = asyncio.create_task(
             _audio_pin_loop(
                 sink_name,
-                f"{botmic_name}.monitor" if botmic_name else None,
+                botmic_source_name,
             )
         )
 
@@ -444,14 +458,15 @@ async def _record_pipeline(meeting_id: str) -> None:
         if assistant_enabled:
             from services.live_assistant import run_live_assistant, speak_text
             speak_cb = None
-            if botmic_name:
+            if botmic_name and botmic_source_name:
                 _mic = botmic_name
+                _source = botmic_source_name
 
                 async def speak_cb(text: str):
                     if not await _set_bot_mic(page, enabled=True):
                         raise RuntimeError("Telemost microphone could not be enabled")
                     try:
-                        await _pin_browser_microphone(f"{_mic}.monitor")
+                        await _pin_browser_microphone(_source)
                         if not await speak_text(text, _mic):
                             raise RuntimeError("TTS playback into the bot microphone failed")
                     finally:
@@ -532,6 +547,11 @@ async def _record_pipeline(meeting_id: str) -> None:
             live_task.cancel()
             await asyncio.gather(live_task, return_exceptions=True)
         await _delete_pulse_sink(sink_name, sink_module)
+        if botmic_source_module is not None:
+            await _unload_pulse_module(
+                botmic_source_module,
+                botmic_source_name or "bot microphone source",
+            )
         if botmic_name:
             try:
                 await _delete_pulse_sink(botmic_name, botmic_module)
@@ -1221,6 +1241,35 @@ async def _create_pulse_sink(name: str) -> int | None:
         return None
 
 
+async def _create_pulse_source(name: str, master_monitor: str) -> int:
+    """Expose a sink monitor as a regular named microphone source.
+
+    Chromium can capture a monitor-class Pulse source, but Telemost may refuse
+    to unmute it as a microphone. A remapped source presents the same PCM as a
+    normal WebRTC input device while the null sink stays the TTS target.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "pactl",
+        "load-module",
+        "module-remap-source",
+        f"master={master_monitor}",
+        f"source_name={name}",
+        f"source_properties=device.description={name}",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        tail = stderr.decode(errors="replace")[-500:] if stderr else ""
+        raise RuntimeError(
+            f"could not create remapped microphone source ({proc.returncode}): {tail}"
+        )
+    try:
+        return int(stdout.decode().strip())
+    except (ValueError, AttributeError) as exc:
+        raise RuntimeError("remapped microphone source returned no module id") from exc
+
+
 async def _set_default_sink(name: str) -> None:
     proc = await asyncio.create_subprocess_exec(
         "pactl", "set-default-sink", name,
@@ -1382,6 +1431,25 @@ async def _delete_pulse_sink(name: str, module_id: int | None = None) -> None:
         stderr=asyncio.subprocess.DEVNULL,
     )
     await proc.wait()
+
+
+async def _unload_pulse_module(module_id: int, label: str) -> None:
+    """Unload a PulseAudio module whose creation returned an exact index."""
+    proc = await asyncio.create_subprocess_exec(
+        "pactl",
+        "unload-module",
+        str(module_id),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        logger.warning(
+            "Pulse module %s (%s) could not be unloaded: %s",
+            module_id,
+            label,
+            stderr.decode(errors="replace")[-300:] if stderr else "",
+        )
 
 
 # ── Transcript building ───────────────────────────────────────────────────────
