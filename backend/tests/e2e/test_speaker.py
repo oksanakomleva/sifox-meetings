@@ -22,15 +22,21 @@ DISPLAY = os.environ.get("DISPLAY", ":99")
 PULSE_SERVER = os.environ.get("PULSE_SERVER", "unix:/tmp/pulse.sock")
 
 
-async def _log_controls(page) -> list[str]:
+async def _log_controls(page) -> list[dict]:
     try:
-        labels = await page.evaluate(
+        controls = await page.evaluate(
             "() => [...document.querySelectorAll(\"button,[role='button']\")]"
-            ".map(e => (e.getAttribute('aria-label') || e.getAttribute('title') || '').trim())"
-            ".filter(Boolean).slice(0, 60)"
+            ".map(e => ({"
+            " label: e.getAttribute('aria-label'),"
+            " title: e.getAttribute('title'),"
+            " testid: e.getAttribute('data-testid'),"
+            " state: e.getAttribute('data-state'),"
+            " pressed: e.getAttribute('aria-pressed'),"
+            " cls: String(e.className || '').slice(0, 160)"
+            "})).filter(x => x.label || x.title || x.testid || x.state).slice(0, 60)"
         )
-        logger.info("Telemost controls: %s", labels)
-        return labels
+        logger.info("Telemost controls: %s", controls)
+        return controls
     except Exception as exc:
         logger.warning("Could not inspect Telemost controls: %s", exc)
         return []
@@ -47,16 +53,24 @@ async def _ensure_microphone_on(page) -> bool:
     disable_terms = ("выключить", "mute microphone", "turn off", "disable")
 
     controls = page.locator("button,[role='button']")
+    clicked_unknown = False
     for _ in range(3):
+        unknown_control = None
+        clicked = False
         for index in range(await controls.count()):
             control = controls.nth(index)
             try:
                 if not await control.is_visible():
                     continue
-                label = " ".join(filter(None, [
+                attributes = [
                     await control.get_attribute("aria-label"),
                     await control.get_attribute("title"),
-                ])).strip()
+                    await control.get_attribute("data-testid"),
+                    await control.get_attribute("data-state"),
+                    await control.get_attribute("data-status"),
+                    await control.get_attribute("class"),
+                ]
+                label = " ".join(filter(None, attributes)).strip()
                 normalized = f" {label.lower()}"
                 if not any(term in normalized for term in mic_terms):
                     continue
@@ -66,14 +80,46 @@ async def _ensure_microphone_on(page) -> bool:
                 if any(term in normalized for term in enable_terms):
                     logger.info("Microphone is muted; clicking %r", label)
                     await control.click(timeout=3_000)
-                    await page.wait_for_timeout(800)
+                    await page.wait_for_timeout(1_500)
+                    clicked = True
                     break
                 if any(term in normalized for term in disable_terms):
                     logger.info("Microphone is ON (%r)", label)
                     return True
+                if any(
+                    token in normalized
+                    for token in (" muted", " off", " disabled", " inactive")
+                ):
+                    logger.info("Microphone state is OFF; clicking %r", label)
+                    await control.click(timeout=3_000)
+                    await page.wait_for_timeout(1_500)
+                    clicked = True
+                    break
+                if any(
+                    token in normalized
+                    for token in (" unmuted", " on", " enabled", " active")
+                ):
+                    logger.info("Microphone state is ON (%r)", label)
+                    return True
+                unknown_control = control
             except Exception:
                 continue
-        else:
+
+        if clicked:
+            continue
+        if unknown_control is not None and not clicked_unknown:
+            # Telemost sometimes exposes only data-testid="mic-button" with no
+            # state. Guests start muted, so click exactly once; never click it
+            # again on a subsequent probe and accidentally toggle back to mute.
+            logger.warning("Microphone state is opaque; performing one fallback click")
+            await unknown_control.click(timeout=3_000)
+            await page.wait_for_timeout(1_500)
+            clicked_unknown = True
+            continue
+        if clicked_unknown:
+            logger.warning("Microphone control remains opaque after one click; treating it as ON")
+            return True
+        if unknown_control is None:
             break
 
     await _log_controls(page)
@@ -192,8 +238,20 @@ async def speak_in_meeting(meeting_url: str, duration_minutes: int = 5) -> bool:
             # The in-call toolbar may be a different DOM tree from pre-join.
             # Verify once more and fail loudly instead of reporting a false pass.
             if not await _ensure_microphone_on(page):
+                debug_dir = Path("/tmp/recorder-debug")
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                await page.screenshot(
+                    path=str(debug_dir / "e2e-speaker-mic-failed.png"),
+                    full_page=True,
+                )
                 raise RuntimeError("Test Speaker joined, but its microphone is still muted")
 
+            debug_dir = Path("/tmp/recorder-debug")
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            await page.screenshot(
+                path=str(debug_dir / "e2e-speaker-ready.png"),
+                full_page=True,
+            )
             logger.info("E2E_SPEAKER_READY — joined with microphone ON")
             print("E2E_SPEAKER_READY", flush=True)
             logger.info("✅ Test Speaker joined — streaming test_audio.wav for %d min", duration_minutes)

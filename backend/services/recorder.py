@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 
 # In-memory registry of active recordings: meeting_id -> task
 _active: dict[str, asyncio.Task] = {}
+# Test-only graceful finish signals. The E2E speaker is independently verified
+# through its job status, so the recorder need not rely on Telemost's obfuscated
+# participant-name DOM to notice that the test participant came and left.
+_e2e_finish_requested: set[str] = set()
 
 # Set to True on SIGTERM — scheduler stops launching new recordings
 _shutdown_requested: bool = False
@@ -89,6 +93,14 @@ def spawn_tracked(meeting_id: str, coro, *, name: str) -> bool:
     task = asyncio.create_task(coro, name=name)
     _active[meeting_id] = task
     task.add_done_callback(lambda _: _active.pop(meeting_id, None))
+    return True
+
+
+def request_e2e_finish(meeting_id: str) -> bool:
+    """Ask an active E2E recording to finish through its normal processing path."""
+    if meeting_id not in _active:
+        return False
+    _e2e_finish_requested.add(meeting_id)
     return True
 
 
@@ -440,7 +452,12 @@ async def _record_pipeline(meeting_id: str) -> None:
             )
 
         # 6. Wait for meeting end
-        had_participants = await _wait_for_meeting_end(page, participants, meeting.get("start_time"))
+        had_participants = await _wait_for_meeting_end(
+            page,
+            participants,
+            meeting.get("start_time"),
+            meeting_id=meeting_id,
+        )
         tracker.cancel()
         if live_task:
             live_task.cancel()
@@ -500,6 +517,7 @@ async def _record_pipeline(meeting_id: str) -> None:
                 await _delete_pulse_sink(botmic_name, botmic_module)
             except Exception:
                 pass
+        _e2e_finish_requested.discard(meeting_id)
 
 
 # ── Shared post-capture pipeline ──────────────────────────────────────────────
@@ -796,7 +814,10 @@ async def _enable_bot_mic(page) -> bool:
 
     enable_terms = ("включить", "unmute", "turn on", "enable")
     disable_terms = ("выключить", "mute microphone", "turn off", "disable")
+    clicked_unknown = False
     for _ in range(3):
+        unknown_loc = None
+        clicked = False
         for sel in _MIC_BUTTON_SELECTORS:
             try:
                 loc = page.locator(sel).first
@@ -805,27 +826,60 @@ async def _enable_bot_mic(page) -> bool:
                 label = " ".join(filter(None, [
                     await loc.get_attribute("aria-label"),
                     await loc.get_attribute("title"),
+                    await loc.get_attribute("data-testid"),
+                    await loc.get_attribute("data-state"),
+                    await loc.get_attribute("data-status"),
+                    await loc.get_attribute("class"),
                 ])).strip()
                 normalized = label.lower()
                 # Labels describe the action, not the current state.
                 if any(term in normalized for term in enable_terms):
                     await loc.click(timeout=2000)
                     logger.info("Bot mic was muted; clicked %r", label)
-                    await page.wait_for_timeout(800)
+                    await page.wait_for_timeout(1500)
+                    clicked = True
                     break
                 if any(term in normalized for term in disable_terms):
                     logger.info("Bot mic is ON (%r)", label)
                     return True
+                if any(token in normalized for token in (" muted", " off", " disabled", " inactive")):
+                    await loc.click(timeout=2000)
+                    logger.info("Bot mic state was OFF; clicked %r", label)
+                    await page.wait_for_timeout(1500)
+                    clicked = True
+                    break
+                if any(token in normalized for token in (" unmuted", " on", " enabled", " active")):
+                    logger.info("Bot mic state is ON (%r)", label)
+                    return True
+                unknown_loc = loc
             except Exception:
                 continue
-        else:
+
+        if clicked:
+            continue
+        if unknown_loc is not None and not clicked_unknown:
+            logger.warning("Bot mic state is opaque; performing one fallback click")
+            await unknown_loc.click(timeout=2000)
+            await page.wait_for_timeout(1500)
+            clicked_unknown = True
+            continue
+        if clicked_unknown:
+            logger.warning("Bot mic control remains opaque after one click; assuming ON")
+            return True
+        if unknown_loc is None:
             break
 
     logger.warning("Bot mic: could not verify ON state — answer won't be heard")
     return False
 
 
-async def _wait_for_meeting_end(page, initial_participants: set[str], scheduled_start=None) -> bool:
+async def _wait_for_meeting_end(
+    page,
+    initial_participants: set[str],
+    scheduled_start=None,
+    *,
+    meeting_id: str | None = None,
+) -> bool:
     """Block until the meeting ends. Returns whether any real participant (besides
     Protocaller) was ever present — False means nobody showed up (no_show)."""
     meeting_started = len(initial_participants) > 0
@@ -836,6 +890,10 @@ async def _wait_for_meeting_end(page, initial_participants: set[str], scheduled_
     GRACE_MINUTES = 10
 
     while True:
+        if meeting_id and meeting_id in _e2e_finish_requested:
+            _e2e_finish_requested.discard(meeting_id)
+            logger.info("E2E finish requested for %s after verified speaker exit", meeting_id[:8])
+            return True
         await asyncio.sleep(config.PARTICIPANT_POLL_INTERVAL)
 
         # Hard deadline

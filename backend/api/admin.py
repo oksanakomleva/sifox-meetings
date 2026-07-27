@@ -747,6 +747,10 @@ _speaker_jobs: dict[str, dict] = {}
 _MAX_SPEAKER_JOBS = 20
 
 
+class FinishE2ERequest(BaseModel):
+    meeting_id: str = Field(min_length=8, max_length=64)
+
+
 @router.post("/test/run-speaker-sync")
 async def run_speaker_sync(req: LaunchSpeakerRequest, caller: TestOrAdminUser):
     """Run test_speaker.py synchronously for up to 30s and return its output (for debugging)."""
@@ -854,6 +858,33 @@ async def test_speaker_status(job_id: str, caller: TestOrAdminUser):
     if not job:
         raise HTTPException(404, "Test Speaker job not found")
     return job
+
+
+@router.get("/test/speaker-jobs")
+async def test_speaker_jobs(caller: TestOrAdminUser):
+    """Recent jobs for diagnostics when a local smoke runner was interrupted."""
+    return {
+        "jobs": sorted(
+            _speaker_jobs.values(),
+            key=lambda job: job.get("created_at", 0),
+            reverse=True,
+        )
+    }
+
+
+@router.post("/test/finish-e2e-recording")
+async def finish_e2e_recording(req: FinishE2ERequest, caller: TestOrAdminUser):
+    """Gracefully finish recording after the verified Test Speaker has exited."""
+    meeting = await models.get_meeting(req.meeting_id)
+    if not meeting:
+        raise HTTPException(404, "Meeting not found")
+    if meeting.get("status") != "recording":
+        raise HTTPException(409, f"Meeting is not recording (status={meeting.get('status')})")
+
+    from services.recorder import request_e2e_finish
+    if not request_e2e_finish(req.meeting_id):
+        raise HTTPException(409, "Recording task is not active in this process")
+    return {"ok": True, "meeting_id": req.meeting_id}
 
 
 async def _launch_speaker(job_id: str, meeting_url: str, duration_minutes: int) -> None:

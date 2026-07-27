@@ -238,9 +238,9 @@ class SmokeTest:
         print("  +0 min  — calendar event created, sync triggered")
         print("  +3 min  — recorder bot joins the meeting")
         print("  +3 min  — Test Speaker joins with mic ON and streams test_audio.wav")
-        print("  +8 min  — Test Speaker leaves, bot detects empty meeting")
-        print("  +13 min — Whisper transcribes, OpenAI analyzes")
-        print("  +15 min — status=done, artifacts ready\n")
+        print("  +5 min  — Test Speaker leaves; recorder gets a graceful E2E finish signal")
+        print("  +7 min  — Whisper transcribes, OpenAI analyzes")
+        print("  +10 min — status=done, artifacts ready\n")
 
         e2e_data = self.start_e2e_test()
         if not e2e_data:
@@ -262,11 +262,17 @@ class SmokeTest:
         speaker_launched = False
         speaker_job_id = None
         speaker_confirmed = False
+        e2e_finish_requested = False
         meeting_url = e2e_data.get("meeting_url", "")
 
         while time.time() < deadline:
             try:
-                r = self._get("/api/admin/meetings?limit=20")
+                # The admin list is ordered by start_time descending. A busy
+                # calendar can have dozens of future meetings, so limit=20 can
+                # hide the just-started E2E meeting and prevent Test Speaker
+                # from ever launching. Fetch a bounded wider window while we
+                # still use the direct meeting ID returned by start-e2e.
+                r = self._get("/api/admin/meetings?limit=500")
             except Exception as e:
                 # Railway may be temporarily busy (Playwright + PulseAudio)
                 print(f"  [polling] connection error, retrying in 20s: {type(e).__name__}")
@@ -303,7 +309,7 @@ class SmokeTest:
                             "/api/admin/test/launch-speaker",
                             json={
                                 "meeting_url": meeting_url,
-                                "duration_minutes": 5,
+                                "duration_minutes": 2,
                             },
                         )
                         if sr.status_code == 200:
@@ -316,7 +322,7 @@ class SmokeTest:
                     except Exception as se:
                         print(f"  [speaker] WARNING: could not launch: {se}")
 
-                if speaker_job_id and not speaker_confirmed:
+                if speaker_job_id and not e2e_finish_requested:
                     try:
                         speaker_status_response = self._get(
                             f"/api/admin/test/speaker-status/{speaker_job_id}"
@@ -324,13 +330,32 @@ class SmokeTest:
                         if speaker_status_response.status_code == 200:
                             speaker_status = speaker_status_response.json()
                             state = speaker_status.get("status")
-                            if speaker_status.get("ready") and state in ("speaking", "completed"):
+                            if (
+                                not speaker_confirmed
+                                and speaker_status.get("ready")
+                                and state in ("speaking", "completed")
+                            ):
                                 speaker_confirmed = True
                                 self._check(
                                     "Test Speaker joined with microphone ON",
                                     True,
                                     f"job {speaker_job_id[:8]} status={state}",
                                 )
+                            if state == "completed" and speaker_status.get("ready"):
+                                finish_response = self._post(
+                                    "/api/admin/test/finish-e2e-recording",
+                                    json={"meeting_id": meeting_id},
+                                )
+                                if finish_response.status_code == 200:
+                                    e2e_finish_requested = True
+                                    print("  [speaker] Finished speaking; recorder stop requested")
+                                elif finish_response.status_code == 409 and status != "recording":
+                                    e2e_finish_requested = True
+                                else:
+                                    print(
+                                        "  [speaker] WARNING: finish signal returned "
+                                        f"{finish_response.status_code}: {finish_response.text[:150]}"
+                                    )
                             elif state == "failed":
                                 self._check(
                                     "Test Speaker joined with microphone ON",
