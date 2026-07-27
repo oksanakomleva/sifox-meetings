@@ -865,7 +865,10 @@ async def _set_bot_mic(page, *, enabled: bool) -> bool:
         pass
 
     mic_terms = ("микроф", "microphone", " mic")
-    for _ in range(3):
+    clicked_opaque = False
+    desired = "on" if enabled else "off"
+    opposite = "off" if enabled else "on"
+    for _ in range(4):
         await _dismiss_media_modals(page)
         controls = page.locator("button,[role='button']")
         candidates: list[tuple[int, int, object, str]] = []
@@ -882,6 +885,7 @@ async def _set_bot_mic(page, *, enabled: bool) -> bool:
                     await control.get_attribute("data-status"),
                     await control.get_attribute("aria-pressed"),
                     await control.get_attribute("class"),
+                    (await control.text_content() or "")[:100],
                 ])).strip()
                 if not any(term in f" {label.lower()}" for term in mic_terms):
                     continue
@@ -909,17 +913,21 @@ async def _set_bot_mic(page, *, enabled: bool) -> bool:
                 continue
 
         candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        desired = "on" if enabled else "off"
-        opposite = "off" if enabled else "on"
+        opaque = None
         for score, _index, control, label in candidates:
             state = _mic_control_state(label)
             if state == desired:
                 logger.info("Bot mic verified %s (%r, score=%d)", desired, label, score)
                 return True
+            if state == "unknown" and opaque is None:
+                opaque = (score, control, label)
             if state != opposite:
                 continue
             try:
-                await control.click(timeout=3_000)
+                # Telemost can briefly leave an invisible overlay over the
+                # in-call toolbar. The same forced click is already used by the
+                # proven E2E join path and targets only a visible mic control.
+                await control.click(force=True, timeout=3_000)
                 logger.info(
                     "Bot mic switching %s via %r (score=%d)",
                     desired,
@@ -927,20 +935,39 @@ async def _set_bot_mic(page, *, enabled: bool) -> bool:
                     score,
                 )
                 await page.wait_for_timeout(1_500)
-                refreshed = " ".join(filter(None, [
-                    await control.get_attribute("aria-label"),
-                    await control.get_attribute("title"),
-                    await control.get_attribute("data-testid"),
-                    await control.get_attribute("data-state"),
-                    await control.get_attribute("data-status"),
-                    await control.get_attribute("aria-pressed"),
-                    await control.get_attribute("class"),
-                ])).strip()
-                if _mic_control_state(refreshed) == desired:
-                    logger.info("Bot mic state changed to %s (%r)", desired, refreshed)
-                    return True
+                # Telemost replaces the toolbar node after a click, so don't
+                # inspect the stale locator. Re-scan the live DOM next pass.
+                break
             except Exception:
                 continue
+        else:
+            if opaque is not None and not clicked_opaque:
+                score, control, label = opaque
+                try:
+                    # Some Telemost builds expose only data-testid="mic-button"
+                    # and no state. The caller invokes this setter only for a
+                    # real state transition (muted→speaking or speaking→muted),
+                    # so one guarded fallback click is deterministic.
+                    await control.click(force=True, timeout=3_000)
+                    logger.warning(
+                        "Bot mic state opaque; one fallback click for %s via %r "
+                        "(score=%d)",
+                        desired,
+                        label,
+                        score,
+                    )
+                    await page.wait_for_timeout(1_500)
+                    clicked_opaque = True
+                    continue
+                except Exception:
+                    pass
+            if opaque is not None and clicked_opaque:
+                logger.warning(
+                    "Bot mic remained opaque after one click; treating state as %s",
+                    desired,
+                )
+                return True
+            break
 
     logger.warning("Bot mic: could not verify state=%s", "ON" if enabled else "OFF")
     return False
