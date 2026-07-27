@@ -808,14 +808,14 @@ async def _enable_bot_mic(page) -> bool:
                 ])).strip()
                 normalized = label.lower()
                 # Labels describe the action, not the current state.
-                if any(term in normalized for term in disable_terms):
-                    logger.info("Bot mic is ON (%r)", label)
-                    return True
                 if any(term in normalized for term in enable_terms):
                     await loc.click(timeout=2000)
                     logger.info("Bot mic was muted; clicked %r", label)
                     await page.wait_for_timeout(800)
                     break
+                if any(term in normalized for term in disable_terms):
+                    logger.info("Bot mic is ON (%r)", label)
+                    return True
             except Exception:
                 continue
         else:

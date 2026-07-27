@@ -63,14 +63,14 @@ async def _ensure_microphone_on(page) -> bool:
 
                 # The label describes the action. "Выключить микрофон" means
                 # it is already on; "Включить микрофон" means it is muted.
-                if any(term in normalized for term in disable_terms):
-                    logger.info("Microphone is ON (%r)", label)
-                    return True
                 if any(term in normalized for term in enable_terms):
                     logger.info("Microphone is muted; clicking %r", label)
                     await control.click(timeout=3_000)
                     await page.wait_for_timeout(800)
                     break
+                if any(term in normalized for term in disable_terms):
+                    logger.info("Microphone is ON (%r)", label)
+                    return True
             except Exception:
                 continue
         else:
