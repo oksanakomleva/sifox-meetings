@@ -3,9 +3,11 @@ import asyncio
 import logging
 import os
 import sys
+import time
+import uuid
 from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Annotated
 
 from auth.deps import get_test_or_admin_user
@@ -610,7 +612,8 @@ async def start_e2e_test(caller: TestOrAdminUser):
     Start a fully automated E2E test:
     1. Creates a Google Calendar event (now + 3 min) with TEST_MEETING_URL
     2. Triggers calendar sync so the bot picks it up
-    3. Schedules test_speaker.py to join the meeting and stream test_audio.wav
+    3. Returns the meeting to the smoke runner, which launches test_speaker.py
+       as soon as the recorder reaches status=recording.
 
     Auth: session cookie (admin) OR X-Test-Api-Key header (automated tests).
     Requires TEST_MEETING_URL env var (permanent Telemost room link).
@@ -675,9 +678,10 @@ async def _start_e2e_test_impl(caller: dict) -> dict:
     # Sync immediately so the bot sees the new event right away
     await sync_all_users()
 
-    # NOTE: Test Speaker is NOT auto-scheduled here anymore.
-    # The smoke test polls for status=recording and then calls POST /test/launch-speaker.
-    # This avoids long-lived asyncio tasks that get killed on Railway redeploy.
+    # The smoke runner polls for status=recording and then calls
+    # POST /test/launch-speaker. Starting only after the recorder has joined
+    # avoids losing the beginning of the WAV and makes the second participant
+    # visible to the recorder's meeting-end detector.
 
     # Look up the meeting record so we can return its ID to the smoke test
     meeting = await models.get_meeting_by_url(meeting_url)
@@ -689,7 +693,7 @@ async def _start_e2e_test_impl(caller: dict) -> dict:
         "meeting_id": meeting_id,
         "calendar_event_id": event_id,
         "calendar_id": cal["google_calendar_id"],
-        "message": "Calendar event created for +3 min, sync triggered, Test Speaker will join at +6 min",
+        "message": "Calendar event created for +3 min; Test Speaker will join when recording starts",
     }
 
 
@@ -735,8 +739,12 @@ async def _play_audio_to_sink(paplay: str, audio_file: str, sink_name: str) -> N
 
 
 class LaunchSpeakerRequest(BaseModel):
-    meeting_url: str
-    duration_minutes: int = 5
+    meeting_url: str = Field(min_length=10, max_length=2000)
+    duration_minutes: int = Field(default=5, ge=1, le=15)
+
+
+_speaker_jobs: dict[str, dict] = {}
+_MAX_SPEAKER_JOBS = 20
 
 
 @router.post("/test/run-speaker-sync")
@@ -806,14 +814,51 @@ async def debug_test_speaker(caller: TestOrAdminUser):
 async def launch_test_speaker(req: LaunchSpeakerRequest, caller: TestOrAdminUser):
     """
     Launch Test Speaker immediately (called by smoke test when it detects status=recording).
-    Returns immediately — speaker runs in background.
+    Returns a job ID; the smoke test must wait for status=speaking so a muted or
+    failed browser cannot produce a false-positive E2E result.
     """
-    asyncio.create_task(_launch_speaker(req.meeting_url, req.duration_minutes))
-    return {"ok": True, "message": f"Test Speaker launching for {req.duration_minutes} min"}
+    finished = [
+        job_id for job_id, job in _speaker_jobs.items()
+        if job.get("status") in ("completed", "failed")
+    ]
+    while len(_speaker_jobs) >= _MAX_SPEAKER_JOBS and finished:
+        _speaker_jobs.pop(finished.pop(0), None)
+    if len(_speaker_jobs) >= _MAX_SPEAKER_JOBS:
+        raise HTTPException(503, "Too many active Test Speaker jobs")
+
+    job_id = uuid.uuid4().hex
+    _speaker_jobs[job_id] = {
+        "job_id": job_id,
+        "status": "starting",
+        "ready": False,
+        "returncode": None,
+        "error": None,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    asyncio.create_task(
+        _launch_speaker(job_id, req.meeting_url, req.duration_minutes),
+        name=f"e2e-speaker-{job_id[:8]}",
+    )
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "status": "starting",
+        "message": f"Test Speaker launching for {req.duration_minutes} min",
+    }
 
 
-async def _launch_speaker(meeting_url: str, duration_minutes: int) -> None:
+@router.get("/test/speaker-status/{job_id}")
+async def test_speaker_status(job_id: str, caller: TestOrAdminUser):
+    job = _speaker_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Test Speaker job not found")
+    return job
+
+
+async def _launch_speaker(job_id: str, meeting_url: str, duration_minutes: int) -> None:
     """Launch test_speaker.py as a subprocess — no delay."""
+    job = _speaker_jobs[job_id]
     speaker_script = os.path.join(
         os.path.dirname(__file__), "..", "tests", "e2e", "test_speaker.py"
     )
@@ -821,22 +866,65 @@ async def _launch_speaker(meeting_url: str, duration_minutes: int) -> None:
 
     if not os.path.exists(speaker_script):
         logger.error("test_speaker.py not found at %s", speaker_script)
+        job.update(
+            status="failed",
+            error=f"test_speaker.py not found at {speaker_script}",
+            updated_at=time.time(),
+        )
         return
 
     logger.info("Launching Test Speaker: %s --url %s --duration %d", speaker_script, meeting_url, duration_minutes)
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable, speaker_script,
-        "--url", meeting_url,
-        "--duration", str(duration_minutes),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    if stdout:
-        logger.info("Test Speaker stdout:\n%s", stdout.decode(errors="replace"))
-    if stderr:
-        logger.warning("Test Speaker stderr:\n%s", stderr.decode(errors="replace"))
-    logger.info("Test Speaker finished with exit code %d", proc.returncode)
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, speaker_script,
+            "--url", meeting_url,
+            "--duration", str(duration_minutes),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        job.update(status="joining", pid=proc.pid, updated_at=time.time())
+
+        async def _read_stream(stream, lines: list[str], *, is_error: bool) -> None:
+            while True:
+                raw = await stream.readline()
+                if not raw:
+                    return
+                line = raw.decode(errors="replace").rstrip()
+                lines.append(line)
+                del lines[:-100]
+                if "E2E_SPEAKER_READY" in line:
+                    job.update(status="speaking", ready=True, updated_at=time.time())
+                if is_error:
+                    logger.info("Test Speaker: %s", line)
+                else:
+                    logger.info("Test Speaker stdout: %s", line)
+
+        await asyncio.gather(
+            _read_stream(proc.stdout, stdout_lines, is_error=False),
+            _read_stream(proc.stderr, stderr_lines, is_error=True),
+            proc.wait(),
+        )
+        job.update(
+            status="completed" if proc.returncode == 0 and job["ready"] else "failed",
+            returncode=proc.returncode,
+            error=None if proc.returncode == 0 and job["ready"] else (
+                "\n".join(stderr_lines[-10:])[-2000:]
+                or "Test Speaker exited before confirming microphone readiness"
+            ),
+            stdout="\n".join(stdout_lines[-20:])[-3000:],
+            stderr="\n".join(stderr_lines[-20:])[-3000:],
+            updated_at=time.time(),
+        )
+        logger.info("Test Speaker finished with exit code %d", proc.returncode)
+    except Exception as exc:
+        logger.exception("Test Speaker job %s failed", job_id[:8])
+        job.update(
+            status="failed",
+            error=f"{type(exc).__name__}: {exc}",
+            updated_at=time.time(),
+        )
 
 
 @router.delete("/test/calendar-event/{event_id}")

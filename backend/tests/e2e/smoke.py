@@ -211,7 +211,7 @@ class SmokeTest:
         self._check(
             "E2E test triggered",
             True,
-            f"event_id={data.get('calendar_event_id', '')[:12]}  speaker launches in ~6 min",
+            f"event_id={data.get('calendar_event_id', '')[:12]}  speaker launches when recording starts",
         )
         return data
 
@@ -237,8 +237,8 @@ class SmokeTest:
         print("Timeline:")
         print("  +0 min  — calendar event created, sync triggered")
         print("  +3 min  — recorder bot joins the meeting")
-        print("  +6 min  — Test Speaker joins, streams test_audio.wav")
-        print("  +11 min — Test Speaker leaves, bot detects empty meeting")
+        print("  +3 min  — Test Speaker joins with mic ON and streams test_audio.wav")
+        print("  +8 min  — Test Speaker leaves, bot detects empty meeting")
         print("  +13 min — Whisper transcribes, OpenAI analyzes")
         print("  +15 min — status=done, artifacts ready\n")
 
@@ -260,6 +260,8 @@ class SmokeTest:
         deadline = time.time() + timeout_minutes * 60
         last_status = None
         speaker_launched = False
+        speaker_job_id = None
+        speaker_confirmed = False
         meeting_url = e2e_data.get("meeting_url", "")
 
         while time.time() < deadline:
@@ -291,25 +293,61 @@ class SmokeTest:
                     print(f"  → {target['id'][:8]} status: {status}")
                     last_status = status
 
-                # Inject test audio directly into PulseAudio sink when recorder is running.
-                # This avoids launching a second Chromium (OOM) — zero extra memory cost.
-                if status == "recording" and not speaker_launched and meeting_id:
-                    print("  [audio] Injecting test_audio.wav into recorder sink...")
+                # Join through Telemost as a real second participant. The old
+                # direct PulseAudio injection made transcripts pass while nobody
+                # actually spoke in the meeting.
+                if status == "recording" and not speaker_launched and meeting_url:
+                    print("  [speaker] Launching Test Speaker in Telemost...")
                     try:
                         sr = self._post(
-                            "/api/admin/test/inject-audio",
-                            json={"meeting_id": meeting_id},
+                            "/api/admin/test/launch-speaker",
+                            json={
+                                "meeting_url": meeting_url,
+                                "duration_minutes": 5,
+                            },
                         )
                         if sr.status_code == 200:
                             data = sr.json()
-                            print(f"  [audio] Injection started — sink={data.get('sink')}")
-                            speaker_launched = True
+                            speaker_job_id = data.get("job_id")
+                            speaker_launched = bool(speaker_job_id)
+                            print(f"  [speaker] Job started — id={(speaker_job_id or '')[:8]}")
                         else:
-                            print(f"  [audio] WARNING: inject returned {sr.status_code}: {sr.text[:100]}")
+                            print(f"  [speaker] WARNING: launch returned {sr.status_code}: {sr.text[:100]}")
                     except Exception as se:
-                        print(f"  [audio] WARNING: could not inject audio: {se}")
+                        print(f"  [speaker] WARNING: could not launch: {se}")
+
+                if speaker_job_id and not speaker_confirmed:
+                    try:
+                        speaker_status_response = self._get(
+                            f"/api/admin/test/speaker-status/{speaker_job_id}"
+                        )
+                        if speaker_status_response.status_code == 200:
+                            speaker_status = speaker_status_response.json()
+                            state = speaker_status.get("status")
+                            if speaker_status.get("ready") and state in ("speaking", "completed"):
+                                speaker_confirmed = True
+                                self._check(
+                                    "Test Speaker joined with microphone ON",
+                                    True,
+                                    f"job {speaker_job_id[:8]} status={state}",
+                                )
+                            elif state == "failed":
+                                self._check(
+                                    "Test Speaker joined with microphone ON",
+                                    False,
+                                    (speaker_status.get("error") or "unknown error")[:300],
+                                )
+                                break
+                    except Exception as se:
+                        print(f"  [speaker] status unavailable, retrying: {se}")
 
                 if status == "done" and target.get("summary"):
+                    if not speaker_confirmed:
+                        self._check(
+                            "Test Speaker joined with microphone ON",
+                            False,
+                            "pipeline finished without E2E_SPEAKER_READY",
+                        )
                     self._check("Pipeline reached status=done", True, f"meeting {target['id'][:8]}")
                     tlen = target.get("transcript_length") or 0
                     self._check("Transcript not empty", tlen > 0, f"{tlen} chars")

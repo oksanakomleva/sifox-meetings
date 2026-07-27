@@ -349,11 +349,22 @@ async def _record_pipeline(meeting_id: str) -> None:
             if config.CHROMIUM_DISABLE_SANDBOX:
                 logger.warning("Chromium sandbox explicitly disabled by configuration")
                 chromium_args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
+            browser_env = {
+                **os.environ,
+                "DISPLAY": display,
+                "PULSE_SERVER": pulse,
+                "PULSE_SINK": sink_name,
+            }
+            if botmic_name:
+                # Bind this Chromium instance to its own virtual microphone.
+                # Relying only on PulseAudio's process-global default source
+                # races when two meetings start at the same time.
+                browser_env["PULSE_SOURCE"] = f"{botmic_name}.monitor"
             browser = await asyncio.wait_for(
                 pw.chromium.launch(
                     headless=False,
                     args=chromium_args,
-                    env={**os.environ, "DISPLAY": display, "PULSE_SERVER": pulse, "PULSE_SINK": sink_name},
+                    env=browser_env,
                 ),
                 timeout=30,
             )
@@ -772,7 +783,7 @@ _MIC_BUTTON_SELECTORS = [
 async def _enable_bot_mic(page) -> bool:
     """Best-effort: turn the bot's microphone ON after joining (Telemost joins
     muted). Also dumps the control bar DOM once so we can find the real selector
-    from logs. Returns True if a control was clicked."""
+    from logs. Returns True only when the resulting UI state is known to be ON."""
     try:
         toolbar = await page.evaluate(
             "() => { const b = [...document.querySelectorAll(\"button,[role='button']\")]"
@@ -782,16 +793,35 @@ async def _enable_bot_mic(page) -> bool:
         logger.info("Telemost controls (aria/title labels): %s", toolbar)
     except Exception:
         pass
-    for sel in _MIC_BUTTON_SELECTORS:
-        try:
-            loc = page.locator(sel).first
-            if await loc.count() and await loc.is_visible():
-                await loc.click(timeout=2000)
-                logger.info("Bot mic: clicked %s", sel)
-                return True
-        except Exception:
-            continue
-    logger.warning("Bot mic: no known toggle selector matched — answer won't be heard")
+
+    enable_terms = ("включить", "unmute", "turn on", "enable")
+    disable_terms = ("выключить", "mute microphone", "turn off", "disable")
+    for _ in range(3):
+        for sel in _MIC_BUTTON_SELECTORS:
+            try:
+                loc = page.locator(sel).first
+                if not await loc.count() or not await loc.is_visible():
+                    continue
+                label = " ".join(filter(None, [
+                    await loc.get_attribute("aria-label"),
+                    await loc.get_attribute("title"),
+                ])).strip()
+                normalized = label.lower()
+                # Labels describe the action, not the current state.
+                if any(term in normalized for term in disable_terms):
+                    logger.info("Bot mic is ON (%r)", label)
+                    return True
+                if any(term in normalized for term in enable_terms):
+                    await loc.click(timeout=2000)
+                    logger.info("Bot mic was muted; clicked %r", label)
+                    await page.wait_for_timeout(800)
+                    break
+            except Exception:
+                continue
+        else:
+            break
+
+    logger.warning("Bot mic: could not verify ON state — answer won't be heard")
     return False
 
 
