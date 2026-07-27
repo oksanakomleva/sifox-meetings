@@ -66,6 +66,19 @@ RUN espeak-ng -v ru -s 120 -p 50 \
     -w /app/backend/tests/e2e/test_audio.wav \
     && echo "✅ test_audio.wav generated"
 
+# Live-assistant E2E: enough leading silence for both browsers to join, then a
+# deterministic fact + wake-word question. Pad beyond the test duration so the
+# fake microphone never loops and triggers the assistant twice.
+RUN espeak-ng -v ru -s 125 -p 50 \
+    "Кодовое название проекта Маяк. Протоколлер, как называется проект?" \
+    -w /tmp/live_assistant_question.wav \
+    && ffmpeg -y -i /tmp/live_assistant_question.wav \
+       -af "adelay=15000,apad=pad_dur=150" -t 150 \
+       /app/backend/tests/e2e/live_assistant_test_audio.wav \
+       >/dev/null 2>&1 \
+    && rm /tmp/live_assistant_question.wav \
+    && echo "✅ live_assistant_test_audio.wav generated"
+
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 COPY entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh

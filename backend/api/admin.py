@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
-from typing import Annotated
+from typing import Annotated, Literal
 
 from auth.deps import get_test_or_admin_user
 from database import models
@@ -110,6 +110,8 @@ async def admin_live_qa(meeting_id: str, admin: AdminUser):
     from config import config
     return {
         "live_assistant_enabled": config.LIVE_ASSISTANT_ENABLED,
+        "live_assistant_speak": config.LIVE_ASSISTANT_SPEAK,
+        "live_assistant_all_meetings": config.LIVE_ASSISTANT_ALL_MEETINGS,
         "items": await models.get_live_qa(meeting_id),
     }
 
@@ -606,8 +608,15 @@ async def delete_audio_file(meeting_id: str, admin: AdminUser):
 
 # ── E2E Testing ───────────────────────────────────────────────────────────────
 
+class StartE2ERequest(BaseModel):
+    live_assistant: bool = False
+
+
 @router.post("/test/start-e2e")
-async def start_e2e_test(caller: TestOrAdminUser):
+async def start_e2e_test(
+    caller: TestOrAdminUser,
+    req: StartE2ERequest | None = None,
+):
     """
     Start a fully automated E2E test:
     1. Creates a Google Calendar event (now + 3 min) with TEST_MEETING_URL
@@ -619,7 +628,10 @@ async def start_e2e_test(caller: TestOrAdminUser):
     Requires TEST_MEETING_URL env var (permanent Telemost room link).
     """
     try:
-        return await _start_e2e_test_impl(caller)
+        return await _start_e2e_test_impl(
+            caller,
+            live_assistant=bool(req and req.live_assistant),
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -627,13 +639,23 @@ async def start_e2e_test(caller: TestOrAdminUser):
         raise HTTPException(500, f"Internal error: {type(exc).__name__}: {exc}") from exc
 
 
-async def _start_e2e_test_impl(caller: dict) -> dict:
+async def _start_e2e_test_impl(caller: dict, *, live_assistant: bool = False) -> dict:
     from config import config
     from services.calendar_sync import _create_test_event_sync, sync_all_users
 
     meeting_url = config.TEST_MEETING_URL
     if not meeting_url:
         raise HTTPException(400, "TEST_MEETING_URL not set in Railway Variables")
+    if live_assistant and not config.LIVE_ASSISTANT_ENABLED:
+        raise HTTPException(
+            409,
+            "LIVE_ASSISTANT_ENABLED is off; enable the master flag before this isolated E2E",
+        )
+    if live_assistant and not config.LIVE_ASSISTANT_SPEAK:
+        raise HTTPException(
+            409,
+            "LIVE_ASSISTANT_SPEAK is off; enable voice before the live-assistant E2E",
+        )
 
     # Find admin user with calendar WRITE scope (required for creating test events)
     user_id = caller["user_id"]
@@ -686,6 +708,8 @@ async def _start_e2e_test_impl(caller: dict) -> dict:
     # Look up the meeting record so we can return its ID to the smoke test
     meeting = await models.get_meeting_by_url(meeting_url)
     meeting_id = str(meeting["id"]) if meeting else None
+    if live_assistant and meeting_id:
+        await models.set_meeting_assistant_enabled(meeting_id, True)
 
     return {
         "status": "started",
@@ -693,6 +717,7 @@ async def _start_e2e_test_impl(caller: dict) -> dict:
         "meeting_id": meeting_id,
         "calendar_event_id": event_id,
         "calendar_id": cal["google_calendar_id"],
+        "live_assistant": live_assistant,
         "message": "Calendar event created for +3 min; Test Speaker will join when recording starts",
     }
 
@@ -712,6 +737,15 @@ async def inject_test_audio(req: InjectAudioRequest, caller: TestOrAdminUser):
     sink_name = f"meet_{req.meeting_id[:8]}"
     audio_file = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "tests", "e2e", "test_audio.wav")
+    )
+    live_audio_file = os.path.abspath(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "tests",
+            "e2e",
+            "live_assistant_test_audio.wav",
+        )
     )
     if not os.path.exists(audio_file):
         raise HTTPException(400, f"test_audio.wav not found at {audio_file}")
@@ -741,6 +775,7 @@ async def _play_audio_to_sink(paplay: str, audio_file: str, sink_name: str) -> N
 class LaunchSpeakerRequest(BaseModel):
     meeting_url: str = Field(min_length=10, max_length=2000)
     duration_minutes: int = Field(default=5, ge=1, le=15)
+    audio_profile: Literal["standard", "live_assistant"] = "standard"
 
 
 _speaker_jobs: dict[str, dict] = {}
@@ -798,6 +833,12 @@ async def debug_test_speaker(caller: TestOrAdminUser):
         "audio_exists": os.path.exists(audio_file),
         "audio_size": os.path.getsize(audio_file) if os.path.exists(audio_file) else 0,
         "audio_path": audio_file,
+        "live_audio_exists": os.path.exists(live_audio_file),
+        "live_audio_size": (
+            os.path.getsize(live_audio_file)
+            if os.path.exists(live_audio_file)
+            else 0
+        ),
         "display": os.environ.get("DISPLAY"),
         "pulse_server": os.environ.get("PULSE_SERVER"),
         "python": sys.executable,
@@ -841,7 +882,12 @@ async def launch_test_speaker(req: LaunchSpeakerRequest, caller: TestOrAdminUser
         "updated_at": time.time(),
     }
     asyncio.create_task(
-        _launch_speaker(job_id, req.meeting_url, req.duration_minutes),
+        _launch_speaker(
+            job_id,
+            req.meeting_url,
+            req.duration_minutes,
+            req.audio_profile,
+        ),
         name=f"e2e-speaker-{job_id[:8]}",
     )
     return {
@@ -887,7 +933,12 @@ async def finish_e2e_recording(req: FinishE2ERequest, caller: TestOrAdminUser):
     return {"ok": True, "meeting_id": req.meeting_id}
 
 
-async def _launch_speaker(job_id: str, meeting_url: str, duration_minutes: int) -> None:
+async def _launch_speaker(
+    job_id: str,
+    meeting_url: str,
+    duration_minutes: int,
+    audio_profile: str = "standard",
+) -> None:
     """Launch test_speaker.py as a subprocess — no delay."""
     job = _speaker_jobs[job_id]
     speaker_script = os.path.join(
@@ -904,7 +955,13 @@ async def _launch_speaker(job_id: str, meeting_url: str, duration_minutes: int) 
         )
         return
 
-    logger.info("Launching Test Speaker: %s --url %s --duration %d", speaker_script, meeting_url, duration_minutes)
+    logger.info(
+        "Launching Test Speaker: %s --url %s --duration %d --audio-profile %s",
+        speaker_script,
+        meeting_url,
+        duration_minutes,
+        audio_profile,
+    )
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
     try:
@@ -912,6 +969,7 @@ async def _launch_speaker(job_id: str, meeting_url: str, duration_minutes: int) 
             sys.executable, speaker_script,
             "--url", meeting_url,
             "--duration", str(duration_minutes),
+            "--audio-profile", audio_profile,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

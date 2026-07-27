@@ -197,9 +197,12 @@ class SmokeTest:
 
     # ── Full E2E (automated, no human needed) ────────────────────────────────
 
-    def start_e2e_test(self) -> dict | None:
+    def start_e2e_test(self, *, live_assistant: bool = False) -> dict | None:
         """Call Railway to create calendar event + launch Test Speaker."""
-        r = self._post("/api/admin/test/start-e2e")
+        r = self._post(
+            "/api/admin/test/start-e2e",
+            json={"live_assistant": live_assistant},
+        )
         if r.status_code != 200:
             self._check(
                 "POST /api/admin/test/start-e2e",
@@ -225,7 +228,12 @@ class SmokeTest:
         )
         self._check("Delete test calendar event", r.status_code == 200, f"got {r.status_code}")
 
-    def run_full_e2e(self, timeout_minutes: int = 20) -> bool:
+    def run_full_e2e(
+        self,
+        timeout_minutes: int = 20,
+        *,
+        live_assistant: bool = False,
+    ) -> bool:
         """
         Fully automated E2E:
         1. Trigger Railway to create calendar event + schedule Test Speaker
@@ -242,7 +250,7 @@ class SmokeTest:
         print("  +7 min  — Whisper transcribes, OpenAI analyzes")
         print("  +10 min — status=done, artifacts ready\n")
 
-        e2e_data = self.start_e2e_test()
+        e2e_data = self.start_e2e_test(live_assistant=live_assistant)
         if not e2e_data:
             return self._summary()
 
@@ -310,6 +318,11 @@ class SmokeTest:
                             json={
                                 "meeting_url": meeting_url,
                                 "duration_minutes": 2,
+                                "audio_profile": (
+                                    "live_assistant"
+                                    if live_assistant
+                                    else "standard"
+                                ),
                             },
                         )
                         if sr.status_code == 200:
@@ -342,6 +355,42 @@ class SmokeTest:
                                     f"job {speaker_job_id[:8]} status={state}",
                                 )
                             if state == "completed" and speaker_status.get("ready"):
+                                if live_assistant:
+                                    listener_text = speaker_status.get("stdout") or ""
+                                    heard_answer = "маяк" in listener_text.lower()
+                                    self._check(
+                                        "Remote participant heard Protocaller answer",
+                                        heard_answer,
+                                        listener_text[-500:],
+                                    )
+                                    qa_response = self._get(
+                                        f"/api/admin/meetings/{meeting_id}/live-qa"
+                                    )
+                                    qa_items = (
+                                        qa_response.json().get("items", [])
+                                        if qa_response.status_code == 200
+                                        else []
+                                    )
+                                    latest_qa = qa_items[-1] if qa_items else {}
+                                    self._check(
+                                        "Wake-word question logged",
+                                        bool(qa_items),
+                                        (latest_qa.get("question") or "")[:200],
+                                    )
+                                    self._check(
+                                        "Assistant found expected answer",
+                                        "маяк" in (latest_qa.get("answer") or "").lower(),
+                                        (latest_qa.get("answer") or "")[:300],
+                                    )
+                                    self._check(
+                                        "Assistant voice path reported success",
+                                        latest_qa.get("spoken") is True
+                                        and not latest_qa.get("error"),
+                                        (
+                                            latest_qa.get("error")
+                                            or f"latency={latest_qa.get('latency_ms')}ms"
+                                        ),
+                                    )
                                 finish_response = self._post(
                                     "/api/admin/test/finish-e2e-recording",
                                     json={"meeting_id": meeting_id},
@@ -447,6 +496,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--record", action="store_true", help="Wait for a pending meeting to be recorded (15min timeout)")
     ap.add_argument("--full-e2e", action="store_true", help="Fully automated E2E: creates calendar event + launches Test Speaker on Railway (~20min)")
+    ap.add_argument(
+        "--live-assistant-e2e",
+        action="store_true",
+        help="E2E wake word → answer → Protocaller voice heard by remote listener",
+    )
     ap.add_argument("--url", default=os.environ.get("BASE_URL", "https://sifox-meetings.up.railway.app"))
     ap.add_argument("--cookie", default=os.environ.get("SESSION_COOKIE"))
     ap.add_argument("--api-key", default=os.environ.get("TEST_API_KEY"), help="Test API key (alternative to session cookie)")
@@ -462,7 +516,7 @@ def main():
 
     smoke = SmokeTest(args.url, args.cookie, test_api_key=args.api_key)
 
-    if args.full_e2e:
+    if args.full_e2e or args.live_assistant_e2e:
         print(f"[>>] Pre-checks against {args.url}\n")
         smoke.test_health()
         smoke.test_auth_required()
@@ -470,7 +524,7 @@ def main():
         if not is_admin:
             print("\n❌ Need admin auth for full E2E (set TEST_API_KEY in .env.test)")
             sys.exit(1)
-        ok = smoke.run_full_e2e()
+        ok = smoke.run_full_e2e(live_assistant=args.live_assistant_e2e)
     else:
         ok = smoke.run(record_mode=args.record)
 
