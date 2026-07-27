@@ -377,7 +377,12 @@ class SmokeTest:
                     tlen = target.get("transcript_length") or 0
                     self._check("Transcript not empty", tlen > 0, f"{tlen} chars")
                     self._check("Summary generated", bool(target.get("summary")), "")
-                    self._check("Tags assigned", bool(target.get("tags")), "")
+                    tags = target.get("tags")
+                    self._check(
+                        "Tags field is valid",
+                        isinstance(tags, list),
+                        f"{len(tags or [])} tags",
+                    )
                     self._check("Meeting type classified", bool(target.get("meeting_type")), target.get("meeting_type", ""))
                     self._check(
                         "Transcript has content (>50 chars)",

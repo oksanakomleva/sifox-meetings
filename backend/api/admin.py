@@ -965,16 +965,45 @@ async def delete_test_calendar_event(event_id: str, calendar_id: str, caller: Te
 
     user_id = caller["user_id"]
     if user_id == 0:
-        all_users = await models.get_all_users_with_tokens()
-        admin_users = [u for u in all_users if u.get("is_admin")]
-        if not admin_users:
-            raise HTTPException(400, "No admin users with Google token")
-        user_id = admin_users[0]["id"]
-
-    token_row = await models.get_google_token(user_id)
-    if not token_row:
-        raise HTTPException(400, "No Google token for admin")
+        write_token = await models.get_any_admin_write_token()
+        if not write_token:
+            raise HTTPException(400, "No admin has Calendar write access")
+        user_id, token_row = write_token
+    else:
+        token_row = await models.get_google_write_token(user_id)
+        if not token_row:
+            raise HTTPException(400, "Admin token lacks Calendar write access")
 
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _delete_event_sync, token_row, calendar_id, event_id)
     return {"ok": True, "deleted_event_id": event_id}
+
+
+@router.delete("/test/calendar-event/by-meeting/{meeting_id}")
+async def delete_test_calendar_event_by_meeting(meeting_id: str, caller: TestOrAdminUser):
+    """Safely delete an E2E Calendar event when only the meeting ID is known."""
+    from services.calendar_sync import _delete_event_sync
+
+    meeting = await models.get_meeting(meeting_id)
+    if not meeting:
+        raise HTTPException(404, "Meeting not found")
+    if not (meeting.get("title") or "").startswith("[E2E Test]"):
+        raise HTTPException(400, "Only E2E test meetings can be cleaned up")
+
+    link = await models.get_calendar_link_for_meeting(meeting_id)
+    if not link:
+        raise HTTPException(404, "No Calendar event linked to this meeting")
+
+    token_row = await models.get_google_write_token(link["user_id"])
+    if not token_row:
+        raise HTTPException(400, "Event owner lacks Calendar write access")
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None,
+        _delete_event_sync,
+        token_row,
+        link["calendar_id"],
+        link["google_event_id"],
+    )
+    return {"ok": True, "deleted_event_id": link["google_event_id"]}

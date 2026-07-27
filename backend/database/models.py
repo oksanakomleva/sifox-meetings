@@ -1256,6 +1256,22 @@ async def link_calendar_event_to_meeting(
             google_event_id, user_id, meeting_id, calendar_id, attendee_emails,
         )
 
+async def get_calendar_link_for_meeting(meeting_id: str) -> dict[str, Any] | None:
+    """Return the Calendar event linked to a meeting, if any."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT google_event_id, calendar_id, user_id
+            FROM calendar_meeting_links
+            WHERE meeting_id = $1
+            ORDER BY created_at
+            LIMIT 1
+            """,
+            meeting_id,
+        )
+    return dict(row) if row else None
+
 
 # ── Chat ──────────────────────────────────────────────────────────────────────
 
