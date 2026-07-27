@@ -651,6 +651,56 @@ async def transcribe_and_analyze(
 
 # ── Meeting join ──────────────────────────────────────────────────────────────
 
+def _is_join_confirmed(state: dict) -> bool:
+    """Interpret a bounded Telemost DOM probe after clicking Join."""
+    if state.get("has_leave"):
+        return True
+    return bool(
+        state.get("has_mic")
+        and not state.get("has_join")
+        and not state.get("has_name_input")
+    )
+
+
+async def _telemost_call_state(page) -> dict:
+    """Probe only the visible controls needed to prove that the call was joined."""
+    return await page.evaluate(
+        """() => {
+          const visible = e => {
+            const r = e.getBoundingClientRect();
+            const s = getComputedStyle(e);
+            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' &&
+              s.display !== 'none';
+          };
+          const controls = [...document.querySelectorAll("button,[role='button']")]
+            .filter(visible)
+            .map(e => (`${e.getAttribute('aria-label') || ''} ` +
+              `${e.getAttribute('title') || ''} ${e.textContent || ''}`).toLowerCase())
+            .slice(0, 80);
+          const inputs = [...document.querySelectorAll(
+            "input[placeholder*='имя' i],input[placeholder*='name' i]," +
+            "input[name='name'],input[type='text']"
+          )].filter(visible);
+          return {
+            has_leave: controls.some(x =>
+              x.includes('выйти') || x.includes('покинуть') ||
+              x.includes('leave') || x.includes('hang up')
+            ),
+            has_mic: controls.some(x =>
+              x.includes('микроф') || x.includes('microphone') ||
+              x.includes('mic-button')
+            ),
+            has_join: controls.some(x =>
+              x.includes('подключиться') || x.includes('присоединиться') ||
+              x.includes('войти') || x.includes(' join')
+            ),
+            has_name_input: inputs.length > 0,
+            labels: controls.slice(0, 25)
+          };
+        }"""
+    )
+
+
 async def _join_meeting(page, url: str) -> set[str]:
     debug_dir = Path("/tmp/recorder-debug")
     debug_dir.mkdir(exist_ok=True)
@@ -746,9 +796,49 @@ async def _join_meeting(page, url: str) -> set[str]:
         except Exception:
             pass
 
-    await page.wait_for_timeout(7000)
+    # A successful click is not proof that Telemost admitted the guest. It can
+    # show another media modal or leave the pre-join form in place. Verify the
+    # in-call toolbar and retry the visible Join action after dismissing modals.
+    state: dict = {}
+    for attempt in range(3):
+        await page.wait_for_timeout(3_000)
+        await _dismiss_media_modals(page)
+        try:
+            state = await _telemost_call_state(page)
+        except Exception as exc:
+            state = {"probe_error": f"{type(exc).__name__}: {exc}"}
+        logger.info("Telemost post-join probe %d: %s", attempt + 1, state)
+        if _is_join_confirmed(state):
+            break
+
+        retry_clicked = False
+        for selector in [
+            "button:has-text('Подключиться')",
+            "button:has-text('Присоединиться')",
+            "button:has-text('Войти')",
+            "button:has-text('Join')",
+            "button[data-testid='join-button']",
+        ]:
+            try:
+                button = page.locator(selector).first
+                if await button.count() and await button.is_visible():
+                    await button.click(force=True, timeout=3_000)
+                    logger.info("Retried Telemost join via %s", selector)
+                    retry_clicked = True
+                    break
+            except Exception:
+                continue
+        if not retry_clicked:
+            await page.wait_for_timeout(1_000)
+    else:
+        await snap("3-join-failed")
+        raise RuntimeError(
+            "Telemost join was not confirmed; visible state: "
+            f"{str(state)[:1000]}"
+        )
+
     await snap("3-after-join")
-    logger.info("Page URL after join: %s", page.url)
+    logger.info("Page URL after verified join: %s", page.url)
 
     return await _get_participant_names(page)
 

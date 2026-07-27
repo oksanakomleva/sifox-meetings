@@ -15,7 +15,11 @@ from services.live_assistant import (
     merge_live_transcript,
     transcribe_wake_window,
 )
-from services.recorder import _create_pulse_source, _mic_control_state
+from services.recorder import (
+    _create_pulse_source,
+    _is_join_confirmed,
+    _mic_control_state,
+)
 
 
 def test_rolling_pcm_buffer_keeps_only_configured_history():
@@ -87,6 +91,26 @@ def test_virtual_mic_uses_remapped_source(monkeypatch):
     )
     assert "master=botmic_test.monitor" in captured["args"]
     assert "source_name=botmic_source_test" in captured["args"]
+
+
+def test_join_confirmation_rejects_prejoin_form():
+    assert not _is_join_confirmed(
+        {
+            "has_leave": False,
+            "has_mic": True,
+            "has_join": True,
+            "has_name_input": True,
+        }
+    )
+    assert _is_join_confirmed(
+        {
+            "has_leave": False,
+            "has_mic": True,
+            "has_join": False,
+            "has_name_input": False,
+        }
+    )
+    assert _is_join_confirmed({"has_leave": True})
 
 
 def test_live_diagnostic_is_copied_and_updated():
