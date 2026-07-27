@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # TTS engine for E2E test audio generation
     espeak-ng \
     # Build tools
-    curl ca-certificates \
+    curl ca-certificates gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Node.js for frontend build ────────────────────────────────────────────────
@@ -33,6 +33,7 @@ COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Install Playwright + Chromium
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN playwright install chromium
 
 # Pre-download Whisper models (avoids a slow runtime download on first use).
@@ -40,6 +41,7 @@ RUN playwright install chromium
 # (continuous wake-word + question STT) — downloading these mid-meeting would
 # block the listen loop and miss the wake word.
 ARG WHISPER_MODEL=medium
+ENV HF_HOME=/app/.cache/huggingface
 RUN python -c "from faster_whisper import WhisperModel; [WhisperModel(m, device='cpu', compute_type='int8') for m in ['${WHISPER_MODEL}', 'tiny', 'small']]" || true
 
 # ── Frontend build ────────────────────────────────────────────────────────────
@@ -67,6 +69,13 @@ RUN espeak-ng -v ru -s 120 -p 50 \
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 COPY entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
+
+# Uvicorn, Chromium and user-controlled media processing must not run as root.
+# The entrypoint starts the display/audio daemons first, prepares the mounted
+# volume, then drops to this account via gosu.
+RUN groupadd --system appuser \
+    && useradd --system --gid appuser --home-dir /app --shell /usr/sbin/nologin appuser \
+    && chown -R appuser:appuser /app
 
 ENV DISPLAY=:99
 ENV PULSE_SERVER=unix:/tmp/pulse.sock

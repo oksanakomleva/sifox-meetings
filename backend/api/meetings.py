@@ -397,9 +397,7 @@ async def _get_accessible_meeting(meeting_id: str, user: dict) -> dict:
     user_id = user["user_id"]
     email = user["email"]
 
-    accessible = await models.get_meetings_for_user(user_id, limit=1000)
-    ids = {str(m["id"]) for m in accessible}
-    if meeting_id not in ids:
+    if not await models.user_can_access_meeting(user_id, email, meeting_id):
         raise HTTPException(403, "Access denied")
 
     return meeting

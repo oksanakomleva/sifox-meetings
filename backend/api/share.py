@@ -4,12 +4,15 @@ Anyone with the link + password can unlock a meeting and see its protocol,
 transcript, and play the mp3. No session/cookie involved; audio is gated by a
 short-lived signed token issued after the password check.
 """
+import asyncio
 import logging
 import os
+import re
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -20,18 +23,29 @@ from services import share as share_svc
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/share", tags=["share"])
 
-# Tiny in-memory brute-force throttle: token -> (window_start, attempts).
-_attempts: dict[str, tuple[float, int]] = {}
+# Bounded in-memory brute-force throttle. A shared Redis-backed limiter would be
+# preferable if the service ever runs with multiple workers/instances.
+_attempts: OrderedDict[str, tuple[float, int]] = OrderedDict()
 _MAX_ATTEMPTS = 8
 _WINDOW = 300  # 5 min
+_MAX_TRACKED_ATTEMPTS = 10_000
+_SHARE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{24,64}$")
 
 
-def _too_many_attempts(token: str) -> bool:
-    now = time.time()
-    start, n = _attempts.get(token, (now, 0))
+def _too_many_attempts(key: str) -> bool:
+    now = time.monotonic()
+    while _attempts:
+        oldest_key, (oldest_start, _) = next(iter(_attempts.items()))
+        if now - oldest_start <= _WINDOW:
+            break
+        _attempts.pop(oldest_key, None)
+
+    start, n = _attempts.pop(key, (now, 0))
     if now - start > _WINDOW:
         start, n = now, 0
-    _attempts[token] = (start, n + 1)
+    while len(_attempts) >= _MAX_TRACKED_ATTEMPTS:
+        _attempts.popitem(last=False)
+    _attempts[key] = (start, n + 1)
     return n + 1 > _MAX_ATTEMPTS
 
 
@@ -49,13 +63,20 @@ def _share_or_404(share: dict | None) -> dict:
 
 
 @router.post("/{token}/unlock")
-async def unlock_share(token: str, body: UnlockRequest):
+async def unlock_share(token: str, body: UnlockRequest, request: Request):
     """Verify the password; return the meeting view + a signed audio URL."""
-    if _too_many_attempts(token):
-        raise HTTPException(429, "Слишком много попыток, попробуйте позже")
+    if not _SHARE_TOKEN_RE.fullmatch(token):
+        raise HTTPException(404, "Ссылка не найдена")
     share = _share_or_404(await models.get_meeting_share(token))
-    if not share_svc.verify_password(body.password, share["password_hash"]):
+    client_ip = request.client.host if request.client else "unknown"
+    attempt_key = f"{token}:{client_ip}"
+    if _too_many_attempts(attempt_key):
+        raise HTTPException(429, "Слишком много попыток, попробуйте позже")
+    if not await asyncio.to_thread(
+        share_svc.verify_password, body.password, share["password_hash"]
+    ):
         raise HTTPException(401, "Неверный пароль")
+    _attempts.pop(attempt_key, None)
 
     meeting = await models.get_meeting(share["meeting_id"])
     if not meeting:

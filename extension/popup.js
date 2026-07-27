@@ -37,6 +37,24 @@ function hostOf(url) {
   try { return new URL(url).hostname } catch (e) { return '' }
 }
 
+function originPattern(baseUrl) {
+  try {
+    const url = new URL(baseUrl)
+    if (!['http:', 'https:'].includes(url.protocol)) return null
+    return `${url.origin}/*`
+  } catch (e) {
+    return null
+  }
+}
+
+async function ensureOriginPermission(baseUrl, requestIfMissing = false) {
+  const pattern = originPattern(baseUrl)
+  if (!pattern) return false
+  if (await chrome.permissions.contains({ origins: [pattern] })) return true
+  if (!requestIfMissing) return false
+  return await chrome.permissions.request({ origins: [pattern] })
+}
+
 // Show which tab is (or will be) captured: favicon + title + host.
 function fillTabCard(tab) {
   const wrap = $('tabIconWrap')
@@ -140,12 +158,21 @@ function reflect(isRecording) {
 // ── Login view ──────────────────────────────────────────────────────────────
 $('openLogin').addEventListener('click', async () => {
   const baseUrl = ($('baseUrl').value.trim() || DEFAULT_BASE).replace(/\/+$/, '')
+  if (!(await ensureOriginPermission(baseUrl, true))) {
+    $('loginStatus').textContent = 'Разрешите расширению доступ к выбранному адресу Sifox.'
+    return
+  }
   await chrome.storage.local.set({ baseUrl })
   chrome.tabs.create({ url: baseUrl })
 })
 
 $('baseUrl').addEventListener('change', async () => {
-  await chrome.storage.local.set({ baseUrl: $('baseUrl').value.trim() })
+  const baseUrl = $('baseUrl').value.trim().replace(/\/+$/, '')
+  if (await ensureOriginPermission(baseUrl, true)) {
+    await chrome.storage.local.set({ baseUrl })
+  } else {
+    $('loginStatus').textContent = 'Адрес не сохранён: требуется разрешение на доступ.'
+  }
 })
 
 // ── Mic permission ─────────────────────────────────────────────────────────────
@@ -154,6 +181,10 @@ $('grantMicBig').addEventListener('click', openMicPermission)
 // ── Recorder view ─────────────────────────────────────────────────────────────
 $('toggle').addEventListener('click', async () => {
   const baseUrl = await getBaseUrl()
+  if (!(await ensureOriginPermission(baseUrl, true))) {
+    $('recStatus').textContent = 'Разрешите расширению доступ к адресу Sifox.'
+    return
+  }
   const st = await chrome.runtime.sendMessage({ type: 'getState' })
 
   if (st && st.recording) {
@@ -163,7 +194,9 @@ $('toggle').addEventListener('click', async () => {
       $('recStatus').textContent = '✓ Загружено. Обработка идёт на сервере.'
       reflect(false)
     } else {
-      $('recStatus').textContent = 'Ошибка загрузки: ' + (res && res.error || '')
+      $('recStatus').textContent = res && res.retryable
+        ? 'Части записи сохранены локально и ожидают отправки. Ошибка: ' + (res.error || '') + ' Нажмите ещё раз, чтобы повторить.'
+        : 'Ошибка загрузки: ' + (res && res.error || '')
     }
     return
   }

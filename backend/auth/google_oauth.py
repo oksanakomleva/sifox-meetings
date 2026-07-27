@@ -1,8 +1,11 @@
 """Google OAuth2 for web login (sign-in) and calendar access (separate consent)."""
 import asyncio
+import hashlib
+import hmac
 import logging
 import secrets
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from config import config
@@ -43,10 +46,24 @@ _GMAIL_SEND_SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
 ]
 
-# In-memory state store: state -> (purpose, user_id|None, expires_at)
-_states: dict[str, tuple[str, int | None, float]] = {}
-# Optional post-auth redirect path, keyed by the same state.
-_next_paths: dict[str, str] = {}
+_STATE_TTL_SECONDS = 600
+_MAX_PENDING_STATES = 10_000
+
+
+@dataclass(frozen=True)
+class _OAuthState:
+    purpose: str
+    user_id: int | None
+    expires_at: float
+    session_fingerprint: str | None = None
+    expected_google_id: str | None = None
+    expected_email: str | None = None
+    next_path: str | None = None
+
+
+# A single-process store is sufficient while uvicorn runs with --workers 1.
+# It is bounded and expired entries are pruned on every new flow.
+_states: dict[str, _OAuthState] = {}
 
 _CLIENT_CONFIG = {
     "web": {
@@ -68,10 +85,49 @@ def _make_flow(scopes: list[str]):
     )
 
 
+def _session_fingerprint(session_token: str) -> str:
+    """Bind a consent flow to the web session that initiated it."""
+    return hmac.new(
+        config.SECRET_KEY.encode("utf-8"),
+        session_token.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _prune_states() -> None:
+    now = time.monotonic()
+    for state in [s for s, entry in _states.items() if entry.expires_at <= now]:
+        _states.pop(state, None)
+    while len(_states) >= _MAX_PENDING_STATES:
+        _states.pop(next(iter(_states)))
+
+
+def _store_state(
+    purpose: str,
+    *,
+    user_id: int | None = None,
+    session_token: str | None = None,
+    expected_google_id: str | None = None,
+    expected_email: str | None = None,
+    next_path: str | None = None,
+) -> str:
+    _prune_states()
+    state = secrets.token_urlsafe(24)
+    _states[state] = _OAuthState(
+        purpose=purpose,
+        user_id=user_id,
+        expires_at=time.monotonic() + _STATE_TTL_SECONDS,
+        session_fingerprint=_session_fingerprint(session_token) if session_token else None,
+        expected_google_id=expected_google_id,
+        expected_email=(expected_email or "").lower() or None,
+        next_path=next_path,
+    )
+    return state
+
+
 def get_login_url() -> str:
     """Generate Google OAuth URL for login."""
-    state = secrets.token_urlsafe(16)
-    _states[state] = ("login", None, time.monotonic() + 600)
+    state = _store_state("login")
     flow = _make_flow(_LOGIN_SCOPES)
     url, _ = flow.authorization_url(
         access_type="online",
@@ -81,10 +137,21 @@ def get_login_url() -> str:
     return url
 
 
-def get_calendar_url(user_id: int) -> str:
+def get_calendar_url(
+    user_id: int,
+    *,
+    session_token: str,
+    expected_google_id: str | None,
+    expected_email: str,
+) -> str:
     """Generate Google OAuth URL for calendar read access (all users)."""
-    state = secrets.token_urlsafe(16)
-    _states[state] = ("calendar", user_id, time.monotonic() + 600)
+    state = _store_state(
+        "calendar",
+        user_id=user_id,
+        session_token=session_token,
+        expected_google_id=expected_google_id,
+        expected_email=expected_email,
+    )
     flow = _make_flow(_CALENDAR_SCOPES)
     url, _ = flow.authorization_url(
         access_type="offline",
@@ -95,10 +162,21 @@ def get_calendar_url(user_id: int) -> str:
     return url
 
 
-def get_calendar_write_url(user_id: int) -> str:
+def get_calendar_write_url(
+    user_id: int,
+    *,
+    session_token: str,
+    expected_google_id: str | None,
+    expected_email: str,
+) -> str:
     """Generate Google OAuth URL for calendar write access (admin E2E only)."""
-    state = secrets.token_urlsafe(16)
-    _states[state] = ("calendar_write", user_id, time.monotonic() + 600)
+    state = _store_state(
+        "calendar_write",
+        user_id=user_id,
+        session_token=session_token,
+        expected_google_id=expected_google_id,
+        expected_email=expected_email,
+    )
     flow = _make_flow(_CALENDAR_WRITE_SCOPES)
     url, _ = flow.authorization_url(
         access_type="offline",
@@ -109,12 +187,23 @@ def get_calendar_write_url(user_id: int) -> str:
     return url
 
 
-def get_gmail_send_url(user_id: int, next_path: str | None = None) -> str:
+def get_gmail_send_url(
+    user_id: int,
+    next_path: str | None = None,
+    *,
+    session_token: str,
+    expected_google_id: str | None,
+    expected_email: str,
+) -> str:
     """Generate Google OAuth URL for personal gmail.send consent."""
-    state = secrets.token_urlsafe(16)
-    _states[state] = ("gmail_send", user_id, time.monotonic() + 600)
-    if next_path:
-        _next_paths[state] = next_path
+    state = _store_state(
+        "gmail_send",
+        user_id=user_id,
+        session_token=session_token,
+        expected_google_id=expected_google_id,
+        expected_email=expected_email,
+        next_path=next_path,
+    )
     flow = _make_flow(_GMAIL_SEND_SCOPES)
     url, _ = flow.authorization_url(
         access_type="offline",
@@ -125,14 +214,13 @@ def get_gmail_send_url(user_id: int, next_path: str | None = None) -> str:
     return url
 
 
-def _pop_state(state: str) -> tuple[str, int | None] | None:
+def _pop_state(state: str) -> _OAuthState | None:
     entry = _states.pop(state, None)
     if not entry:
         return None
-    purpose, user_id, expires_at = entry
-    if time.monotonic() > expires_at:
+    if time.monotonic() > entry.expires_at:
         return None
-    return purpose, user_id
+    return entry
 
 
 class OAuthError(Exception):
@@ -172,7 +260,7 @@ def _fetch_userinfo_sync(access_token: str) -> dict:
 
 
 async def handle_callback(
-    code: str, state: str
+    code: str, state: str, session_token: str | None = None
 ) -> dict | None:
     """
     Handle OAuth callback.
@@ -184,7 +272,14 @@ async def handle_callback(
         logger.warning("Unknown or expired OAuth state: %s", state)
         return None
 
-    purpose, existing_user_id = entry
+    purpose = entry.purpose
+    existing_user_id = entry.user_id
+    if entry.session_fingerprint:
+        if not session_token or not hmac.compare_digest(
+            entry.session_fingerprint, _session_fingerprint(session_token)
+        ):
+            logger.warning("OAuth consent callback used from a different web session")
+            return None
     if purpose == "calendar_write":
         scopes = _CALENDAR_WRITE_SCOPES
     elif purpose == "calendar":
@@ -200,10 +295,20 @@ async def handle_callback(
         None, _fetch_userinfo_sync, tokens["token"]
     )
 
+    if purpose != "login":
+        google_id = user_info.get("sub")
+        email = (user_info.get("email") or "").lower()
+        if entry.expected_google_id and google_id != entry.expected_google_id:
+            logger.warning("OAuth consent Google account does not match the signed-in user")
+            return None
+        if entry.expected_email and email != entry.expected_email:
+            logger.warning("OAuth consent email does not match the signed-in user")
+            return None
+
     return {
         "purpose": purpose,
         "user_info": user_info,
         "tokens": tokens,
         "existing_user_id": existing_user_id,
-        "next_path": _next_paths.pop(state, None),
+        "next_path": entry.next_path,
     }

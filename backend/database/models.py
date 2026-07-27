@@ -107,7 +107,8 @@ async def get_session(token: str) -> dict[str, Any] | None:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT s.*, u.email, u.name, u.avatar_url, u.is_admin, u.is_active
+            SELECT s.*, u.email, u.name, u.avatar_url, u.google_id,
+                   u.is_admin, u.is_active
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.id = $1 AND s.expires_at > NOW()
@@ -965,6 +966,80 @@ async def get_meetings_for_user(
             user_id, email, limit, offset,
         )
     return [dict(r) for r in rows]
+
+
+async def user_can_access_meeting(user_id: int, email: str, meeting_id: str) -> bool:
+    """Constant-size access check for one completed meeting."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return bool(await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM meetings m
+                WHERE m.id = $3
+                  AND m.status = 'done'
+                  AND (
+                    EXISTS (
+                        SELECT 1 FROM meeting_participants mp
+                        WHERE mp.meeting_id = m.id AND mp.user_id = $1
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM calendar_meeting_links cml
+                        WHERE cml.meeting_id = m.id AND $2 = ANY(cml.attendee_emails)
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM meeting_access_grants g
+                        WHERE g.meeting_id = m.id AND g.user_id = $1
+                    )
+                    OR m.recorder_user_id = $1
+                    OR m.visible_to_all = TRUE
+                  )
+            )
+            """,
+            user_id, email, meeting_id,
+        ))
+
+
+async def count_active_upload_jobs(user_id: int) -> int:
+    """Uploads currently receiving data or waiting in the processing pipeline."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return int(await conn.fetchval(
+            """
+            SELECT count(*)
+            FROM meetings
+            WHERE recorder_user_id = $1
+              AND status IN ('uploading', 'transcribing', 'analyzing')
+            """,
+            user_id,
+        ))
+
+
+async def count_all_active_upload_jobs() -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return int(await conn.fetchval(
+            """
+            SELECT count(*)
+            FROM meetings
+            WHERE recorder_user_id IS NOT NULL
+              AND status IN ('uploading', 'transcribing', 'analyzing')
+            """
+        ))
+
+
+async def get_user_uploaded_audio_bytes(user_id: int) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return int(await conn.fetchval(
+            """
+            SELECT COALESCE(sum(audio_size), 0)
+            FROM meetings
+            WHERE recorder_user_id = $1
+            """,
+            user_id,
+        ))
 
 
 async def get_all_meetings(limit: int = 100, offset: int = 0) -> list[dict]:

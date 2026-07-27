@@ -6,15 +6,19 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
+from auth.deps import get_admin_user
 from config import config
 from database.connection import init_db, close_db
+from utils.http import RequestBodyLimitMiddleware
+from utils.paths import confined_file
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,8 +32,9 @@ async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────
     await init_db(config.DATABASE_URL)
 
-    # Ensure audio dir exists
-    os.makedirs(config.AUDIO_DIR, exist_ok=True)
+    # Ensure the network-backed audio dir exists without blocking the event loop.
+    from services import fsio
+    await fsio.mkdir_p(Path(config.AUDIO_DIR))
 
     # Recover meetings that were interrupted by the previous deploy
     from services.recorder import (
@@ -49,6 +54,10 @@ async def lifespan(app: FastAPI):
     scheduler_task = asyncio.create_task(run_recording_scheduler(), name="rec-scheduler")
     mm_task = asyncio.create_task(run_mm_sync_loop(), name="mm-sync")
     gmail_task = asyncio.create_task(run_gmail_sync_loop(), name="gmail-sync")
+    app.state.background_tasks = {
+        task.get_name(): task
+        for task in (sync_task, scheduler_task, mm_task, gmail_task)
+    }
 
     # Force a clean restart if the event loop ever wedges (instead of hanging
     # forever until a manual redeploy — see 2026-07-22).
@@ -76,6 +85,28 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Sifox Meetings", lifespan=lifespan)
+
+
+# Reject obviously oversized legacy multipart uploads before Starlette parses
+# and spools their complete bodies. Chunked extension uploads use a separate
+# endpoint with an 8 MB per-chunk cap.
+_LEGACY_UPLOAD_BODY_LIMIT = 502 * 1024 * 1024
+_LEGACY_UPLOAD_PATHS = {
+    "/api/extension/upload",
+    "/api/admin/recordings/upload",
+}
+
+
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    paths=_LEGACY_UPLOAD_PATHS,
+    max_bytes=_LEGACY_UPLOAD_BODY_LIMIT,
+)
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    paths={"/api/extension/upload/start"},
+    max_bytes=32 * 1024,
+)
 
 # CORS (dev only — in prod frontend is served from same origin)
 app.add_middleware(
@@ -107,20 +138,52 @@ app.include_router(calls_router)
 app.include_router(megafon_admin_router)
 
 
+@app.get("/live")
+async def live():
+    """Process/event-loop liveness; does not depend on external services."""
+    return {"status": "ok"}
+
+
 @app.get("/health")
 async def health():
+    """Readiness check used by Railway before routing traffic."""
+    from database.connection import get_pool
+    from services import fsio
     from services.recorder import _active, _shutdown_requested
+
+    failed_tasks = []
+    for name, task in getattr(app.state, "background_tasks", {}).items():
+        if task.done() and not task.cancelled():
+            failed_tasks.append(name)
+            try:
+                exc = task.exception()
+            except asyncio.CancelledError:
+                exc = None
+            if exc:
+                logger.error("Background task %s stopped: %s", name, exc)
+    if failed_tasks:
+        raise HTTPException(503, detail=f"Background tasks stopped: {', '.join(failed_tasks)}")
+    if fsio.circuit_is_open():
+        raise HTTPException(503, detail="Storage unavailable")
+
+    try:
+        pool = await get_pool()
+        await asyncio.wait_for(pool.fetchval("SELECT 1"), timeout=2)
+    except Exception as e:
+        logger.error("Readiness database check failed: %s", e)
+        raise HTTPException(503, detail="Database unavailable") from e
+
     return {
         "status": "ok",
+        "database": "ok",
         "active_recordings": len(_active),
         "shutdown_requested": _shutdown_requested,
     }
 
 
-# Debug screenshots from recorder (admin only via existing protected static files endpoint
-# would be ideal — but for now anyone can view, no PII)
+# Debug screenshots can contain meeting titles and participant names.
 @app.get("/debug/screenshot/{name}")
-async def debug_screenshot(name: str):
+async def debug_screenshot(name: str, _admin=Depends(get_admin_user)):
     import re
     if not re.match(r'^[\w.-]+\.png$', name):
         return {"error": "invalid name"}
@@ -131,19 +194,19 @@ async def debug_screenshot(name: str):
 
 
 # ── Serve React frontend ──────────────────────────────────────────────────────
-_frontend_dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+_frontend_dist = (Path(__file__).resolve().parent / ".." / "frontend" / "dist").resolve()
 
 if os.path.exists(_frontend_dist):
-    app.mount("/assets", StaticFiles(directory=os.path.join(_frontend_dist, "assets")), name="assets")
+    app.mount("/assets", StaticFiles(directory=_frontend_dist / "assets"), name="assets")
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
         # Serve static files from dist root (SVGs, favicon, etc.) before falling back to SPA
         if full_path:
-            candidate = os.path.join(_frontend_dist, full_path)
-            if os.path.isfile(candidate):
+            candidate = confined_file(_frontend_dist, full_path)
+            if candidate is not None:
                 return FileResponse(candidate)
-        index = os.path.join(_frontend_dist, "index.html")
+        index = _frontend_dist / "index.html"
         return FileResponse(index)
 else:
     @app.get("/")

@@ -19,7 +19,7 @@ cleanup_x_locks() {
 
 start_xvfb() {
   cleanup_x_locks
-  Xvfb :${DISPLAY_NUM} -screen 0 1280x720x24 -nolisten tcp &
+  Xvfb :${DISPLAY_NUM} -screen 0 1280x720x24 -nolisten tcp -ac &
 }
 
 xvfb_ready() {
@@ -86,8 +86,15 @@ sleep 2
 echo "Xvfb and PulseAudio started"
 
 # ── App ───────────────────────────────────────────────────────────────────────
+APP_USER=appuser
+AUDIO_PATH="${AUDIO_DIR:-/audio}"
+mkdir -p "${AUDIO_PATH}"
+chown "${APP_USER}:${APP_USER}" "${AUDIO_PATH}"
+chmod 0770 "${AUDIO_PATH}"
+
 cd /app
-exec python -m uvicorn backend.main:app \
+export HOME=/app
+exec gosu "${APP_USER}" python -m uvicorn backend.main:app \
   --host 0.0.0.0 \
   --port "${PORT:-8000}" \
   --workers 1 \

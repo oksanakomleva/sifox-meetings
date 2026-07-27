@@ -54,10 +54,11 @@ async def callback(
     state: str,
     response: Response,
     invite_token: Annotated[str | None, Cookie(alias="invite_token")] = None,
+    session_token: Annotated[str | None, Cookie(alias="session")] = None,
 ):
     """Google OAuth callback — handles both login and calendar flows."""
     try:
-        result = await google_oauth.handle_callback(code, state)
+        result = await google_oauth.handle_callback(code, state, session_token)
     except OAuthError as e:
         logger.error("OAuth callback failed: %s", e)
         return RedirectResponse(f"{config.BASE_URL}/login?error=oauth_failed")
@@ -273,7 +274,12 @@ async def connect_calendar(
     session = await models.get_session(session_token)
     if not session:
         raise HTTPException(401, "Session expired")
-    url = google_oauth.get_calendar_url(session["user_id"])
+    url = google_oauth.get_calendar_url(
+        session["user_id"],
+        session_token=session_token,
+        expected_google_id=session.get("google_id"),
+        expected_email=session["email"],
+    )
     return RedirectResponse(url)
 
 
@@ -290,7 +296,13 @@ async def connect_gmail_send(
     if not session:
         raise HTTPException(401, "Session expired")
     safe_next = next if next.startswith("/") else "/"
-    url = google_oauth.get_gmail_send_url(session["user_id"], safe_next)
+    url = google_oauth.get_gmail_send_url(
+        session["user_id"],
+        safe_next,
+        session_token=session_token,
+        expected_google_id=session.get("google_id"),
+        expected_email=session["email"],
+    )
     return RedirectResponse(url)
 
 
@@ -313,5 +325,10 @@ async def connect_calendar_write(
         raise HTTPException(401, "Session expired")
     if not session.get("is_admin"):
         raise HTTPException(403, "Admin only")
-    url = google_oauth.get_calendar_write_url(session["user_id"])
+    url = google_oauth.get_calendar_write_url(
+        session["user_id"],
+        session_token=session_token,
+        expected_google_id=session.get("google_id"),
+        expected_email=session["email"],
+    )
     return RedirectResponse(url)

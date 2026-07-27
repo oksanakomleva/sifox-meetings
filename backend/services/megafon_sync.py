@@ -107,10 +107,13 @@ async def _launch_browser():
 
     display = os.environ.get("DISPLAY", ":99")
     pw = await async_playwright().start()
+    args = ["--disable-dev-shm-usage"]
+    if config.CHROMIUM_DISABLE_SANDBOX:
+        args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
     browser = await asyncio.wait_for(
         pw.chromium.launch(
             headless=False,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+            args=args,
             env={**os.environ, "DISPLAY": display},
         ),
         timeout=30,
@@ -239,12 +242,16 @@ async def _import_one(client: httpx.AsyncClient, item: dict) -> bool:
         return False
 
     dest = Path(config.AUDIO_DIR) / f"call_{call_id}.audio"
-    os.makedirs(config.AUDIO_DIR, exist_ok=True)
+    from services import fsio
+    await fsio.mkdir_p(Path(config.AUDIO_DIR))
     async with client.stream("GET", f"/record/{rid}/file") as r:
         r.raise_for_status()
-        with open(dest, "wb") as f:
+        f = await fsio.run_io(open, dest, "wb")
+        try:
             async for chunk in r.aiter_bytes():
-                f.write(chunk)
+                await fsio.run_io(f.write, chunk, timeout=120)
+        finally:
+            await fsio.run_io(f.close)
 
     # Transcribe+analyze in the background (shares the whisper queue with meetings).
     from services.call_processing import process_call

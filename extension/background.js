@@ -55,13 +55,21 @@ async function getSessionToken(baseUrl) {
 // clear state. Used by the popup "Stop" and by the captured-tab-closed handler.
 async function stopRecording() {
   if (!(await offscreenExists())) {
-    await setRecording(false)
-    await chrome.storage.local.remove(['capturedTabId', 'capturedTab'])
-    return { ok: false, error: 'Запись потеряна (расширение перезапускалось). Аудио не сохранено.' }
+    // Recreate the offscreen document: it can resume acknowledged state and
+    // unacknowledged chunks from chrome.storage + IndexedDB.
+    await ensureOffscreen()
   }
-  const res = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'stop' })
-  await setRecording(false)
-  await chrome.storage.local.remove(['capturedTabId', 'capturedTab'])
+  const { capturedBaseUrl } = await chrome.storage.local.get('capturedBaseUrl')
+  const sessionToken = capturedBaseUrl ? await getSessionToken(capturedBaseUrl) : null
+  const res = await chrome.runtime.sendMessage({
+    target: 'offscreen',
+    type: 'stop',
+    sessionToken,
+  })
+  if (res && res.ok) {
+    await setRecording(false)
+    await chrome.storage.local.remove(['capturedTabId', 'capturedTab', 'capturedBaseUrl'])
+  }
   return res || { ok: false, error: 'no response from offscreen' }
 }
 
@@ -89,8 +97,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
       if (msg.type === 'recording-ended') {
         // Offscreen auto-stopped (e.g. captured tab was closed) and uploaded.
-        await setRecording(false)
-        sendResponse({ ok: true })
+        if (msg.result && msg.result.ok) {
+          await setRecording(false)
+          await chrome.storage.local.remove(['capturedTabId', 'capturedTab', 'capturedBaseUrl'])
+        }
+        sendResponse(msg.result || { ok: false })
         return
       }
 
@@ -112,6 +123,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           await chrome.storage.local.set({
             capturedTabId: tabId,
             capturedTab: { title, url: sourceUrl, icon: favIconUrl },
+            capturedBaseUrl: baseUrl,
           })
         }
         sendResponse(res || { ok: false, error: 'no response from offscreen' })
@@ -123,7 +135,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return
       }
     } catch (e) {
-      await setRecording(false)
+      if (msg.type !== 'stop') await setRecording(false)
       sendResponse({ ok: false, error: String(e && e.message || e) })
     }
   })()

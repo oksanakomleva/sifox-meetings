@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from typing import Annotated
@@ -158,7 +159,7 @@ async def retranscribe_meeting(meeting_id: str, admin: AdminUser):
     meeting = await models.get_meeting(meeting_id)
     if not meeting:
         raise HTTPException(404, "Meeting not found")
-    audio = await asyncio.to_thread(find_audio_on_disk, meeting_id)
+    audio = await find_audio_on_disk(meeting_id)
     if audio is None:
         raise HTTPException(400, "Аудиофайл встречи не найден в хранилище")
 
@@ -357,9 +358,9 @@ async def delete_error_meetings(admin: AdminUser):
 async def delete_meeting(meeting_id: str, admin: AdminUser):
     """Delete a single meeting: its DB row (cascades to participants / calendar
     links / live_qa) and its audio file. For cleanup of test/junk meetings."""
-    import os
     from config import config
     from database.connection import get_pool
+    from services import fsio
 
     if "/" in meeting_id or "\\" in meeting_id or ".." in meeting_id:
         raise HTTPException(400, "Invalid meeting_id")
@@ -371,14 +372,12 @@ async def delete_meeting(meeting_id: str, admin: AdminUser):
         raise HTTPException(404, "Meeting not found")
 
     removed_files = []
-    for ext in (".mp3", ".wav"):
-        fpath = os.path.join(config.AUDIO_DIR, f"{meeting_id}{ext}")
-        if os.path.exists(fpath):
-            try:
-                os.remove(fpath)
-                removed_files.append(f"{meeting_id}{ext}")
-            except OSError:
-                pass
+    for ext in (".mp3", ".wav", ".webm", ".ogg", ".opus", ".m4a", ".mp4", ".webm.part"):
+        fpath = Path(config.AUDIO_DIR) / f"{meeting_id}{ext}"
+        if await fsio.exists(fpath):
+            await fsio.unlink_quiet(fpath)
+            if not await fsio.exists(fpath):
+                removed_files.append(fpath.name)
     logger.info("Admin %s deleted meeting %s (files: %s)", admin["user_id"], meeting_id, removed_files)
     return {"ok": True, "meeting_id": meeting_id, "files_removed": removed_files}
 
@@ -469,34 +468,40 @@ async def list_storage(admin: AdminUser):
     from config import config
     from datetime import datetime
     from database.connection import get_pool
+    from services import fsio
 
     audio_dir = config.AUDIO_DIR
     files = []
     total_bytes = 0
 
-    try:
-        entries = os.listdir(audio_dir)
-    except FileNotFoundError:
-        return {"files": [], "total_bytes": 0, "audio_dir": audio_dir}
-
-    # Collect file metadata from disk first (both .wav and .mp3)
-    raw_files = []
-    for fname in entries:
-        if not (fname.endswith(".wav") or fname.endswith(".mp3")):
-            continue
-        fpath = os.path.join(audio_dir, fname)
+    def _scan_storage():
+        found = []
+        total = 0
         try:
-            stat = os.stat(fpath)
-            meeting_id = os.path.splitext(fname)[0]
-            raw_files.append({
-                "filename": fname,
-                "meeting_id": meeting_id,
-                "size_bytes": stat.st_size,
-                "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-            })
-            total_bytes += stat.st_size
-        except OSError:
-            continue
+            entries = os.listdir(audio_dir)
+        except FileNotFoundError:
+            return found, total
+        for fname in entries:
+            if not fname.endswith((".wav", ".mp3", ".webm", ".ogg", ".opus", ".m4a", ".mp4", ".webm.part")):
+                continue
+            fpath = os.path.join(audio_dir, fname)
+            try:
+                stat = os.stat(fpath)
+                found.append({
+                    "filename": fname,
+                    "meeting_id": fname.removesuffix(".webm.part") if fname.endswith(".webm.part") else os.path.splitext(fname)[0],
+                    "size_bytes": stat.st_size,
+                    "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                })
+                total += stat.st_size
+            except OSError:
+                continue
+        return found, total
+
+    try:
+        raw_files, total_bytes = await fsio.run_io(_scan_storage)
+    except (asyncio.TimeoutError, OSError) as e:
+        raise HTTPException(503, "Storage temporarily unavailable") from e
 
     # Enrich with meeting title + user info from DB (single query for all IDs)
     meta_by_id: dict[str, dict] = {}
@@ -572,6 +577,7 @@ async def list_storage(admin: AdminUser):
 async def delete_audio_file(meeting_id: str, admin: AdminUser):
     """Delete the audio file (.mp3 or .wav) for a meeting."""
     from config import config
+    from services import fsio
 
     # Basic safety: meeting_id should be a UUID-like string, no path traversal
     if "/" in meeting_id or "\\" in meeting_id or ".." in meeting_id:
@@ -579,12 +585,14 @@ async def delete_audio_file(meeting_id: str, admin: AdminUser):
 
     deleted = []
     freed = 0
-    for ext in (".mp3", ".wav"):
-        fpath = os.path.join(config.AUDIO_DIR, f"{meeting_id}{ext}")
-        if os.path.exists(fpath):
-            size = os.path.getsize(fpath)
-            os.remove(fpath)
-            deleted.append(f"{meeting_id}{ext}")
+    for ext in (".mp3", ".wav", ".webm", ".ogg", ".opus", ".m4a", ".mp4", ".webm.part"):
+        fpath = Path(config.AUDIO_DIR) / f"{meeting_id}{ext}"
+        size = await fsio.size(fpath)
+        if size >= 0:
+            await fsio.unlink_quiet(fpath)
+            if await fsio.exists(fpath):
+                raise HTTPException(503, "Storage temporarily unavailable")
+            deleted.append(fpath.name)
             freed += size
             logger.info("Admin %s deleted %s (%d bytes)", admin["user_id"], fpath, size)
 

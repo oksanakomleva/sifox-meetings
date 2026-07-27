@@ -13,6 +13,8 @@ letting the caller mark the item 'error' instead of hanging forever).
 """
 import asyncio
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -20,10 +22,50 @@ logger = logging.getLogger(__name__)
 # A volume metadata op should return in well under a second; if the mount stalls
 # we fail fast rather than keep a loop worker parked for minutes.
 FS_TIMEOUT = 30.0
+# Keep potentially wedged network-volume calls away from asyncio's shared
+# default executor (OAuth/calendar and other unrelated work use that pool).
+_storage_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="storage-io")
+_consecutive_failures = 0
+_circuit_open_until = 0.0
+_FAILURES_TO_OPEN = 3
+_CIRCUIT_SECONDS = 60.0
 
 
-async def _run(func, *args):
-    return await asyncio.wait_for(asyncio.to_thread(func, *args), timeout=FS_TIMEOUT)
+class StorageUnavailableError(OSError):
+    pass
+
+
+def circuit_is_open() -> bool:
+    return time.monotonic() < _circuit_open_until
+
+
+async def run_io(func, *args, timeout: float = FS_TIMEOUT):
+    """Run blocking storage I/O in the dedicated bounded executor.
+
+    A Python timeout cannot kill a thread stuck in a kernel filesystem call, but
+    isolation prevents those calls from exhausting asyncio's default executor.
+    """
+    global _consecutive_failures, _circuit_open_until
+    if circuit_is_open():
+        raise StorageUnavailableError("storage circuit breaker is open")
+
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(_storage_executor, func, *args)
+    try:
+        result = await asyncio.wait_for(future, timeout=timeout)
+    except (asyncio.TimeoutError, OSError):
+        _consecutive_failures += 1
+        if _consecutive_failures >= _FAILURES_TO_OPEN:
+            _circuit_open_until = time.monotonic() + _CIRCUIT_SECONDS
+            logger.error(
+                "Storage circuit opened for %.0fs after %d consecutive failures",
+                _CIRCUIT_SECONDS,
+                _consecutive_failures,
+            )
+        raise
+    else:
+        _consecutive_failures = 0
+        return result
 
 
 async def size(p: Path) -> int:
@@ -34,11 +76,11 @@ async def size(p: Path) -> int:
             return p.stat().st_size
         except FileNotFoundError:
             return -1
-    return await _run(_size)
+    return await run_io(_size)
 
 
 async def exists(p: Path) -> bool:
-    return await _run(p.exists)
+    return await run_io(p.exists)
 
 
 async def unlink_quiet(p: Path) -> None:
@@ -50,10 +92,10 @@ async def unlink_quiet(p: Path) -> None:
         except FileNotFoundError:
             pass
     try:
-        await _run(_unlink)
+        await run_io(_unlink)
     except (asyncio.TimeoutError, OSError) as e:  # noqa: BLE001 — best effort
         logger.warning("unlink %s failed/timed out: %s", getattr(p, "name", p), e)
 
 
 async def mkdir_p(p: Path) -> None:
-    await _run(lambda: p.mkdir(parents=True, exist_ok=True))
+    await run_io(lambda: p.mkdir(parents=True, exist_ok=True))

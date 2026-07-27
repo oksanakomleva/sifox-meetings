@@ -2,6 +2,7 @@
 admin endpoints to drive the interactive MegaFon import (phone → OTP → sync)."""
 import logging
 import os
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -104,13 +105,13 @@ async def megafon_reset(admin: AdminUser):
     """Delete all imported calls + their audio (so the next import re-downloads
     and re-processes from scratch, e.g. to apply speaker diarization)."""
     paths = await models.delete_all_calls()
+    from services import fsio
     removed = 0
     for p in paths:
-        try:
-            os.remove(os.path.join(config.AUDIO_DIR, p))
+        target = Path(config.AUDIO_DIR) / p
+        existed = await fsio.exists(target)
+        if existed:
+            await fsio.unlink_quiet(target)
+        if existed and not await fsio.exists(target):
             removed += 1
-        except FileNotFoundError:
-            pass
-        except OSError:
-            pass
     return {"deleted_rows": len(paths), "removed_files": removed}

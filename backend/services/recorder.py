@@ -62,7 +62,7 @@ async def wait_for_idle(timeout: float = 3300) -> bool:
         return False
 
 
-def find_audio_on_disk(meeting_id: str) -> "Path | None":
+async def find_audio_on_disk(meeting_id: str) -> "Path | None":
     """Locate a meeting's audio on the volume by deterministic name.
 
     The source WAV is present during transcription — it's deleted only after a
@@ -72,13 +72,10 @@ def find_audio_on_disk(meeting_id: str) -> "Path | None":
     (that bug marked mid-transcription meetings as "данные не сохранились" even
     though the WAV was sitting right here on the persistent volume)."""
     base = Path(config.AUDIO_DIR)
-    for ext in (".wav", ".mp3"):
+    for ext in (".wav", ".webm", ".ogg", ".opus", ".m4a", ".mp4", ".mp3"):
         p = base / f"{meeting_id}{ext}"
-        try:
-            if p.exists() and p.stat().st_size > 10_000:
-                return p
-        except OSError:
-            continue
+        if await fsio.size(p) > 10_000:
+            return p
     return None
 
 
@@ -117,6 +114,23 @@ async def recover_interrupted_meetings() -> None:
         stuck = await conn.fetch(
             "SELECT id, title, status, transcript FROM meetings WHERE status IN ('transcribing', 'analyzing')"
         )
+        abandoned_uploads = await conn.fetch(
+            """
+            SELECT id
+            FROM meetings
+            WHERE status = 'uploading'
+              AND updated_at < NOW() - INTERVAL '24 hours'
+            """
+        )
+
+    for row in abandoned_uploads:
+        mid = str(row["id"])
+        await fsio.unlink_quiet(Path(config.AUDIO_DIR) / f"{mid}.webm.part")
+        await models.update_meeting_status(
+            mid, "error", "Незавершённая загрузка устарела"
+        )
+    if abandoned_uploads:
+        logger.warning("Cleaned up %d abandoned browser uploads", len(abandoned_uploads))
 
     # Interrupted recordings: if a partial WAV survived on the volume, SALVAGE it
     # (transcribe what we have) rather than resetting to 'pending'. A blind reset
@@ -128,7 +142,7 @@ async def recover_interrupted_meetings() -> None:
     for row in recording:
         mid = str(row["id"])
         title = row["title"] or mid[:8]
-        audio = await asyncio.to_thread(find_audio_on_disk, mid)
+        audio = await find_audio_on_disk(mid)
         if audio is not None:
             logger.warning(
                 "Interrupted recording '%s' (%s) has a partial on disk (%s) — salvaging, not re-recording",
@@ -165,7 +179,7 @@ async def recover_interrupted_meetings() -> None:
         # Transcription step (or analyzing without a saved transcript): the source
         # audio is on the volume as {id}.wav/.mp3 even though the DB audio_path is
         # still NULL. Find it by name and resume the full pipeline.
-        audio = await asyncio.to_thread(find_audio_on_disk, mid)
+        audio = await find_audio_on_disk(mid)
         if audio is not None:
             logger.info("Recovering transcription for '%s' (%s) from %s", title, mid[:8], audio.name)
             spawn_tracked(mid, _recover_pipeline(mid, audio), name=f"recover-{mid[:8]}")
@@ -185,7 +199,7 @@ async def _finalize_no_show(meeting_id: str) -> None:
     Deletes the file regardless of size (find_audio_on_disk skips tiny files)."""
     await models.mark_no_show(meeting_id)
     base = Path(config.AUDIO_DIR)
-    for ext in (".wav", ".mp3"):
+    for ext in (".wav", ".webm", ".ogg", ".opus", ".m4a", ".mp4", ".mp3"):
         await fsio.unlink_quiet(base / f"{meeting_id}{ext}")
 
 
@@ -327,16 +341,18 @@ async def _record_pipeline(meeting_id: str) -> None:
         from playwright.async_api import async_playwright
         pw = await async_playwright().start()
         try:
+            chromium_args = [
+                "--disable-dev-shm-usage",
+                "--autoplay-policy=no-user-gesture-required",
+                "--use-fake-ui-for-media-stream",
+            ]
+            if config.CHROMIUM_DISABLE_SANDBOX:
+                logger.warning("Chromium sandbox explicitly disabled by configuration")
+                chromium_args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
             browser = await asyncio.wait_for(
                 pw.chromium.launch(
                     headless=False,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--autoplay-policy=no-user-gesture-required",
-                        "--use-fake-ui-for-media-stream",
-                    ],
+                    args=chromium_args,
                     env={**os.environ, "DISPLAY": display, "PULSE_SERVER": pulse, "PULSE_SINK": sink_name},
                 ),
                 timeout=30,

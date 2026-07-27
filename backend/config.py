@@ -36,6 +36,7 @@ class Config(BaseSettings):
 
     # ── Storage ───────────────────────────────────────────────────────────
     AUDIO_DIR: str = "/audio"
+    USER_UPLOAD_QUOTA_GB: int = 5
 
     # ── Encryption ────────────────────────────────────────────────────────
     ENCRYPTION_KEY: str                      # Fernet key (base64)
@@ -45,6 +46,9 @@ class Config(BaseSettings):
     PARTICIPANT_POLL_INTERVAL: int = 30      # seconds between polls
     EMPTY_POLLS_TO_END: int = 3             # ~90s after everyone leaves
     MAX_RECORDING_HOURS: int = 4
+    # Keep Chromium sandboxed by default. Set only as an emergency compatibility
+    # fallback on a platform that cannot provide user namespaces.
+    CHROMIUM_DISABLE_SANDBOX: bool = False
 
     # ── Live in-meeting assistant ("Протоколлер, …") ──────────────────────
     # All gated behind LIVE_ASSISTANT_ENABLED (default off) — when off, the

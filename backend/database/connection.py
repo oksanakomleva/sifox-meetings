@@ -15,7 +15,13 @@ async def get_pool() -> asyncpg.Pool:
 
 async def init_db(database_url: str) -> None:
     global _pool
-    _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
+    _pool = await asyncpg.create_pool(
+        database_url,
+        min_size=2,
+        max_size=10,
+        timeout=10,
+        command_timeout=60,
+    )
     schema = Path(__file__).parent / "schema.sql"
     async with _pool.acquire() as conn:
         await conn.execute(schema.read_text(encoding="utf-8"))
