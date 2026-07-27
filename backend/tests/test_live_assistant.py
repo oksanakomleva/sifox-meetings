@@ -27,6 +27,19 @@ def test_rolling_pcm_buffer_keeps_only_configured_history():
 
     assert len(buffer) == len(one_second) * 2
     assert buffer.tail(1) == b"\x05\x06" * 16_000
+    assert buffer.total_bytes == len(one_second) * 3
+
+
+def test_rolling_pcm_buffer_reads_absolute_contiguous_range():
+    buffer = RollingPCMBuffer(seconds=2)
+    one_second = b"\x01\x02" * 16_000
+    buffer.append(one_second)
+    buffer.append(b"\x03\x04" * 16_000)
+    buffer.append(b"\x05\x06" * 16_000)
+
+    # The first second has rolled off. Absolute offset one_second starts at the
+    # beginning of the retained second and never joins chunks across a gap.
+    assert buffer.range(len(one_second), len(one_second)) == b"\x03\x04" * 16_000
 
 
 def test_live_transcript_merges_overlapping_windows():

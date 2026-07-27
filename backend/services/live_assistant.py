@@ -63,12 +63,14 @@ class RollingPCMBuffer:
         self.max_bytes = max(1, seconds) * _BYTES_PER_SEC
         self._chunks: deque[bytes] = deque()
         self._size = 0
+        self.total_bytes = 0
 
     def append(self, chunk: bytes) -> None:
         if not chunk:
             return
         self._chunks.append(chunk)
         self._size += len(chunk)
+        self.total_bytes += len(chunk)
         while self._size > self.max_bytes and self._chunks:
             overflow = self._size - self.max_bytes
             first = self._chunks[0]
@@ -90,6 +92,13 @@ class RollingPCMBuffer:
                 break
         return b"".join(reversed(selected))[-wanted:]
 
+    def range(self, start_offset: int, max_bytes: int) -> bytes:
+        """Return retained PCM starting at an absolute stream byte offset."""
+        retained_start = self.total_bytes - self._size
+        relative_start = max(0, start_offset - retained_start)
+        data = b"".join(self._chunks)
+        return data[relative_start:relative_start + max(0, max_bytes)]
+
     def __len__(self) -> int:
         return self._size
 
@@ -109,26 +118,24 @@ def merge_live_transcript(previous: str, current: str) -> str:
     return merged[-_LIVE_TRANSCRIPT_MAX_CHARS:]
 
 
-async def _audio_reader(stream, queue: asyncio.Queue[bytes]) -> None:
-    """Continuously drain parec so STT/LLM latency cannot block room capture."""
-    try:
-        while True:
-            chunk = await stream.read(_BYTES_PER_SEC)
-            if not chunk:
-                return
-            if queue.full():
-                try:
-                    queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-            queue.put_nowait(chunk)
-    finally:
-        if queue.full():
-            try:
-                queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-        queue.put_nowait(b"")
+async def _audio_reader(
+    stream,
+    rolling: RollingPCMBuffer,
+    meeting_id: str,
+) -> None:
+    """Continuously drain parec directly into history.
+
+    Cloud STT may take longer than LIVE_POLL_SEC. A bounded queue here used to
+    overflow and splice non-contiguous chunks together, making clear speech look
+    like noise. Keeping the rolling buffer current lets STT always sample one
+    continuous recent window, regardless of request latency.
+    """
+    while True:
+        chunk = await stream.read(_BYTES_PER_SEC)
+        if not chunk:
+            return
+        rolling.append(chunk)
+        _diagnostic_update(meeting_id, bytes_received=rolling.total_bytes)
 
 
 async def transcribe_question(pcm: bytes) -> str:
@@ -185,35 +192,32 @@ async def run_live_assistant(
         question_bytes = max(1, config.LIVE_QUESTION_MAX_SEC) * _BYTES_PER_SEC
 
         rolling = RollingPCMBuffer(max(1, config.LIVE_BUFFER_MIN) * 60)
-        audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
         reader_task = asyncio.create_task(
-            _audio_reader(proc.stdout, audio_queue),
+            _audio_reader(proc.stdout, rolling, meeting_id),
             name=f"live-audio-{meeting_id[:8]}",
         )
-        bytes_since_poll = 0
+        last_polled_bytes = 0
         live_transcript = ""
         mute_until = 0.0
 
         while True:
-            chunk = await audio_queue.get()
-            if not chunk:
+            if reader_task.done():
                 _diagnostic_update(
                     meeting_id,
                     status="audio_source_ended",
                     parec_returncode=proc.returncode,
                 )
                 break
-            rolling.append(chunk)
-            bytes_since_poll += len(chunk)
-            _diagnostic_update(
-                meeting_id,
-                bytes_received=_diagnostics[meeting_id]["bytes_received"] + len(chunk),
-            )
-            if len(rolling) < window_bytes or bytes_since_poll < poll_bytes:
+            if (
+                len(rolling) < window_bytes
+                or rolling.total_bytes - last_polled_bytes < poll_bytes
+            ):
+                await asyncio.sleep(0.1)
                 continue
 
             segment = rolling.tail(config.LIVE_WINDOW_SEC)
-            bytes_since_poll = 0
+            window_end_offset = rolling.total_bytes
+            last_polled_bytes = window_end_offset
 
             if time.monotonic() < mute_until:
                 continue
@@ -231,8 +235,8 @@ async def run_live_assistant(
             _diagnostic_update(
                 meeting_id,
                 windows_transcribed=_diagnostics[meeting_id]["windows_transcribed"] + 1,
-                last_text=text[-300:],
                 last_error=None,
+                **({"last_text": text[-300:]} if text else {}),
             )
             if not text:
                 continue
@@ -247,17 +251,15 @@ async def run_live_assistant(
             _diagnostic_update(meeting_id, status="wake_detected")
             # Capture the question: this window (has wake word + maybe start of
             # question) plus the following audio up to LIVE_QUESTION_MAX_SEC.
-            qbuf = bytearray(segment)
-            while len(qbuf) < question_bytes:
-                more = await audio_queue.get()
-                if not more:
-                    break
-                qbuf.extend(more)
-                rolling.append(more)
+            question_start = window_end_offset - len(segment)
+            question_end = question_start + question_bytes
+            while rolling.total_bytes < question_end and not reader_task.done():
+                await asyncio.sleep(0.1)
+            question_audio = rolling.range(question_start, question_bytes)
 
             await _handle_question(
                 meeting_id,
-                bytes(qbuf),
+                question_audio,
                 live_transcript,
                 rolling.tail(config.LIVE_CONTEXT_AUDIO_SEC),
                 speak,
