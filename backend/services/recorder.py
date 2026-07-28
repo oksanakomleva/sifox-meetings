@@ -1435,6 +1435,22 @@ async def _pin_browser_audio(sink_name: str) -> None:
 async def _pin_browser_microphone(source_name: str) -> int:
     """Force Chromium's WebRTC capture stream onto its per-meeting bot mic."""
     try:
+        sources = await asyncio.create_subprocess_exec(
+            "pactl",
+            "list",
+            "sources",
+            "short",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        sources_stdout, _ = await sources.communicate()
+        target_source_index: str | None = None
+        for raw in sources_stdout.decode(errors="replace").splitlines():
+            columns = raw.split()
+            if len(columns) >= 2 and columns[1] == source_name:
+                target_source_index = columns[0]
+                break
+
         needle = f"PULSE_SOURCE={source_name}".encode()
         mypids: set[str] = set()
         for pid in os.listdir("/proc"):
@@ -1446,8 +1462,6 @@ async def _pin_browser_microphone(source_name: str) -> int:
                         mypids.add(pid)
             except OSError:
                 continue
-        if not mypids:
-            return 0
 
         proc = await asyncio.create_subprocess_exec(
             "pactl",
@@ -1458,17 +1472,23 @@ async def _pin_browser_microphone(source_name: str) -> int:
         )
         stdout, _ = await proc.communicate()
         current: str | None = None
-        moves: list[str] = []
+        already_pinned: set[str] = set()
+        owned_outputs: set[str] = set()
         for raw in stdout.decode(errors="replace").splitlines():
             line = raw.strip()
             if line.startswith("Source Output #"):
                 current = line.split("#", 1)[1].strip()
+            elif current and line.startswith("Source:"):
+                if (
+                    target_source_index is not None
+                    and line.split(":", 1)[1].strip() == target_source_index
+                ):
+                    already_pinned.add(current)
             elif current and "application.process.id" in line and '"' in line:
                 if line.split('"')[1] in mypids:
-                    moves.append(current)
-                current = None
-        pinned = 0
-        for source_output in moves:
+                    owned_outputs.add(current)
+        pinned = len(already_pinned)
+        for source_output in owned_outputs - already_pinned:
             move = await asyncio.create_subprocess_exec(
                 "pactl",
                 "move-source-output",

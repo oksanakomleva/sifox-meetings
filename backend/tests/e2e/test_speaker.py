@@ -222,6 +222,22 @@ async def _create_listener_sink(name: str) -> int:
 async def _pin_listener_audio(sink_name: str) -> int:
     """Move this speaker browser's output onto its private listener sink."""
     try:
+        sinks = await asyncio.create_subprocess_exec(
+            "pactl",
+            "list",
+            "sinks",
+            "short",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        sinks_stdout, _ = await sinks.communicate()
+        target_sink_index: str | None = None
+        for raw in sinks_stdout.decode(errors="replace").splitlines():
+            columns = raw.split()
+            if len(columns) >= 2 and columns[1] == sink_name:
+                target_sink_index = columns[0]
+                break
+
         needle = f"PULSE_SINK={sink_name}".encode()
         pids: set[str] = set()
         for pid in os.listdir("/proc"):
@@ -241,18 +257,24 @@ async def _pin_listener_audio(sink_name: str) -> int:
             stderr=asyncio.subprocess.DEVNULL,
         )
         stdout, _ = await proc.communicate()
-        current = None
-        moves: list[str] = []
+        current: str | None = None
+        already_pinned: set[str] = set()
+        owned_inputs: set[str] = set()
         for raw in stdout.decode(errors="replace").splitlines():
             line = raw.strip()
             if line.startswith("Sink Input #"):
-                current = line.split("#", 1)[1]
+                current = line.split("#", 1)[1].strip()
+            elif current and line.startswith("Sink:"):
+                if (
+                    target_sink_index is not None
+                    and line.split(":", 1)[1].strip() == target_sink_index
+                ):
+                    already_pinned.add(current)
             elif current and "application.process.id" in line and '"' in line:
                 if line.split('"')[1] in pids:
-                    moves.append(current)
-                current = None
-        pinned = 0
-        for sink_input in moves:
+                    owned_inputs.add(current)
+        pinned = len(already_pinned)
+        for sink_input in owned_inputs - already_pinned:
             move = await asyncio.create_subprocess_exec(
                 "pactl",
                 "move-sink-input",
