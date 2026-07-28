@@ -53,7 +53,7 @@ def _load_env_test() -> None:
 
 
 _load_env_test()
-EXPECTED_LIVE_ANSWER = "омега"
+EXPECTED_LIVE_ANSWER = "мега"
 
 
 def _import_requests():
