@@ -73,7 +73,7 @@ RUN espeak-ng -v ru -s 115 -p 50 \
     "Проект называется Маяк. Повторяю кодовое название: Маяк. Протоколлер, как называется проект?" \
     -w /tmp/live_assistant_question.wav \
     && ffmpeg -y -i /tmp/live_assistant_question.wav \
-       -af "adelay=15000,apad=pad_dur=150" -t 150 \
+       -af "adelay=35000,apad=pad_dur=150" -t 150 \
        /app/backend/tests/e2e/live_assistant_test_audio.wav \
        >/dev/null 2>&1 \
     && rm /tmp/live_assistant_question.wav \
