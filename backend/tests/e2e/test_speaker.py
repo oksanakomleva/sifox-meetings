@@ -542,6 +542,13 @@ async def speak_in_meeting(
             browser_args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
 
         try:
+            launch_options = {}
+            if audio_profile == "live_assistant":
+                # Playwright's Chromium defaults include --mute-audio in
+                # headless mode. Merely omitting our own flag is insufficient:
+                # the listener then gets a Pulse sink-input that contains only
+                # silence, so it can never verify the bot's remote speech.
+                launch_options["ignore_default_args"] = ["--mute-audio"]
             browser = await p.chromium.launch(
                 # headless=True saves ~300MB RAM vs headless=False.
                 # Two Chromium instances (recorder + speaker) running simultaneously would OOM.
@@ -549,6 +556,7 @@ async def speak_in_meeting(
                 headless=True,
                 args=browser_args,
                 env=launch_env,
+                **launch_options,
             )
         except Exception:
             await _cleanup_listener(listener_capture, listener_module)
