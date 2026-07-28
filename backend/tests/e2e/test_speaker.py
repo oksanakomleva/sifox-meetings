@@ -219,7 +219,7 @@ async def _create_listener_sink(name: str) -> int:
     return int(stdout.decode().strip())
 
 
-async def _pin_listener_audio(sink_name: str) -> None:
+async def _pin_listener_audio(sink_name: str) -> int:
     """Move this speaker browser's output onto its private listener sink."""
     try:
         needle = f"PULSE_SINK={sink_name}".encode()
@@ -251,6 +251,7 @@ async def _pin_listener_audio(sink_name: str) -> None:
                 if line.split('"')[1] in pids:
                     moves.append(current)
                 current = None
+        pinned = 0
         for sink_input in moves:
             move = await asyncio.create_subprocess_exec(
                 "pactl",
@@ -261,14 +262,26 @@ async def _pin_listener_audio(sink_name: str) -> None:
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await move.wait()
+            if move.returncode == 0:
+                pinned += 1
+        return pinned
     except Exception as exc:
         logger.debug("Could not pin listener audio: %s", exc)
+        return 0
 
 
-async def _listener_pin_loop(sink_name: str) -> None:
+async def _listener_pin_loop(sink_name: str, state: dict[str, int | bool]) -> None:
     try:
         while True:
-            await _pin_listener_audio(sink_name)
+            pinned = await _pin_listener_audio(sink_name)
+            if pinned:
+                if not state["pinned"]:
+                    logger.info(
+                        "Listener browser playback stream found (%d stream(s))",
+                        pinned,
+                    )
+                state["pinned"] = True
+                state["pin_count"] = pinned
             await asyncio.sleep(3)
     except asyncio.CancelledError:
         pass
@@ -457,6 +470,7 @@ async def speak_in_meeting(
     listener_module = None
     listener_capture = None
     listener_pin_task = None
+    listener_state: dict[str, int | bool] = {"pinned": False, "pin_count": 0}
     listener_path = Path(f"/tmp/e2e-listener-{os.getpid()}.wav")
     try:
         listener_path.unlink()
@@ -521,7 +535,7 @@ async def speak_in_meeting(
             raise
         if listener_sink:
             listener_pin_task = asyncio.create_task(
-                _listener_pin_loop(listener_sink),
+                _listener_pin_loop(listener_sink, listener_state),
                 name="e2e-listener-pin",
             )
 
@@ -601,6 +615,9 @@ async def speak_in_meeting(
     if not success:
         return False
     if audio_profile == "live_assistant":
+        if not listener_state["pinned"]:
+            logger.error("Listener browser playback stream was not found")
+            return False
         if not listener_path.exists() or listener_path.stat().st_size < 10_000:
             logger.error("Listener capture is empty: %s", listener_path)
             return False

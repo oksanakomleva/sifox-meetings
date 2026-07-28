@@ -466,9 +466,24 @@ async def _record_pipeline(meeting_id: str) -> None:
                     if not await _set_bot_mic(page, enabled=True):
                         raise RuntimeError("Telemost microphone could not be enabled")
                     try:
-                        await _pin_browser_microphone(_source)
+                        pinned_streams = 0
+                        for _ in range(6):
+                            pinned_streams = await _pin_browser_microphone(_source)
+                            if pinned_streams:
+                                break
+                            await asyncio.sleep(0.5)
+                        if not pinned_streams:
+                            raise RuntimeError(
+                                "Chromium microphone capture stream was not found"
+                            )
+                        # Give Telemost time to publish the newly unmuted WebRTC
+                        # track before feeding it a short TTS sentence.
+                        await asyncio.sleep(1)
                         if not await speak_text(text, _mic):
                             raise RuntimeError("TTS playback into the bot microphone failed")
+                        # Let Chromium flush the final encoded audio frames before
+                        # muting the track again.
+                        await asyncio.sleep(0.75)
                     finally:
                         if not await _set_bot_mic(page, enabled=False):
                             logger.warning(
@@ -1417,7 +1432,7 @@ async def _pin_browser_audio(sink_name: str) -> None:
         logger.debug("pin audio %s: %s", sink_name, e)
 
 
-async def _pin_browser_microphone(source_name: str) -> None:
+async def _pin_browser_microphone(source_name: str) -> int:
     """Force Chromium's WebRTC capture stream onto its per-meeting bot mic."""
     try:
         needle = f"PULSE_SOURCE={source_name}".encode()
@@ -1432,7 +1447,7 @@ async def _pin_browser_microphone(source_name: str) -> None:
             except OSError:
                 continue
         if not mypids:
-            return
+            return 0
 
         proc = await asyncio.create_subprocess_exec(
             "pactl",
@@ -1452,6 +1467,7 @@ async def _pin_browser_microphone(source_name: str) -> None:
                 if line.split('"')[1] in mypids:
                     moves.append(current)
                 current = None
+        pinned = 0
         for source_output in moves:
             move = await asyncio.create_subprocess_exec(
                 "pactl",
@@ -1468,8 +1484,12 @@ async def _pin_browser_microphone(source_name: str) -> None:
                     source_output,
                     source_name,
                 )
+            else:
+                pinned += 1
+        return pinned
     except Exception as exc:
         logger.debug("pin microphone %s: %s", source_name, exc)
+        return 0
 
 
 async def _audio_pin_loop(

@@ -70,7 +70,7 @@ RUN espeak-ng -v ru -s 120 -p 50 \
 # deterministic fact + wake-word question. Pad beyond the test duration so the
 # fake microphone never loops and triggers the assistant twice.
 RUN espeak-ng -v ru -s 115 -p 50 \
-    "Проект называется Маяк. Повторяю кодовое название: Маяк. Протоколлер, как называется проект?" \
+    "Проект называется Север. Повторяю кодовое название: Север. Протоколлер, как называется проект?" \
     -w /tmp/live_assistant_question.wav \
     && ffmpeg -y -i /tmp/live_assistant_question.wav \
        -af "adelay=35000,apad=pad_dur=150" -t 150 \

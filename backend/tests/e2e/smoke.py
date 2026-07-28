@@ -53,6 +53,7 @@ def _load_env_test() -> None:
 
 
 _load_env_test()
+EXPECTED_LIVE_ANSWER = "север"
 
 
 def _import_requests():
@@ -357,7 +358,9 @@ class SmokeTest:
                             if state == "completed" and speaker_status.get("ready"):
                                 if live_assistant:
                                     listener_text = speaker_status.get("stdout") or ""
-                                    heard_answer = "маяк" in listener_text.lower()
+                                    heard_answer = (
+                                        EXPECTED_LIVE_ANSWER in listener_text.lower()
+                                    )
                                     self._check(
                                         "Remote participant heard Protocaller answer",
                                         heard_answer,
@@ -379,7 +382,8 @@ class SmokeTest:
                                     )
                                     self._check(
                                         "Assistant found expected answer",
-                                        "маяк" in (latest_qa.get("answer") or "").lower(),
+                                        EXPECTED_LIVE_ANSWER
+                                        in (latest_qa.get("answer") or "").lower(),
                                         (latest_qa.get("answer") or "")[:300],
                                     )
                                     self._check(
