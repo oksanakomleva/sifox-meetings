@@ -69,8 +69,8 @@ RUN espeak-ng -v ru -s 120 -p 50 \
 # Live-assistant E2E: enough leading silence for both browsers to join, then a
 # deterministic fact + wake-word question. Pad beyond the test duration so the
 # fake microphone never loops and triggers the assistant twice.
-RUN espeak-ng -v ru -s 125 -p 50 \
-    "Кодовое название проекта Маяк. Протоколлер, как называется проект?" \
+RUN espeak-ng -v ru -s 115 -p 50 \
+    "Проект называется Маяк. Повторяю кодовое название: Маяк. Протоколлер, как называется проект?" \
     -w /tmp/live_assistant_question.wav \
     && ffmpeg -y -i /tmp/live_assistant_question.wav \
        -af "adelay=15000,apad=pad_dur=150" -t 150 \

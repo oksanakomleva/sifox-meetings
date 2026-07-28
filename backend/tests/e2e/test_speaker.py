@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -273,58 +274,134 @@ async def _listener_pin_loop(sink_name: str) -> None:
         pass
 
 
-async def _transcribe_listener_audio(path: Path) -> str:
+async def _compact_listener_audio(path: Path) -> Path:
+    """Remove long silence before asking STT what a remote participant heard.
+
+    The listener records roughly two minutes for a 1–3 second bot answer.
+    Whisper hallucinates stock subtitle credits on an almost-silent file and can
+    completely miss the real short phrase. Compacting only audible regions makes
+    this an honest check: silence now fails explicitly instead of producing a
+    plausible-looking transcript.
+    """
+    compact = path.with_name(f"{path.stem}-speech.wav")
     try:
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        with open(path, "rb") as audio:
-            response = await asyncio.wait_for(
-                client.audio.transcriptions.create(
-                    model=os.environ.get(
-                        "LIVE_QUESTION_STT_MODEL",
-                        "whisper-1",
-                    ),
-                    file=audio,
-                    language="ru",
-                    response_format="text",
-                ),
-                timeout=60,
-            )
-        if isinstance(response, str):
-            return response.strip()
-        text = str(getattr(response, "text", response) or "").strip()
-        if text:
-            return text
-    except Exception as exc:
-        logger.warning("Cloud listener transcription failed; using local: %s", exc)
-
+        compact.unlink()
+    except FileNotFoundError:
+        pass
     proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "services.transcribe_worker",
+        "ffmpeg",
+        "-y",
+        "-i",
         str(path),
-        "small",
-        "ru",
-        "3",
-        stdout=asyncio.subprocess.PIPE,
+        "-af",
+        (
+            "silenceremove="
+            "start_periods=1:start_duration=0.05:start_threshold=-50dB:"
+            "stop_periods=-1:stop_duration=0.35:stop_threshold=-50dB"
+        ),
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        str(compact),
+        stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
-        env={**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"},
     )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=240)
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
-        raise RuntimeError("listener transcription timed out")
+        with suppress(OSError):
+            compact.unlink()
+        raise RuntimeError("listener silence compaction timed out")
     if proc.returncode != 0:
+        with suppress(OSError):
+            compact.unlink()
         raise RuntimeError(
-            f"listener transcription failed: {stderr.decode(errors='replace')[-800:]}"
+            "listener silence compaction failed: "
+            f"{stderr.decode(errors='replace')[-500:]}"
         )
-    payload = json.loads(stdout.decode(errors="replace").strip().splitlines()[-1])
-    return " ".join(
-        segment.get("text", "") for segment in payload.get("segments", [])
-    ).strip()
+    size = compact.stat().st_size if compact.exists() else 0
+    logger.info(
+        "Listener audio compacted: %d bytes → %d bytes",
+        path.stat().st_size,
+        size,
+    )
+    if size < 10_000:
+        try:
+            compact.unlink()
+        except OSError:
+            pass
+        raise RuntimeError("Remote listener captured no audible speech")
+    return compact
+
+
+async def _transcribe_listener_audio(path: Path) -> str:
+    speech_path: Path | None = None
+    client = None
+    try:
+        speech_path = await _compact_listener_audio(path)
+        try:
+            from openai import AsyncOpenAI
+
+            client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
+            with open(speech_path, "rb") as audio:
+                response = await asyncio.wait_for(
+                    client.audio.transcriptions.create(
+                        model=os.environ.get(
+                            "LIVE_QUESTION_STT_MODEL",
+                            "whisper-1",
+                        ),
+                        file=audio,
+                        language="ru",
+                        response_format="text",
+                    ),
+                    timeout=60,
+                )
+            if isinstance(response, str):
+                return response.strip()
+            text = str(getattr(response, "text", response) or "").strip()
+            if text:
+                return text
+        except Exception as exc:
+            logger.warning("Cloud listener transcription failed; using local: %s", exc)
+
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "services.transcribe_worker",
+            str(speech_path),
+            "small",
+            "ru",
+            "3",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"},
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=240)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise RuntimeError("listener transcription timed out")
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"listener transcription failed: {stderr.decode(errors='replace')[-800:]}"
+            )
+        payload = json.loads(stdout.decode(errors="replace").strip().splitlines()[-1])
+        return " ".join(
+            segment.get("text", "") for segment in payload.get("segments", [])
+        ).strip()
+    finally:
+        if client is not None:
+            with suppress(Exception):
+                await client.close()
+        if speech_path:
+            try:
+                speech_path.unlink()
+            except OSError:
+                pass
 
 
 async def _cleanup_listener(capture, module_id: int | None) -> None:
