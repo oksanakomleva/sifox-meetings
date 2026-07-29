@@ -57,6 +57,7 @@ export interface Meeting {
   protocol_sent_at?: string | null
   visible_to_all?: boolean
   assistant_enabled?: boolean
+  assistant_public_info_enabled?: boolean
   assistant_full_access?: boolean
   participants?: Participant[]
   transcript?: string
@@ -113,6 +114,12 @@ export interface LiveQaItem {
   latency_ms: number | null
   error: string | null
   asked_at: string
+}
+
+export interface LiveNote {
+  id: number
+  text: string
+  created_at: string
 }
 
 export interface Invitation {

@@ -131,6 +131,7 @@ interface Props {
   fetchUpcoming: () => Promise<Meeting[]>
   admin?: boolean
   onSetAssistantEnabled?: (meetingId: string, enabled: boolean) => Promise<unknown>
+  onSetPublicInfoEnabled?: (meetingId: string, enabled: boolean) => Promise<unknown>
   onReanalyze?: (meetingId: string) => Promise<unknown>
   onRetranscribe?: (meetingId: string) => Promise<unknown>
   headerAction?: ReactNode
@@ -143,6 +144,7 @@ export default function MeetingsView({
   fetchUpcoming,
   admin,
   onSetAssistantEnabled,
+  onSetPublicInfoEnabled,
   onReanalyze,
   onRetranscribe,
   headerAction,
@@ -193,10 +195,40 @@ export default function MeetingsView({
     try {
       await onSetAssistantEnabled(meeting.id, enabled)
       setUpcomingMeetings(prev => prev.map(m => (
-        m.id === meeting.id ? { ...m, assistant_enabled: enabled } : m
+        m.id === meeting.id
+          ? {
+              ...m,
+              assistant_enabled: enabled,
+              assistant_public_info_enabled: enabled
+                ? m.assistant_public_info_enabled
+                : false,
+            }
+          : m
       )))
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось изменить настройку ассистента')
+    } finally {
+      setAssistantBusy(null)
+    }
+  }
+
+  const handlePublicInfoToggle = async (meeting: Meeting, enabled: boolean) => {
+    if (
+      !onSetPublicInfoEnabled
+      || meeting.status !== 'pending'
+      || !meeting.assistant_enabled
+    ) return
+    setAssistantBusy(meeting.id)
+    setError('')
+    try {
+      await onSetPublicInfoEnabled(meeting.id, enabled)
+      setUpcomingMeetings(prev => prev.map(m => (
+        m.id === meeting.id
+          ? { ...m, assistant_public_info_enabled: enabled }
+          : m
+      )))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Не удалось изменить доступ к публичным данным')
     } finally {
       setAssistantBusy(null)
     }
@@ -348,7 +380,9 @@ export default function MeetingsView({
                 <div style={{ fontWeight: 600, marginBottom: 4 }}>Живой ассистент</div>
                 <div style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>
                   Включайте только для нужных встреч до входа Протоколлера.
-                  Во встрече обращайтесь: «Протоколлер, …».
+                  Во встрече обращайтесь: «Протоколлер, …». Команда
+                  «Протоколлер, запиши…» добавит заметку в итоговый протокол.
+                  Публичные данные включаются отдельным переключателем.
                 </div>
               </div>
             )}
@@ -411,6 +445,33 @@ export default function MeetingsView({
                                   checked={Boolean(m.assistant_enabled)}
                                   disabled={!m.meeting_url || m.status !== 'pending' || assistantBusy !== null}
                                   onChange={e => handleAssistantToggle(m, e.target.checked)}
+                                />
+                                <span className="toggle-slider" />
+                              </label>
+                            </div>
+                          )}
+                          {admin && onSetPublicInfoEnabled && m.assistant_enabled && (
+                            <div
+                              onClick={e => e.stopPropagation()}
+                              style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+                              title="Разрешает отвечать на вопросы о погоде, курсах валют и других публичных данных"
+                            >
+                              <span style={{
+                                fontSize: 'var(--font-size-xs)',
+                                color: m.assistant_public_info_enabled
+                                  ? 'var(--color-accent)'
+                                  : 'var(--color-text-secondary)',
+                                whiteSpace: 'nowrap',
+                              }}>
+                                Публичные данные
+                              </span>
+                              <label className="toggle">
+                                <input
+                                  type="checkbox"
+                                  aria-label={`Публичные данные: ${m.title || m.topic || 'встреча'}`}
+                                  checked={Boolean(m.assistant_public_info_enabled)}
+                                  disabled={!m.meeting_url || m.status !== 'pending' || assistantBusy !== null}
+                                  onChange={e => handlePublicInfoToggle(m, e.target.checked)}
                                 />
                                 <span className="toggle-slider" />
                               </label>

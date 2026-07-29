@@ -21,7 +21,7 @@ from typing import Awaitable, Callable
 
 from config import config
 from database import models
-from services import qa_engine
+from services import public_info, qa_engine
 from services.transcriber import transcribe_openai_pcm, transcribe_pcm
 
 logger = logging.getLogger(__name__)
@@ -135,6 +135,67 @@ def pcm_rms(pcm: bytes) -> int:
         return 0
     mean_square = sum(sample * sample for sample in samples) / len(samples)
     return int(math.sqrt(mean_square))
+
+
+def trailing_pcm_is_silent(
+    pcm: bytes,
+    seconds: float,
+    min_rms: int,
+) -> bool:
+    """Whether the end of a PCM buffer contains only near-silence."""
+    wanted = max(2, int(seconds * _BYTES_PER_SEC))
+    wanted -= wanted % 2
+    tail = pcm[-wanted:]
+    return len(tail) >= wanted and pcm_rms(tail) < min_rms
+
+
+async def capture_question_audio(
+    rolling: RollingPCMBuffer,
+    reader_task,
+    question_start: int,
+    window_end_offset: int,
+    wake_text: str,
+    max_bytes: int,
+) -> bytes:
+    """Capture until speech ends instead of always waiting for the hard limit."""
+    max_end = question_start + max_bytes
+    wake_question = qa_engine.strip_wake_word(
+        wake_text,
+        config.LIVE_WAKE_WORD,
+    )
+    is_empty_note, note_body = qa_engine.parse_note_command(wake_question)
+    needs_followup = not wake_question.strip() or (
+        is_empty_note and not note_body
+    )
+    min_wait = (
+        config.LIVE_QUESTION_WAKE_ONLY_WAIT_SEC
+        if needs_followup
+        else config.LIVE_QUESTION_MIN_WAIT_SEC
+    )
+
+    while not reader_task.done():
+        current_end = min(rolling.total_bytes, max_end)
+        available_bytes = max(0, current_end - question_start)
+        audio = rolling.range(question_start, available_bytes)
+        after_window_sec = max(
+            0.0,
+            (current_end - window_end_offset) / _BYTES_PER_SEC,
+        )
+        if (
+            after_window_sec >= min_wait
+            and trailing_pcm_is_silent(
+                audio,
+                config.LIVE_QUESTION_SILENCE_SEC,
+                config.LIVE_MIN_RMS,
+            )
+        ):
+            return audio
+        if rolling.total_bytes >= max_end:
+            break
+        await asyncio.sleep(0.1)
+
+    available_bytes = min(max_bytes, max(0, rolling.total_bytes - question_start))
+    return rolling.range(question_start, available_bytes)
 
 
 async def _audio_reader(
@@ -285,10 +346,21 @@ async def run_live_assistant(
             # Capture the question: this window (has wake word + maybe start of
             # question) plus the following audio up to LIVE_QUESTION_MAX_SEC.
             question_start = window_end_offset - len(segment)
-            question_end = question_start + question_bytes
-            while rolling.total_bytes < question_end and not reader_task.done():
-                await asyncio.sleep(0.1)
-            question_audio = rolling.range(question_start, question_bytes)
+            question_audio = await capture_question_audio(
+                rolling,
+                reader_task,
+                question_start,
+                window_end_offset,
+                text,
+                question_bytes,
+            )
+            _diagnostic_update(
+                meeting_id,
+                question_audio_sec=round(
+                    len(question_audio) / _BYTES_PER_SEC,
+                    2,
+                ),
+            )
 
             await _handle_question(
                 meeting_id,
@@ -418,17 +490,116 @@ async def _handle_question(
         raw = await transcribe_question(audio)
         question = qa_engine.strip_wake_word(raw, config.LIVE_WAKE_WORD)
         if not question or len(question) < 3:
-            logger.info("Live assistant: empty question after wake (%s) — skipping", meeting_id[:8])
+            logger.info(
+                "Live assistant: empty question after wake (%s) — skipping",
+                meeting_id[:8],
+            )
             return
-        search_query = qa_engine.build_search_query(question)
 
+        is_note, note_text = qa_engine.parse_note_command(question)
+        if is_note:
+            scope = "note"
+            if note_text:
+                note_text = note_text[:2_000]
+                await models.save_live_note(meeting_id, note_text)
+                answer = "Записал. Заметка попадёт в итоговый протокол."
+                sources = ["meeting_note"]
+                source_details = [{
+                    "source": "meeting_note",
+                    "label": "Продиктованная заметка",
+                    "snippet": note_text,
+                    "used": True,
+                }]
+            else:
+                answer = "Что именно записать?"
+            await _speak_and_save_answer(
+                meeting_id,
+                question,
+                answer,
+                scope,
+                sources,
+                source_details,
+                search_query,
+                started,
+                speak,
+            )
+            saved = True
+            return
+
+        meeting = await models.get_meeting(meeting_id)
+        route = public_info.classify_public_question(question)
+        if route == "ambiguous":
+            scope = "ambiguous"
+            answer = (
+                "Уточните, пожалуйста: искать ответ в рабочих данных "
+                "или в публичных источниках?"
+            )
+            await _speak_and_save_answer(
+                meeting_id,
+                question,
+                answer,
+                scope,
+                sources,
+                source_details,
+                search_query,
+                started,
+                speak,
+            )
+            saved = True
+            return
+
+        if route == "public":
+            scope = "public"
+            sources = ["web"]
+            public_enabled = bool(
+                config.LIVE_PUBLIC_INFO_ENABLED
+                and meeting
+                and meeting.get("assistant_public_info_enabled")
+            )
+            public_error = None
+            if not public_enabled:
+                answer = "Публичные источники для этой встречи выключены."
+            else:
+                try:
+                    answer, source_details = (
+                        await public_info.answer_public_question(question)
+                    )
+                except Exception as exc:
+                    public_error = f"{type(exc).__name__}: {exc}"[:1_000]
+                    logger.exception(
+                        "Public live answer failed (%s)",
+                        meeting_id[:8],
+                    )
+                    answer = (
+                        "Сейчас не удалось получить актуальные публичные данные. "
+                        "Попробуйте повторить вопрос чуть позже."
+                    )
+            await _speak_and_save_answer(
+                meeting_id,
+                question,
+                answer,
+                scope,
+                sources,
+                source_details,
+                search_query,
+                started,
+                speak,
+                initial_error=public_error,
+            )
+            saved = True
+            return
+
+        search_query = qa_engine.build_search_query(question)
         # Scope: external attendees → meeting_only, unless host opted into full.
-        attendees, full_override, meeting = await asyncio.gather(
+        attendees, full_override = await asyncio.gather(
             models.get_meeting_attendee_emails(meeting_id),
             models.get_meeting_full_access(meeting_id),
-            models.get_meeting(meeting_id),
         )
-        scope = qa_engine.select_scope(attendees, config.ALLOWED_DOMAIN, full_override)
+        scope = qa_engine.select_scope(
+            attendees,
+            config.ALLOWED_DOMAIN,
+            full_override,
+        )
         meeting_metadata = qa_engine.format_meeting_metadata(meeting, attendees)
 
         context_transcript = live_transcript
@@ -437,37 +608,33 @@ async def _handle_question(
             if accurate_context:
                 context_transcript = accurate_context
 
-        answer, sources, source_details, search_query = await qa_engine.answer_question(
-            question, scope=scope, live_transcript=context_transcript,
-            meeting_metadata=meeting_metadata,
-            budget=config.LIVE_CONTEXT_MAX_CHARS,
+        answer, sources, source_details, search_query = (
+            await qa_engine.answer_question(
+                question,
+                scope=scope,
+                live_transcript=context_transcript,
+                meeting_metadata=meeting_metadata,
+                budget=config.LIVE_CONTEXT_MAX_CHARS,
+            )
         )
-        logger.info("Live assistant Q (%s, scope=%s): %r → A: %r", meeting_id[:8], scope, question, answer)
+        logger.info(
+            "Live assistant Q (%s, scope=%s): %r → A: %r",
+            meeting_id[:8],
+            scope,
+            question,
+            answer,
+        )
 
-        spoken = False
-        speech_error = None
-        if answer and speak is not None:
-            try:
-                await speak(answer)  # Phase 3: voice into the meeting
-                spoken = True
-            except Exception as exc:
-                speech_error = f"{type(exc).__name__}: {exc}"
-                logger.error(
-                    "Live assistant speech failed (%s): %s",
-                    meeting_id[:8],
-                    speech_error,
-                )
-        await models.save_live_qa(
+        await _speak_and_save_answer(
             meeting_id,
             question,
             answer,
             scope,
             sources,
-            spoken=spoken,
-            latency_ms=int((time.monotonic() - started) * 1_000),
-            error=speech_error,
-            search_query=search_query,
-            source_details=source_details,
+            source_details,
+            search_query,
+            started,
+            speak,
         )
         saved = True
     except Exception as e:
@@ -491,3 +658,45 @@ async def _handle_question(
                     "Could not persist failed live-assistant question (%s)",
                     meeting_id[:8],
                 )
+
+
+async def _speak_and_save_answer(
+    meeting_id: str,
+    question: str,
+    answer: str | None,
+    scope: str,
+    sources: list[str],
+    source_details: list[dict],
+    search_query: str,
+    started: float,
+    speak: Callable[[str], Awaitable[None]] | None,
+    *,
+    initial_error: str | None = None,
+) -> None:
+    """Deliver one answer and persist the same auditable result for every route."""
+    spoken = False
+    error = initial_error
+    if answer and speak is not None:
+        try:
+            await speak(answer)
+            spoken = True
+        except Exception as exc:
+            speech_error = f"{type(exc).__name__}: {exc}"
+            error = f"{error}; {speech_error}" if error else speech_error
+            logger.error(
+                "Live assistant speech failed (%s): %s",
+                meeting_id[:8],
+                speech_error,
+            )
+    await models.save_live_qa(
+        meeting_id,
+        question,
+        answer,
+        scope,
+        sources,
+        spoken=spoken,
+        latency_ms=int((time.monotonic() - started) * 1_000),
+        error=error,
+        search_query=search_query,
+        source_details=source_details,
+    )

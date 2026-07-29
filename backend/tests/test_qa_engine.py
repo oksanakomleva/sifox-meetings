@@ -13,6 +13,7 @@ from services.qa_engine import (
     format_meeting_metadata,
     make_search_snippet,
     pack_context_with_quotas,
+    parse_note_command,
     relevance_score,
     strip_wake_word,
     select_scope,
@@ -59,6 +60,22 @@ class TestStripWakeWord:
 
     def test_no_wake_returns_text(self):
         assert strip_wake_word("когда дедлайн", WAKE) == "когда дедлайн"
+
+    def test_wake_only_returns_empty_question(self):
+        assert strip_wake_word("Протоколлер", WAKE) == ""
+
+
+class TestNoteCommand:
+    def test_extracts_dictated_note(self):
+        assert parse_note_command(
+            "запиши в протокол отправить договор до пятницы"
+        ) == (True, "отправить договор до пятницы")
+
+    def test_empty_command_is_still_recognized(self):
+        assert parse_note_command("запиши, пожалуйста") == (True, "")
+
+    def test_regular_question_is_not_a_note(self):
+        assert parse_note_command("что записали в протокол") == (False, "")
 
 
 class TestSelectScope:

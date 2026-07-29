@@ -107,6 +107,10 @@ class SetMeetingAssistantRequest(BaseModel):
     assistant_enabled: bool
 
 
+class SetMeetingPublicInfoRequest(BaseModel):
+    public_info_enabled: bool
+
+
 @router.patch("/meetings/{meeting_id}/assistant")
 async def set_meeting_assistant(
     meeting_id: str,
@@ -161,6 +165,51 @@ async def set_meeting_assistant(
     }
 
 
+@router.patch("/meetings/{meeting_id}/assistant-public-info")
+async def set_meeting_public_info(
+    meeting_id: str,
+    req: SetMeetingPublicInfoRequest,
+    admin: AdminUser,
+):
+    """Allow public web answers for one opted-in, not-yet-started meeting."""
+    from config import config
+    from services.assistant_toggle import (
+        AssistantToggleError,
+        validate_public_info_toggle,
+    )
+
+    meeting = await models.get_meeting(meeting_id)
+    try:
+        validate_public_info_toggle(
+            meeting,
+            req.public_info_enabled,
+            live_public_info_enabled=config.LIVE_PUBLIC_INFO_ENABLED,
+        )
+    except AssistantToggleError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+
+    updated = await models.set_meeting_public_info_enabled(
+        meeting_id,
+        req.public_info_enabled,
+    )
+    if not updated:
+        raise HTTPException(
+            409,
+            "Встреча уже началась или живой ассистент не включён",
+        )
+    logger.info(
+        "Admin %s set public info=%s for meeting %s",
+        admin["user_id"],
+        req.public_info_enabled,
+        meeting_id[:8],
+    )
+    return {
+        "ok": True,
+        "meeting_id": meeting_id,
+        "public_info_enabled": req.public_info_enabled,
+    }
+
+
 @router.get("/meetings/{meeting_id}/live-qa")
 async def admin_live_qa(meeting_id: str, admin: AdminUser):
     """Inspect the live in-meeting assistant Q&A for a meeting (+ flag state).
@@ -172,11 +221,16 @@ async def admin_live_qa(meeting_id: str, admin: AdminUser):
         "live_assistant_enabled": config.LIVE_ASSISTANT_ENABLED,
         "live_assistant_speak": config.LIVE_ASSISTANT_SPEAK,
         "live_assistant_all_meetings": config.LIVE_ASSISTANT_ALL_MEETINGS,
+        "live_public_info_enabled": config.LIVE_PUBLIC_INFO_ENABLED,
         "meeting_assistant_enabled": bool(
             meeting and meeting.get("assistant_enabled")
         ),
+        "meeting_public_info_enabled": bool(
+            meeting and meeting.get("assistant_public_info_enabled")
+        ),
         "diagnostic": get_live_diagnostic(meeting_id),
         "items": await models.get_live_qa(meeting_id),
+        "notes": await models.get_live_notes(meeting_id),
     }
 
 
@@ -199,7 +253,12 @@ async def reanalyze_meeting(meeting_id: str, admin: AdminUser, meeting_type: str
     async def _run():
         try:
             await models.update_meeting_status(meeting_id, "analyzing")
-            analysis = await analyze_meeting(transcript, meeting.get("title"), force_type=meeting_type)
+            analysis = await analyze_meeting(
+                transcript,
+                meeting.get("title"),
+                force_type=meeting_type,
+                meeting_id=meeting_id,
+            )
             await models.save_analysis(
                 meeting_id,
                 summary=analysis["summary"],

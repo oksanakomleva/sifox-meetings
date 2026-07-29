@@ -69,6 +69,9 @@ class Config(BaseSettings):
     LIVE_POLL_SEC: int = 2                   # overlapping wake-word checks
     LIVE_MIN_RMS: int = 120                  # skip near-silent PCM before cloud STT
     LIVE_QUESTION_MAX_SEC: int = 12          # max audio transcribed as the question
+    LIVE_QUESTION_SILENCE_SEC: float = 0.9   # stop capture after this much silence
+    LIVE_QUESTION_MIN_WAIT_SEC: float = 0.8  # keep a little audio after wake window
+    LIVE_QUESTION_WAKE_ONLY_WAIT_SEC: float = 2.5  # allow «Протоколлер» + pause
     LIVE_BUFFER_MIN: int = 10                # rolling live-transcript memory
     LIVE_CONTEXT_AUDIO_SEC: int = 180        # accurate re-STT cap for meeting-only Q&A
     LIVE_STT_TIMEOUT_SEC: int = 45           # kill/restart a wedged native worker
@@ -82,6 +85,9 @@ class Config(BaseSettings):
     LIVE_TTS: str = "openai"                  # "openai" | "espeak"
     LIVE_TTS_MODEL: str = "tts-1"
     LIVE_TTS_VOICE: str = "alloy"
+    LIVE_PUBLIC_INFO_ENABLED: bool = True
+    LIVE_PUBLIC_INFO_MODEL: str = "gpt-4.1"
+    LIVE_PUBLIC_INFO_TIMEOUT_SEC: int = 25
     # Live answers must be FAST — keep the LLM context small (FTS-ranked email/MM
     # survive; the huge meeting-transcript dump is trimmed). Far below the 1.2M
     # used for the web chat, which made live answers take ~minute.

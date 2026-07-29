@@ -820,6 +820,17 @@ async def get_meeting_full_access(meeting_id: str) -> bool:
     return bool(row and row["assistant_full_access"])
 
 
+async def get_meeting_public_info_enabled(meeting_id: str) -> bool:
+    """Whether this meeting may send public-only questions to web search."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT assistant_public_info_enabled FROM meetings WHERE id = $1",
+            meeting_id,
+        )
+    return bool(row and row["assistant_public_info_enabled"])
+
+
 async def set_meeting_assistant_enabled(meeting_id: str, value: bool) -> bool:
     """Opt one pending meeting into/out of the globally gated live assistant.
 
@@ -832,13 +843,70 @@ async def set_meeting_assistant_enabled(meeting_id: str, value: bool) -> bool:
         result = await conn.execute(
             """
             UPDATE meetings
-               SET assistant_enabled = $1, updated_at = NOW()
+               SET assistant_enabled = $1,
+                   assistant_public_info_enabled = CASE
+                       WHEN $1 THEN assistant_public_info_enabled
+                       ELSE FALSE
+                   END,
+                   updated_at = NOW()
              WHERE id = $2 AND status = 'pending'
             """,
             value,
             meeting_id,
         )
     return result.split()[-1] != "0"
+
+
+async def set_meeting_public_info_enabled(
+    meeting_id: str,
+    value: bool,
+) -> bool:
+    """Allow/deny public web answers for one not-yet-started meeting."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE meetings
+               SET assistant_public_info_enabled = $1, updated_at = NOW()
+             WHERE id = $2
+               AND status = 'pending'
+               AND ($1 = FALSE OR assistant_enabled = TRUE)
+            """,
+            value,
+            meeting_id,
+        )
+    return result.split()[-1] != "0"
+
+
+async def save_live_note(meeting_id: str, text: str) -> dict:
+    """Persist an explicit dictated note and return its audit fields."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO live_notes (meeting_id, text)
+            VALUES ($1, $2)
+            RETURNING id, meeting_id, text, created_at
+            """,
+            meeting_id,
+            text,
+        )
+    return dict(row)
+
+
+async def get_live_notes(meeting_id: str) -> list[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, text, created_at
+            FROM live_notes
+            WHERE meeting_id = $1
+            ORDER BY created_at ASC, id ASC
+            """,
+            meeting_id,
+        )
+    return [dict(row) for row in rows]
 
 
 async def save_live_qa(
@@ -1559,7 +1627,8 @@ async def get_upcoming_meetings_for_user(user_id: int, is_admin: bool) -> list[d
             rows = await conn.fetch(
                 """
                 SELECT id, title, topic, start_time, end_time, status, meeting_type,
-                       meeting_url, assistant_enabled
+                       meeting_url, assistant_enabled,
+                       assistant_public_info_enabled
                 FROM meetings
                 WHERE status IN ('pending', 'recording', 'transcribing', 'analyzing')
                   AND start_time > NOW() - interval '2 hours'

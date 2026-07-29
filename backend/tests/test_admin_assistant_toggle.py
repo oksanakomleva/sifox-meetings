@@ -5,6 +5,7 @@ import pytest
 from services.assistant_toggle import (
     AssistantToggleError,
     validate_assistant_toggle,
+    validate_public_info_toggle,
 )
 
 
@@ -54,3 +55,36 @@ def test_unsafe_toggle_is_rejected(meeting, overrides, status_code):
 
     assert exc.value.status_code == status_code
     assert exc.value.detail
+
+
+def test_public_info_can_be_enabled_only_inside_enabled_assistant():
+    meeting = {**PENDING_MEETING, "assistant_enabled": True}
+    assert validate_public_info_toggle(
+        meeting,
+        True,
+        live_public_info_enabled=True,
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("meeting", "global_enabled", "status_code"),
+    [
+        (None, True, 404),
+        ({**PENDING_MEETING, "status": "recording"}, True, 409),
+        ({**PENDING_MEETING, "assistant_enabled": False}, True, 409),
+        ({**PENDING_MEETING, "assistant_enabled": True}, False, 409),
+    ],
+)
+def test_unsafe_public_info_toggle_is_rejected(
+    meeting,
+    global_enabled,
+    status_code,
+):
+    with pytest.raises(AssistantToggleError) as exc:
+        validate_public_info_toggle(
+            meeting,
+            True,
+            live_public_info_enabled=global_enabled,
+        )
+
+    assert exc.value.status_code == status_code

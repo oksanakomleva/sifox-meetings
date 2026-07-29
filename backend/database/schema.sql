@@ -95,6 +95,9 @@ ALTER TABLE meetings ADD COLUMN IF NOT EXISTS assistant_full_access BOOLEAN DEFA
 -- Per-meeting live-assistant opt-in. The global environment flag remains the
 -- emergency kill switch; this field prevents a pilot from affecting all calls.
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS assistant_enabled BOOLEAN DEFAULT FALSE;
+-- Per-meeting permission for the live assistant to answer obvious public
+-- questions via an external web-search tool. Corporate context is never sent.
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS assistant_public_info_enabled BOOLEAN DEFAULT FALSE;
 -- Make a meeting visible in EVERY user's "Мои встречи" (for company-wide /
 -- uploaded shared recordings). Per-user grants live in meeting_access_grants.
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS visible_to_all BOOLEAN DEFAULT FALSE;
@@ -126,6 +129,17 @@ ALTER TABLE live_qa ADD COLUMN IF NOT EXISTS error TEXT;
 ALTER TABLE live_qa ADD COLUMN IF NOT EXISTS search_query TEXT;
 ALTER TABLE live_qa ADD COLUMN IF NOT EXISTS source_details JSONB DEFAULT '[]'::jsonb;
 CREATE INDEX IF NOT EXISTS idx_live_qa_meeting ON live_qa(meeting_id, asked_at);
+
+-- Explicit voice notes created with «Протоколлер, запиши…». Kept separately
+-- from ASR so they can be appended to the protocol deterministically.
+CREATE TABLE IF NOT EXISTS live_notes (
+    id          BIGSERIAL PRIMARY KEY,
+    meeting_id  UUID REFERENCES meetings(id) ON DELETE CASCADE,
+    text        TEXT NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_live_notes_meeting
+    ON live_notes(meeting_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_meetings_status    ON meetings(status);
 CREATE INDEX IF NOT EXISTS idx_meetings_start     ON meetings(start_time);
 CREATE INDEX IF NOT EXISTS idx_meetings_url       ON meetings(meeting_url);

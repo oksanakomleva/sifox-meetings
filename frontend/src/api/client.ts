@@ -159,13 +159,24 @@ export const api = {
           body: JSON.stringify({ assistant_enabled: enabled }),
         },
       ),
+    setMeetingPublicInfoEnabled: (meetingId: string, enabled: boolean) =>
+      request<{ ok: boolean; meeting_id: string; public_info_enabled: boolean }>(
+        `/admin/meetings/${meetingId}/assistant-public-info`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ public_info_enabled: enabled }),
+        },
+      ),
     liveQa: (meetingId: string) =>
       request<{
         live_assistant_enabled: boolean
         live_assistant_speak: boolean
         live_assistant_all_meetings: boolean
+        live_public_info_enabled: boolean
         meeting_assistant_enabled: boolean
+        meeting_public_info_enabled: boolean
         items: import('../types').LiveQaItem[]
+        notes: import('../types').LiveNote[]
       }>(`/admin/meetings/${meetingId}/live-qa`),
     reanalyzeMeeting: (meetingId: string) =>
       request<void>(`/admin/meetings/${meetingId}/reanalyze`, { method: 'POST' }),

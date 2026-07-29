@@ -65,7 +65,23 @@ def strip_wake_word(text: str, wake_word: str) -> str:
                 cut = True
             continue
         out.append(tok)
-    return " ".join(out).strip() or text.strip()
+    return " ".join(out).strip()
+
+
+_NOTE_COMMAND = re.compile(
+    r"^\s*запиши(?:\s*,?\s*пожалуйста)?(?:\s+(?:в\s+)?(?:заметки?|протокол))?"
+    r"\s*[:,—-]?\s*(.*)$",
+    re.IGNORECASE,
+)
+
+
+def parse_note_command(question: str) -> tuple[bool, str]:
+    """Recognize «запиши …» and return the exact dictated note body."""
+    match = _NOTE_COMMAND.match(question or "")
+    if not match:
+        return False, ""
+    note = re.sub(r"\s+", " ", match.group(1)).strip(" \t,.;:—-")
+    return True, note
 
 
 def select_scope(attendee_emails: list[str], internal_domain: str, full_override: bool) -> str:

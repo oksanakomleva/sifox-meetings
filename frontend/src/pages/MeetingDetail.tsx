@@ -397,7 +397,13 @@ export default function MeetingDetail() {
                       marginTop: 'var(--space-3)',
                     }}>
                       <span className="badge">
-                        {item.scope === 'full' ? 'Корпоративные источники' : 'Только эта встреча'}
+                        {{
+                          full: 'Корпоративные источники',
+                          meeting_only: 'Только эта встреча',
+                          public: 'Публичные источники',
+                          note: 'Заметка в протокол',
+                          ambiguous: 'Нужно уточнение',
+                        }[item.scope] || item.scope}
                       </span>
                       <span className="badge">
                         {item.spoken ? 'Ответ озвучен' : 'Ответ не озвучен'}

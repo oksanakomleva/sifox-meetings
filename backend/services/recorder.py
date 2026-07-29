@@ -235,7 +235,9 @@ async def _recover_analyze(meeting_id: str, transcript_text: str) -> None:
         await models.update_meeting_status(meeting_id, "analyzing")
         _m = await models.get_meeting(meeting_id)
         analysis = await analyze_meeting(
-            transcript_text, _m.get("title") if _m else None
+            transcript_text,
+            _m.get("title") if _m else None,
+            meeting_id=meeting_id,
         )
         await models.save_analysis(
             meeting_id,
@@ -643,7 +645,11 @@ async def transcribe_and_analyze(
 
     # 4. Analyze
     await models.update_meeting_status(meeting_id, "analyzing")
-    analysis = await analyze_meeting(transcript_text, meeting.get("title") if meeting else None)
+    analysis = await analyze_meeting(
+        transcript_text,
+        meeting.get("title") if meeting else None,
+        meeting_id=meeting_id,
+    )
     await models.save_analysis(
         meeting_id,
         summary=analysis["summary"],

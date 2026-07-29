@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 from config import config
@@ -132,11 +133,28 @@ _PROTOCOL_PROMPTS = {
 }
 
 
+def append_dictated_notes(summary: str, notes: list[dict]) -> str:
+    """Append explicit voice notes verbatim so the model cannot omit them."""
+    lines: list[str] = []
+    for item in notes or []:
+        text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
+        if text:
+            lines.append(f"- {text}")
+    if not lines:
+        return (summary or "").strip()
+    return (
+        f"{(summary or '').strip()}\n\n"
+        "## Продиктованные заметки\n"
+        + "\n".join(lines)
+    ).strip()
+
+
 def _analyze_sync(
     transcript: str,
     title: str | None,
     known_tags: list[str],
     force_type: str | None = None,
+    dictated_notes: list[dict] | None = None,
 ) -> dict:
     from openai import OpenAI
 
@@ -188,7 +206,10 @@ def _analyze_sync(
         max_tokens=2500,
         temperature=0.3,
     )
-    summary = proto_resp.choices[0].message.content.strip()
+    summary = append_dictated_notes(
+        proto_resp.choices[0].message.content.strip(),
+        dictated_notes or [],
+    )
 
     return {
         "meeting_type": meeting_type,
@@ -203,13 +224,25 @@ async def analyze_meeting(
     title: str | None = None,
     *,
     force_type: str | None = None,
+    meeting_id: str | None = None,
 ) -> dict:
     # Fetch the existing tag vocabulary here (async) so the model can reuse tags.
     from database import models
     known_tags = await models.get_known_tags()
+    dictated_notes = (
+        await models.get_live_notes(meeting_id)
+        if meeting_id
+        else []
+    )
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _executor, _analyze_sync, transcript, title, known_tags, force_type
+        _executor,
+        _analyze_sync,
+        transcript,
+        title,
+        known_tags,
+        force_type,
+        dictated_notes,
     )
 
 

@@ -42,3 +42,29 @@ def validate_assistant_toggle(
         )
     if enabled and not meeting.get("meeting_url"):
         raise AssistantToggleError(409, "У встречи нет ссылки на Телемост")
+
+
+def validate_public_info_toggle(
+    meeting: dict | None,
+    enabled: bool,
+    *,
+    live_public_info_enabled: bool,
+) -> None:
+    """Validate the nested, admin-only public-data permission."""
+    if not meeting:
+        raise AssistantToggleError(404, "Встреча не найдена")
+    if meeting.get("status") != "pending":
+        raise AssistantToggleError(
+            409,
+            "Внешние источники можно настроить только до входа Протоколлера",
+        )
+    if enabled and not live_public_info_enabled:
+        raise AssistantToggleError(
+            409,
+            "Публичные источники выключены в настройках сервиса",
+        )
+    if enabled and not meeting.get("assistant_enabled"):
+        raise AssistantToggleError(
+            409,
+            "Сначала включите живого ассистента для этой встречи",
+        )

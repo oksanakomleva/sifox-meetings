@@ -10,10 +10,13 @@ from config import config
 from services import live_assistant
 from services.live_assistant import (
     RollingPCMBuffer,
+    _handle_question,
+    capture_question_audio,
     _diagnostic_update,
     get_live_diagnostic,
     merge_live_transcript,
     pcm_rms,
+    trailing_pcm_is_silent,
     transcribe_wake_window,
 )
 from services.recorder import (
@@ -64,6 +67,75 @@ def test_pcm_rms_distinguishes_silence_from_speech():
     assert pcm_rms(silence) == 0
     assert pcm_rms(speech) == 1000
     assert pcm_rms(speech) > config.LIVE_MIN_RMS
+
+
+def test_trailing_silence_ends_question_capture_before_hard_limit():
+    speech = (1000).to_bytes(2, "little", signed=True) * 16_000
+    silence = b"\x00\x00" * 16_000
+    rolling = RollingPCMBuffer(seconds=20)
+    rolling.append(speech + speech + silence)
+
+    class RunningReader:
+        @staticmethod
+        def done():
+            return False
+
+    captured = asyncio.run(
+        capture_question_audio(
+            rolling,
+            RunningReader(),
+            question_start=0,
+            window_end_offset=len(speech),
+            wake_text="Протоколлер, какая погода?",
+            max_bytes=len(speech) * 12,
+        )
+    )
+
+    assert captured == speech + speech + silence
+    assert trailing_pcm_is_silent(
+        captured,
+        config.LIVE_QUESTION_SILENCE_SEC,
+        config.LIVE_MIN_RMS,
+    )
+
+
+def test_note_command_is_saved_and_acknowledged(monkeypatch):
+    transcribe = AsyncMock(
+        return_value="Протоколлер, запиши отправить договор до пятницы"
+    )
+    save_note = AsyncMock()
+    save_qa = AsyncMock()
+    speak = AsyncMock()
+    monkeypatch.setattr(live_assistant, "transcribe_question", transcribe)
+    monkeypatch.setattr(
+        live_assistant.models,
+        "save_live_note",
+        save_note,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        live_assistant.models,
+        "save_live_qa",
+        save_qa,
+        raising=False,
+    )
+
+    asyncio.run(
+        _handle_question(
+            "00000000-0000-0000-0000-000000000001",
+            b"audio",
+            "",
+            b"",
+            speak,
+        )
+    )
+
+    save_note.assert_awaited_once_with(
+        "00000000-0000-0000-0000-000000000001",
+        "отправить договор до пятницы",
+    )
+    assert "попадёт в итоговый протокол" in speak.await_args.args[0]
+    assert save_qa.await_args.args[3] == "note"
 
 
 def test_mic_action_labels_map_to_current_state():

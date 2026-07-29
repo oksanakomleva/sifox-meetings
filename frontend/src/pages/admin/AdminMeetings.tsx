@@ -17,6 +17,7 @@ export default function AdminMeetings() {
         fetchDone={() => api.admin.allMeetings(200).then(r => r.meetings)}
         fetchUpcoming={() => api.admin.upcoming().then(r => r.meetings)}
         onSetAssistantEnabled={(id, enabled) => api.admin.setMeetingAssistantEnabled(id, enabled)}
+        onSetPublicInfoEnabled={(id, enabled) => api.admin.setMeetingPublicInfoEnabled(id, enabled)}
         onReanalyze={(id) => api.admin.reanalyzeMeeting(id)}
         onRetranscribe={(id) => api.admin.retranscribeMeeting(id)}
         headerAction={
