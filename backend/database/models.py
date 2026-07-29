@@ -1172,13 +1172,14 @@ async def search_meeting_transcripts(
     date_from=None,
     date_to=None,
     limit: int = 30,
+    priority_query: str | None = None,
 ) -> list[dict]:
     """FTS-ranked completed meetings for a live-assistant question.
 
     Retrieval happens in PostgreSQL so the service no longer transfers hundreds
     of full transcripts into Python for every spoken question.
     """
-    args = [query_text]
+    args = [query_text, priority_query or ""]
     extra = ["m.status = 'done'", "m.transcript IS NOT NULL"]
 
     def add(expr: str, value) -> None:
@@ -1199,6 +1200,9 @@ async def search_meeting_transcripts(
                 '&',
                 '|'
             )::tsquery AS tq
+        ),
+        priority AS (
+            SELECT websearch_to_tsquery('russian', $2) AS tq
         )
         SELECT m.id, m.title, m.topic, m.start_time, m.end_time, m.transcript,
                m.tags,
@@ -1210,8 +1214,18 @@ async def search_meeting_transcripts(
                        coalesce(m.transcript, '')
                    ),
                    q.tq
-               ) AS rank
-        FROM meetings m, q
+               ) AS rank,
+               CASE
+                   WHEN numnode(priority.tq) > 0
+                    AND priority.tq @@ to_tsvector(
+                        'russian',
+                        coalesce(m.title, '') || ' ' ||
+                        coalesce(m.topic, '') || ' ' ||
+                        coalesce(m.transcript, '')
+                    )
+                   THEN 1 ELSE 0
+               END AS priority_match
+        FROM meetings m, q, priority
         WHERE {where}
           AND q.tq @@ to_tsvector(
               'russian',
@@ -1219,7 +1233,7 @@ async def search_meeting_transcripts(
               coalesce(m.topic, '') || ' ' ||
               coalesce(m.transcript, '')
           )
-        ORDER BY rank DESC, m.start_time DESC
+        ORDER BY priority_match DESC, rank DESC, m.start_time DESC
         LIMIT ${limit_arg}
     """
     pool = await get_pool()
@@ -1821,9 +1835,10 @@ async def search_mm_messages(
     date_to=None,
     channel_id: str | None = None,
     limit: int = 200,
+    priority_query: str | None = None,
 ) -> list[dict]:
     """Most relevant MM posts to `query_text` within the period (FTS, ts_rank)."""
-    args = [query_text]
+    args = [query_text, priority_query or ""]
     extra = []
     def add(expr, val):
         args.append(val)
@@ -1836,11 +1851,22 @@ async def search_mm_messages(
     # Broaden the query to OR semantics (any term) so a multi-word question still
     # matches; ts_rank then surfaces the messages matching the most/strongest terms.
     sql = f"""
-        WITH q AS (SELECT replace(websearch_to_tsquery('russian', $1)::text, '&', '|')::tsquery AS tq)
-        SELECT m.*, ts_rank(to_tsvector('russian', m.message), q.tq) AS rank
-        FROM mm_messages m, q
+        WITH q AS (
+            SELECT replace(websearch_to_tsquery('russian', $1)::text, '&', '|')::tsquery AS tq
+        ),
+        priority AS (
+            SELECT websearch_to_tsquery('russian', $2) AS tq
+        )
+        SELECT m.*,
+               ts_rank(to_tsvector('russian', m.message), q.tq) AS rank,
+               CASE
+                   WHEN numnode(priority.tq) > 0
+                    AND priority.tq @@ to_tsvector('russian', m.message)
+                   THEN 1 ELSE 0
+               END AS priority_match
+        FROM mm_messages m, q, priority
         WHERE q.tq @@ to_tsvector('russian', m.message){extra_sql}
-        ORDER BY rank DESC, m.created_at DESC
+        ORDER BY priority_match DESC, rank DESC, m.created_at DESC
         LIMIT ${lim}
     """
     pool = await get_pool()
@@ -1855,9 +1881,10 @@ async def search_email_messages(
     date_to=None,
     user_email: str | None = None,
     limit: int = 200,
+    priority_query: str | None = None,
 ) -> list[dict]:
     """Most relevant emails (subject+body) to `query_text` within the period."""
-    args = [query_text]
+    args = [query_text, priority_query or ""]
     extra = []
     def add(expr, val):
         args.append(val)
@@ -1868,12 +1895,31 @@ async def search_email_messages(
     args.append(limit); lim = len(args)
     extra_sql = (" AND " + " AND ".join(extra)) if extra else ""
     sql = f"""
-        WITH q AS (SELECT replace(websearch_to_tsquery('russian', $1)::text, '&', '|')::tsquery AS tq)
+        WITH q AS (
+            SELECT replace(websearch_to_tsquery('russian', $1)::text, '&', '|')::tsquery AS tq
+        ),
+        priority AS (
+            SELECT websearch_to_tsquery('russian', $2) AS tq
+        )
         SELECT e.*,
-               ts_rank(to_tsvector('russian', coalesce(e.subject,'') || ' ' || coalesce(e.body_text,'')), q.tq) AS rank
-        FROM email_messages e, q
+               ts_rank(
+                   to_tsvector(
+                       'russian',
+                       coalesce(e.subject,'') || ' ' || coalesce(e.body_text,'')
+                   ),
+                   q.tq
+               ) AS rank,
+               CASE
+                   WHEN numnode(priority.tq) > 0
+                    AND priority.tq @@ to_tsvector(
+                        'russian',
+                        coalesce(e.subject,'') || ' ' || coalesce(e.body_text,'')
+                    )
+                   THEN 1 ELSE 0
+               END AS priority_match
+        FROM email_messages e, q, priority
         WHERE q.tq @@ to_tsvector('russian', coalesce(e.subject,'') || ' ' || coalesce(e.body_text,'')){extra_sql}
-        ORDER BY rank DESC, e.received_at DESC
+        ORDER BY priority_match DESC, rank DESC, e.received_at DESC
         LIMIT ${lim}
     """
     pool = await get_pool()

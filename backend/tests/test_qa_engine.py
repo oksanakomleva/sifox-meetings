@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from services.qa_engine import (
     _SYSTEM_VOICE,
     build_search_query,
+    build_priority_search_query,
     clean_live_transcript,
     contains_wake_word,
     format_meeting_metadata,
@@ -152,7 +153,31 @@ class TestSearchQuery:
 
     def test_keeps_exact_project_terms(self):
         query = build_search_query("Что говорили по метрикам ГПБ?")
-        assert query == "метрикам гпб газпромбанк"
+        assert query == "метрикам гпб гпбм газпромбанк"
+
+    def test_keeps_gpbm_and_adds_search_aliases(self):
+        query = build_search_query(
+            "О чём договорились по метрикам ГПБМ на этой неделе?"
+        )
+        assert "гпбм" in query
+        assert "гпб" in query
+        assert "газпромбанк" in query
+
+    def test_priority_query_keeps_exact_gpbm_subject(self):
+        assert (
+            build_priority_search_query(
+                "О чём договорились по метрикам ГПБМ на этой неделе?"
+            )
+            == "гпбм"
+        )
+
+    def test_priority_query_keeps_person_name(self):
+        assert (
+            build_priority_search_query(
+                "Когда уходит в отпуск Сергей Клевицкий?"
+            )
+            == "сергей клевицкий"
+        )
 
     def test_adds_omantel_alias_for_oman_sync(self):
         query = build_search_query("Как прошел синк по Оману, что там обсудили?")
@@ -198,15 +223,36 @@ def test_relevance_score_prefers_exact_multi_term_match():
     assert exact > generic
 
 
+def test_relevance_score_prioritizes_exact_subject_over_common_words():
+    query = "договорились метрикам гпбм неделе гпб газпромбанк"
+    exact_subject = relevance_score(
+        query,
+        "На встрече ГПБМ обсудили качество распознавания.",
+        0.1,
+        priority_query="гпбм",
+    )
+    generic = relevance_score(
+        query,
+        "На этой неделе договорились обновить общие метрики.",
+        100,
+        priority_query="гпбм",
+    )
+    assert exact_subject > generic
+
+
 def test_clean_live_transcript_removes_subtitle_noise_only():
     transcript = (
         "Продолжение следует. Редактор субтитров А. Иванова "
+        "Не забудьте поставить лайк и подписаться на канал! "
+        "writing with apple writing with apple writing with apple "
         "Протоколлер, что решили по Оману? Корректор И. Петров"
     )
     cleaned = clean_live_transcript(transcript)
     assert "Продолжение следует" not in cleaned
     assert "Редактор субтитров" not in cleaned
     assert "Корректор" not in cleaned
+    assert "подписаться на канал" not in cleaned
+    assert "writing with apple" not in cleaned
     assert "Протоколлер, что решили по Оману?" in cleaned
 
 

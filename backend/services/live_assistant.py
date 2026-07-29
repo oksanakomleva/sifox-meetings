@@ -11,7 +11,10 @@ injected via the optional `speak` callback.
 """
 import asyncio
 import logging
+import math
+import sys
 import time
+from array import array
 from collections import deque
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
@@ -41,6 +44,8 @@ def _diagnostic_update(meeting_id: str, **values) -> None:
             "status": "starting",
             "bytes_received": 0,
             "windows_transcribed": 0,
+            "silent_windows_skipped": 0,
+            "last_rms": 0,
             "last_text": "",
             "last_error": None,
             "started_at": datetime.now(timezone.utc).isoformat(),
@@ -116,6 +121,20 @@ def merge_live_transcript(previous: str, current: str) -> str:
             break
     merged = " ".join(left + right[overlap:]).strip()
     return merged[-_LIVE_TRANSCRIPT_MAX_CHARS:]
+
+
+def pcm_rms(pcm: bytes) -> int:
+    """Return the RMS level of little-endian signed 16-bit mono PCM."""
+    if len(pcm) < 2:
+        return 0
+    samples = array("h")
+    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+    if sys.byteorder != "little":
+        samples.byteswap()
+    if not samples:
+        return 0
+    mean_square = sum(sample * sample for sample in samples) / len(samples)
+    return int(math.sqrt(mean_square))
 
 
 async def _audio_reader(
@@ -222,8 +241,20 @@ async def run_live_assistant(
             if time.monotonic() < mute_until:
                 continue
 
+            rms = pcm_rms(segment)
+            if rms < config.LIVE_MIN_RMS:
+                _diagnostic_update(
+                    meeting_id,
+                    last_rms=rms,
+                    last_text="",
+                    silent_windows_skipped=(
+                        _diagnostics[meeting_id]["silent_windows_skipped"] + 1
+                    ),
+                )
+                continue
+
             try:
-                text = await transcribe_wake_window(segment)
+                raw_text = await transcribe_wake_window(segment)
             except Exception as e:
                 _diagnostic_update(
                     meeting_id,
@@ -232,11 +263,13 @@ async def run_live_assistant(
                 )
                 logger.warning("Live wake STT failed (%s): %s", meeting_id[:8], e)
                 continue
+            text = qa_engine.clean_live_transcript(raw_text)
             _diagnostic_update(
                 meeting_id,
                 windows_transcribed=_diagnostics[meeting_id]["windows_transcribed"] + 1,
+                last_rms=rms,
                 last_error=None,
-                **({"last_text": text[-300:]} if text else {}),
+                last_text=text[-300:] if text else "",
             )
             if not text:
                 continue

@@ -13,6 +13,7 @@ from services.live_assistant import (
     _diagnostic_update,
     get_live_diagnostic,
     merge_live_transcript,
+    pcm_rms,
     transcribe_wake_window,
 )
 from services.recorder import (
@@ -54,6 +55,15 @@ def test_live_transcript_merges_overlapping_windows():
         )
         == "кодовое название проекта маяк протоколлер как называется проект"
     )
+
+
+def test_pcm_rms_distinguishes_silence_from_speech():
+    silence = b"\x00\x00" * 16_000
+    speech = (1000).to_bytes(2, "little", signed=True) * 16_000
+
+    assert pcm_rms(silence) == 0
+    assert pcm_rms(speech) == 1000
+    assert pcm_rms(speech) > config.LIVE_MIN_RMS
 
 
 def test_mic_action_labels_map_to_current_state():

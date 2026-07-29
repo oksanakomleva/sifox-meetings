@@ -91,7 +91,8 @@ _SEARCH_FILLERS = {
 }
 
 _SEARCH_EXPANSIONS = {
-    "гпб": ("газпромбанк",),
+    "гпб": ("гпбм", "газпромбанк"),
+    "гпбм": ("гпб", "газпромбанк"),
     "оман": ("омантел",),
     "оману": ("омантел",),
     "омане": ("омантел",),
@@ -120,6 +121,35 @@ def build_search_query(question: str) -> str:
     return " ".join(meaningful) or normalized
 
 
+_SEARCH_PRIORITY_GENERIC = {
+    "встреча", "встрече", "встречу", "созвон", "синк",
+    "обсудили", "обсуждали", "обсуждал", "договорились", "договаривались",
+    "итоги", "результат", "результаты", "метрика", "метрики", "метрикам",
+    "неделя", "неделе", "неделю", "прошлая", "прошлой", "текущая", "текущей",
+    "прошел", "прошёл", "прошла", "отпуск", "отпуске", "уходит",
+    "называется", "название", "личная", "личную",
+}
+
+
+def build_priority_search_query(question: str) -> str:
+    """Pick subject/name terms that broad FTS must not bury under common words."""
+    normalized = _normalize(question)
+    base_tokens = [
+        token
+        for token in normalized.split()
+        if (
+            len(token) > 1
+            and token not in _SEARCH_FILLERS
+            and token not in _SEARCH_PRIORITY_GENERIC
+        )
+    ]
+    if not base_tokens:
+        return ""
+    # Two trailing terms preserve full names ("Сергей Клевицкий"), while a
+    # project acronym such as ГПБМ stays an exact one-term priority query.
+    return " ".join(base_tokens[-2:])
+
+
 def _query_needles(query: str) -> list[str]:
     needles = []
     for token in build_search_query(query).split():
@@ -127,6 +157,17 @@ def _query_needles(query: str) -> list[str]:
             continue
         # Prefix matching covers common Russian inflections while preserving
         # short project acronyms such as ГПБ.
+        needle = token if len(token) <= 4 else token[: min(len(token), 7)]
+        if needle not in needles:
+            needles.append(needle)
+    return needles
+
+
+def _exact_query_needles(query: str) -> list[str]:
+    needles = []
+    for token in _normalize(query).split():
+        if len(token) < 3:
+            continue
         needle = token if len(token) <= 4 else token[: min(len(token), 7)]
         if needle not in needles:
             needles.append(needle)
@@ -155,7 +196,12 @@ def make_search_snippet(text: str, query: str, max_chars: int = 900) -> str:
     return f"{'…' if start else ''}{snippet}{'…' if end < len(compact) else ''}"
 
 
-def relevance_score(query: str, text: str, db_rank: float = 0.0) -> float:
+def relevance_score(
+    query: str,
+    text: str,
+    db_rank: float = 0.0,
+    priority_query: str = "",
+) -> float:
     """Comparable in-process score based on query-term coverage."""
     haystack = _normalize(text)
     needles = _query_needles(query)
@@ -163,11 +209,21 @@ def relevance_score(query: str, text: str, db_rank: float = 0.0) -> float:
         return db_rank
     matches = sum(1 for needle in needles if needle in haystack)
     coverage = matches / len(needles)
-    return coverage * 1_000 + matches * 25 + float(db_rank or 0)
+    priority_needles = _exact_query_needles(priority_query)
+    priority_match = bool(priority_needles) and all(
+        needle in haystack for needle in priority_needles
+    )
+    return (
+        (2_000 if priority_match else 0)
+        + coverage * 1_000
+        + matches * 25
+        + float(db_rank or 0)
+    )
 
 
 _LIVE_NOISE_PATTERNS = (
     re.compile(r"\bпродолжение\s+следует\b[.…\s]*", re.IGNORECASE),
+    re.compile(r"\bпродолжение\s+в\s+следующей\s+части\b[.…\s]*", re.IGNORECASE),
     re.compile(
         r"\bредактор\s+субтитров\s+(?:[а-яё]\.?\s*)?[а-яё-]{2,}\b",
         re.IGNORECASE,
@@ -176,6 +232,13 @@ _LIVE_NOISE_PATTERNS = (
         r"\bкорректор\s+(?:[а-яё]\.?\s*)?[а-яё-]{2,}\b",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"\bне\s+забудьте\s+(?:поставить\s+лайк\s+и\s+)?подписаться\s+"
+        r"на\s+(?:канал|новые\s+видео)\b[.!…\s]*",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bподписывайтесь\s+на\s+канал\b[.!…\s]*", re.IGNORECASE),
+    re.compile(r"(?:\bwriting\s+with\s+apple\b[\s,;.!…]*){2,}", re.IGNORECASE),
 )
 
 
@@ -338,6 +401,7 @@ async def answer_question(
 
     budget = budget or config.CHAT_MAX_CONTEXT_CHARS
     search_query = build_search_query(q)
+    priority_query = build_priority_search_query(q)
     sources_used: list[str] = []
     source_details: list[dict] = []
     metadata = (meeting_metadata or "").strip()
@@ -383,9 +447,29 @@ async def answer_question(
         }
         current_items: list[dict] = []
         meetings_result, mm_result, email_result = await asyncio.gather(
-            models.search_meeting_transcripts(search_query, df, now, 30),
-            models.search_mm_messages(search_query, df, now, None, 60),
-            models.search_email_messages(search_query, df, now, None, 60),
+            models.search_meeting_transcripts(
+                search_query,
+                df,
+                now,
+                30,
+                priority_query=priority_query,
+            ),
+            models.search_mm_messages(
+                search_query,
+                df,
+                now,
+                None,
+                60,
+                priority_query=priority_query,
+            ),
+            models.search_email_messages(
+                search_query,
+                df,
+                now,
+                None,
+                60,
+                priority_query=priority_query,
+            ),
             return_exceptions=True,
         )
         # Query-centred excerpts avoid dropping a whole long transcript when it
@@ -430,6 +514,7 @@ async def answer_question(
                             search_query,
                             f"{title} {snippet}",
                             float(m.get("rank") or 0),
+                            priority_query,
                         ),
                         "dt": m["start_time"],
                         "line": line,
@@ -478,6 +563,7 @@ async def answer_question(
                         search_query,
                         f"{channel} {username} {raw_message}",
                         float(mm.get("rank") or 0),
+                        priority_query,
                     ),
                     "dt": mm["created_at"],
                     "line": line,
@@ -528,6 +614,7 @@ async def answer_question(
                         search_query,
                         searchable,
                         float(em.get("rank") or 0),
+                        priority_query,
                     ),
                     "dt": em["received_at"],
                     "line": line,

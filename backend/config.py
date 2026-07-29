@@ -67,6 +67,7 @@ class Config(BaseSettings):
     LIVE_QUESTION_MODEL: str = "small"       # accurate STT for the question only
     LIVE_WINDOW_SEC: int = 5                 # rolling window length per STT pass
     LIVE_POLL_SEC: int = 2                   # overlapping wake-word checks
+    LIVE_MIN_RMS: int = 120                  # skip near-silent PCM before cloud STT
     LIVE_QUESTION_MAX_SEC: int = 12          # max audio transcribed as the question
     LIVE_BUFFER_MIN: int = 10                # rolling live-transcript memory
     LIVE_CONTEXT_AUDIO_SEC: int = 180        # accurate re-STT cap for meeting-only Q&A
