@@ -151,6 +151,14 @@ export const api = {
       request<{ meetings: import('../types').Meeting[] }>(`/admin/meetings?limit=${limit}&offset=${offset}`),
     upcoming: () =>
       request<{ meetings: import('../types').Meeting[] }>('/admin/upcoming'),
+    setMeetingAssistantEnabled: (meetingId: string, enabled: boolean) =>
+      request<{ ok: boolean; meeting_id: string; assistant_enabled: boolean }>(
+        `/admin/meetings/${meetingId}/assistant`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ assistant_enabled: enabled }),
+        },
+      ),
     reanalyzeMeeting: (meetingId: string) =>
       request<void>(`/admin/meetings/${meetingId}/reanalyze`, { method: 'POST' }),
     retranscribeMeeting: (meetingId: string) =>

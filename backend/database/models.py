@@ -821,14 +821,19 @@ async def get_meeting_full_access(meeting_id: str) -> bool:
 
 
 async def set_meeting_assistant_enabled(meeting_id: str, value: bool) -> bool:
-    """Opt one meeting into/out of the globally gated live assistant."""
+    """Opt one pending meeting into/out of the globally gated live assistant.
+
+    Keeping the status check in the UPDATE closes the race with the recording
+    scheduler: once it claims the meeting, a late UI toggle cannot report a
+    setting that the already-running recorder never read.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         result = await conn.execute(
             """
             UPDATE meetings
                SET assistant_enabled = $1, updated_at = NOW()
-             WHERE id = $2
+             WHERE id = $2 AND status = 'pending'
             """,
             value,
             meeting_id,
@@ -1462,7 +1467,8 @@ async def get_upcoming_meetings_for_user(user_id: int, is_admin: bool) -> list[d
         if is_admin:
             rows = await conn.fetch(
                 """
-                SELECT id, title, topic, start_time, end_time, status, meeting_type
+                SELECT id, title, topic, start_time, end_time, status, meeting_type,
+                       meeting_url, assistant_enabled
                 FROM meetings
                 WHERE status IN ('pending', 'recording', 'transcribing', 'analyzing')
                   AND start_time > NOW() - interval '2 hours'

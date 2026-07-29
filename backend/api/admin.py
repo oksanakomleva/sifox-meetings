@@ -103,6 +103,64 @@ async def list_all_upcoming(admin: AdminUser):
     return {"meetings": meetings}
 
 
+class SetMeetingAssistantRequest(BaseModel):
+    assistant_enabled: bool
+
+
+@router.patch("/meetings/{meeting_id}/assistant")
+async def set_meeting_assistant(
+    meeting_id: str,
+    req: SetMeetingAssistantRequest,
+    admin: AdminUser,
+):
+    """Opt one pending meeting into or out of the live voice assistant.
+
+    The recorder reads this flag when it atomically claims the meeting. Changes
+    after that point would not affect the already-running browser, so reject
+    them instead of showing admins a misleading successful toggle.
+    """
+    from config import config
+    from services.assistant_toggle import (
+        AssistantToggleError,
+        validate_assistant_toggle,
+    )
+
+    meeting = await models.get_meeting(meeting_id)
+    try:
+        validate_assistant_toggle(
+            meeting,
+            req.assistant_enabled,
+            live_assistant_enabled=config.LIVE_ASSISTANT_ENABLED,
+            live_assistant_speak=config.LIVE_ASSISTANT_SPEAK,
+            live_assistant_all_meetings=config.LIVE_ASSISTANT_ALL_MEETINGS,
+        )
+    except AssistantToggleError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+
+    updated = await models.set_meeting_assistant_enabled(
+        meeting_id,
+        req.assistant_enabled,
+    )
+    if not updated:
+        # The scheduler may have claimed the meeting between our read and write.
+        raise HTTPException(
+            409,
+            "Встреча уже началась; изменить настройку ассистента не удалось",
+        )
+
+    logger.info(
+        "Admin %s set live assistant=%s for meeting %s",
+        admin["user_id"],
+        req.assistant_enabled,
+        meeting_id[:8],
+    )
+    return {
+        "ok": True,
+        "meeting_id": meeting_id,
+        "assistant_enabled": req.assistant_enabled,
+    }
+
+
 @router.get("/meetings/{meeting_id}/live-qa")
 async def admin_live_qa(meeting_id: str, admin: AdminUser):
     """Inspect the live in-meeting assistant Q&A for a meeting (+ flag state).

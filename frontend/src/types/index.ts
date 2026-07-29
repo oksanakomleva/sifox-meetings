@@ -42,6 +42,7 @@ export interface CommsChatMessage {
 export interface Meeting {
   id: string
   title: string | null
+  meeting_url?: string | null
   start_time: string | null
   end_time: string | null
   status: MeetingStatus

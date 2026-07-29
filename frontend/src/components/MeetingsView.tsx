@@ -130,12 +130,23 @@ interface Props {
   fetchDone: () => Promise<Meeting[]>
   fetchUpcoming: () => Promise<Meeting[]>
   admin?: boolean
+  onSetAssistantEnabled?: (meetingId: string, enabled: boolean) => Promise<unknown>
   onReanalyze?: (meetingId: string) => Promise<unknown>
   onRetranscribe?: (meetingId: string) => Promise<unknown>
   headerAction?: ReactNode
 }
 
-export default function MeetingsView({ title, subtitle, fetchDone, fetchUpcoming, admin, onReanalyze, onRetranscribe, headerAction }: Props) {
+export default function MeetingsView({
+  title,
+  subtitle,
+  fetchDone,
+  fetchUpcoming,
+  admin,
+  onSetAssistantEnabled,
+  onReanalyze,
+  onRetranscribe,
+  headerAction,
+}: Props) {
   const [tab, setTab] = useState<'done' | 'upcoming'>('done')
   const [doneMeetings, setDoneMeetings] = useState<Meeting[]>([])
   const [upcomingMeetings, setUpcomingMeetings] = useState<Meeting[]>([])
@@ -144,6 +155,7 @@ export default function MeetingsView({ title, subtitle, fetchDone, fetchUpcoming
   const [selectedDay, setSelectedDay] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [assistantBusy, setAssistantBusy] = useState<string | null>(null)
   const navigate = useNavigate()
 
   // Admin sees finished, errored AND no-show meetings (so they stay visible);
@@ -172,6 +184,22 @@ export default function MeetingsView({ title, subtitle, fetchDone, fetchUpcoming
     if (!onRetranscribe) return
     await onRetranscribe(id)
     setTimeout(load, 1500)
+  }
+
+  const handleAssistantToggle = async (meeting: Meeting, enabled: boolean) => {
+    if (!onSetAssistantEnabled || meeting.status !== 'pending') return
+    setAssistantBusy(meeting.id)
+    setError('')
+    try {
+      await onSetAssistantEnabled(meeting.id, enabled)
+      setUpcomingMeetings(prev => prev.map(m => (
+        m.id === meeting.id ? { ...m, assistant_enabled: enabled } : m
+      )))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Не удалось изменить настройку ассистента')
+    } finally {
+      setAssistantBusy(null)
+    }
   }
 
   const availableTags = useMemo(() => {
@@ -311,6 +339,19 @@ export default function MeetingsView({ title, subtitle, fetchDone, fetchUpcoming
         {/* Запланированные */}
         {!loading && tab === 'upcoming' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+            {admin && onSetAssistantEnabled && (
+              <div className="card" style={{
+                background: 'var(--color-accent-6)',
+                borderColor: 'var(--color-accent-4)',
+                padding: 'var(--space-4) var(--space-5)',
+              }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>Живой ассистент</div>
+                <div style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>
+                  Включайте только для нужных встреч до входа Протоколлера.
+                  Во встрече обращайтесь: «Протоколлер, …».
+                </div>
+              </div>
+            )}
             <MiniCalendar meetings={upcomingMeetings} selectedDay={selectedDay} onSelectDay={setSelectedDay} />
             <div>
               {selectedDay && (
@@ -338,7 +379,44 @@ export default function MeetingsView({ title, subtitle, fetchDone, fetchUpcoming
                             {fmtDateTime(m.start_time)}{m.end_time && <> — {fmtTime(m.end_time)}</>}
                           </div>
                         </div>
-                        <StatusBadge status={m.status} />
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 10 }}>
+                          <StatusBadge status={m.status} />
+                          {admin && onSetAssistantEnabled && (
+                            <div
+                              onClick={e => e.stopPropagation()}
+                              style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+                              title={!m.meeting_url
+                                ? 'У встречи нет ссылки на Телемост'
+                                : m.status === 'pending'
+                                  ? 'Протоколлер будет слушать обращения и отвечать голосом'
+                                  : 'Настройку можно изменить только до входа Протоколлера'}
+                            >
+                              <span style={{
+                                fontSize: 'var(--font-size-xs)',
+                                color: m.assistant_enabled
+                                  ? 'var(--color-accent)'
+                                  : 'var(--color-text-secondary)',
+                                whiteSpace: 'nowrap',
+                              }}>
+                                {!m.meeting_url
+                                  ? 'Нет ссылки на Телемост'
+                                  : m.assistant_enabled
+                                    ? 'Ассистент включён'
+                                    : 'Ассистент выключен'}
+                              </span>
+                              <label className="toggle">
+                                <input
+                                  type="checkbox"
+                                  aria-label={`Живой ассистент: ${m.title || m.topic || 'встреча'}`}
+                                  checked={Boolean(m.assistant_enabled)}
+                                  disabled={!m.meeting_url || m.status !== 'pending' || assistantBusy !== null}
+                                  onChange={e => handleAssistantToggle(m, e.target.checked)}
+                                />
+                                <span className="toggle-slider" />
+                              </label>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
                   ))}
