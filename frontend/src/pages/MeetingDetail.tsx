@@ -10,9 +10,71 @@ import ShareAccessModal from '../components/ShareAccessModal'
 import MarkdownRenderer from '../components/MarkdownRenderer'
 import { isDemoOn } from '../demo/demo'
 import { useAuth } from '../hooks/useAuth'
-import type { Meeting, ChatMessage, LiveQaItem } from '../types'
+import type { Meeting, ChatMessage, LiveQaItem, LiveQaSourceDetail } from '../types'
 
 type Tab = 'protocol' | 'transcript' | 'audio' | 'chat' | 'assistant'
+
+function LiveQaSourceGroup({
+  title,
+  sources,
+  formatTimestamp,
+}: {
+  title: string
+  sources: LiveQaSourceDetail[]
+  formatTimestamp: (value: string | null) => string
+}) {
+  if (sources.length === 0) return null
+
+  return (
+    <div style={{ marginTop: 'var(--space-4)' }}>
+      <div style={{
+        fontSize: 'var(--font-size-xs)',
+        fontWeight: 700,
+        textTransform: 'uppercase',
+        letterSpacing: '0.05em',
+        color: 'var(--color-text-secondary)',
+        marginBottom: 'var(--space-2)',
+      }}>
+        {title}
+      </div>
+      <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
+        {sources.map((source, sourceIndex) => (
+          <div key={`${source.source}-${source.label}-${sourceIndex}`} style={{
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius-md)',
+            padding: 'var(--space-3)',
+            background: 'var(--color-surface-2)',
+          }}>
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              gap: 'var(--space-2)',
+              flexWrap: 'wrap',
+              fontSize: 'var(--font-size-xs)',
+              fontWeight: 600,
+            }}>
+              <span>{source.label}</span>
+              {source.timestamp && (
+                <span style={{ color: 'var(--color-text-muted)', fontWeight: 400 }}>
+                  {formatTimestamp(source.timestamp)}
+                </span>
+              )}
+            </div>
+            <p style={{
+              marginTop: 'var(--space-2)',
+              whiteSpace: 'pre-wrap',
+              fontSize: 'var(--font-size-xs)',
+              lineHeight: 'var(--line-height-relaxed)',
+              color: 'var(--color-text-secondary)',
+            }}>
+              {source.snippet}
+            </p>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 export default function MeetingDetail() {
   const { id } = useParams<{ id: string }>()
@@ -356,53 +418,23 @@ export default function MeetingDetail() {
                     )}
 
                     {item.source_details?.length > 0 ? (
-                      <div style={{ marginTop: 'var(--space-4)' }}>
-                        <div style={{
-                          fontSize: 'var(--font-size-xs)',
-                          fontWeight: 700,
-                          textTransform: 'uppercase',
-                          letterSpacing: '0.05em',
-                          color: 'var(--color-text-secondary)',
-                          marginBottom: 'var(--space-2)',
-                        }}>
-                          Найденные источники
-                        </div>
-                        <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
-                          {item.source_details.map((source, sourceIndex) => (
-                            <div key={`${source.source}-${sourceIndex}`} style={{
-                              border: '1px solid var(--color-border)',
-                              borderRadius: 'var(--radius-md)',
-                              padding: 'var(--space-3)',
-                              background: 'var(--color-surface-2)',
-                            }}>
-                              <div style={{
-                                display: 'flex',
-                                justifyContent: 'space-between',
-                                gap: 'var(--space-2)',
-                                flexWrap: 'wrap',
-                                fontSize: 'var(--font-size-xs)',
-                                fontWeight: 600,
-                              }}>
-                                <span>{source.label}</span>
-                                {source.timestamp && (
-                                  <span style={{ color: 'var(--color-text-muted)', fontWeight: 400 }}>
-                                    {fmt(source.timestamp)}
-                                  </span>
-                                )}
-                              </div>
-                              <p style={{
-                                marginTop: 'var(--space-2)',
-                                whiteSpace: 'pre-wrap',
-                                fontSize: 'var(--font-size-xs)',
-                                lineHeight: 'var(--line-height-relaxed)',
-                                color: 'var(--color-text-secondary)',
-                              }}>
-                                {source.snippet}
-                              </p>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
+                      <>
+                        <LiveQaSourceGroup
+                          title="Передано модели"
+                          sources={item.source_details.filter(source => source.used === true)}
+                          formatTimestamp={fmt}
+                        />
+                        <LiveQaSourceGroup
+                          title="Найдено, но не передано модели"
+                          sources={item.source_details.filter(source => source.used === false)}
+                          formatTimestamp={fmt}
+                        />
+                        <LiveQaSourceGroup
+                          title="Найденные источники (старые записи)"
+                          sources={item.source_details.filter(source => source.used == null)}
+                          formatTimestamp={fmt}
+                        />
+                      </>
                     ) : (
                       <p style={{
                         marginTop: 'var(--space-3)',

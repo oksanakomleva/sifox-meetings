@@ -99,6 +99,7 @@ export interface LiveQaSourceDetail {
   label: string
   snippet: string
   timestamp?: string
+  used?: boolean
 }
 
 export interface LiveQaItem {

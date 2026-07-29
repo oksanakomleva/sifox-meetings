@@ -7,9 +7,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from services.qa_engine import (
     _SYSTEM_VOICE,
     build_search_query,
+    clean_live_transcript,
     contains_wake_word,
     format_meeting_metadata,
     make_search_snippet,
+    pack_context_with_quotas,
+    relevance_score,
     strip_wake_word,
     select_scope,
     pack_context,
@@ -40,9 +43,10 @@ class TestWakeWord:
         assert not contains_wake_word("протокол встречи готов", WAKE)
 
 
-def test_voice_prompt_prioritizes_current_meeting_and_excludes_wake_name():
+def test_voice_prompt_uses_archive_for_questions_about_other_meetings():
     assert "[ТЕКУЩАЯ ВСТРЕЧА]" in _SYSTEM_VOICE
-    assert "игнорируй противоречащие сведения" in _SYSTEM_VOICE
+    assert "обязательно используй подходящие блоки [АРХИВ]" in _SYSTEM_VOICE
+    assert "НЕ отвечай" in _SYSTEM_VOICE
     assert "никогда не является частью названия проекта" in _SYSTEM_VOICE
 
 
@@ -98,6 +102,45 @@ class TestPackContext:
         assert pack_context(items, budget=50) == "useful"
 
 
+class TestPackContextWithQuotas:
+    @staticmethod
+    def item(source, rank, line):
+        return {
+            "source": source,
+            "rank": rank,
+            "dt": "2026-07-29",
+            "line": line,
+            "detail": {"source": source, "label": line, "snippet": line},
+        }
+
+    def test_guarantees_mattermost_and_email_among_large_meetings(self):
+        meetings = [
+            self.item("meetings", 1_000 - index, f"[ВСТРЕЧА] общий текст {index} " + "X" * 700)
+            for index in range(20)
+        ]
+        mm = self.item(
+            "mattermost",
+            900,
+            "[MATTERMOST] Сергей Клевицкий будет в отпуске с 10.08 по 23.08",
+        )
+        email = self.item(
+            "email",
+            800,
+            "[EMAIL] По антиспуфингу согласовали следующий этап",
+        )
+
+        context, selected = pack_context_with_quotas(
+            [],
+            {"meetings": meetings, "mattermost": [mm], "email": [email]},
+            budget=2_000,
+        )
+
+        assert "отпуске с 10.08 по 23.08" in context
+        assert "По антиспуфингу" in context
+        assert mm in selected
+        assert email in selected
+
+
 class TestSearchQuery:
     def test_removes_conversational_filler_but_keeps_name(self):
         query = build_search_query(
@@ -109,7 +152,15 @@ class TestSearchQuery:
 
     def test_keeps_exact_project_terms(self):
         query = build_search_query("Что говорили по метрикам ГПБ?")
-        assert query == "по метрикам гпб"
+        assert query == "метрикам гпб газпромбанк"
+
+    def test_adds_omantel_alias_for_oman_sync(self):
+        query = build_search_query("Как прошел синк по Оману, что там обсудили?")
+        assert "оману" in query
+        assert "омантел" in query
+        assert "встреча" in query
+        assert "итоги" in query
+        assert "договорились" in query
 
 
 class TestSearchSnippet:
@@ -123,6 +174,40 @@ class TestSearchSnippet:
         text = f"{'вводная ' * 100}Отпуск Сергея Клевицкого продлится до пятницы"
         snippet = make_search_snippet(text, "Сергей Клевицкий отпуск", 140)
         assert "Сергея Клевицкого" in snippet
+
+    def test_prefers_short_project_acronym_over_common_early_word(self):
+        text = (
+            f"{'метрики за неделю без изменений ' * 50}"
+            "По ГПБ конверсия составила 42 процента и выросла на 5 пунктов."
+        )
+        snippet = make_search_snippet(text, "Какие метрики за неделю по ГПБ?", 160)
+        assert "ГПБ конверсия" in snippet
+
+
+def test_relevance_score_prefers_exact_multi_term_match():
+    exact = relevance_score(
+        "отпуск сергей клибицкий",
+        "Сергей Клибицкий будет в отпуске с 10.08 по 23.08",
+        0.1,
+    )
+    generic = relevance_score(
+        "отпуск сергей клибицкий",
+        "Обсудили общий график отпусков команды",
+        100,
+    )
+    assert exact > generic
+
+
+def test_clean_live_transcript_removes_subtitle_noise_only():
+    transcript = (
+        "Продолжение следует. Редактор субтитров А. Иванова "
+        "Протоколлер, что решили по Оману? Корректор И. Петров"
+    )
+    cleaned = clean_live_transcript(transcript)
+    assert "Продолжение следует" not in cleaned
+    assert "Редактор субтитров" not in cleaned
+    assert "Корректор" not in cleaned
+    assert "Протоколлер, что решили по Оману?" in cleaned
 
 
 def test_meeting_metadata_contains_stable_current_meeting_facts():
