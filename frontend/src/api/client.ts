@@ -159,6 +159,14 @@ export const api = {
           body: JSON.stringify({ assistant_enabled: enabled }),
         },
       ),
+    liveQa: (meetingId: string) =>
+      request<{
+        live_assistant_enabled: boolean
+        live_assistant_speak: boolean
+        live_assistant_all_meetings: boolean
+        meeting_assistant_enabled: boolean
+        items: import('../types').LiveQaItem[]
+      }>(`/admin/meetings/${meetingId}/live-qa`),
     reanalyzeMeeting: (meetingId: string) =>
       request<void>(`/admin/meetings/${meetingId}/reanalyze`, { method: 'POST' }),
     retranscribeMeeting: (meetingId: string) =>

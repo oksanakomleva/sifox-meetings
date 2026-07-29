@@ -81,6 +81,72 @@ def select_scope(attendee_emails: list[str], internal_domain: str, full_override
     return "full" if all(e.endswith(dom) for e in emails) else "meeting_only"
 
 
+_SEARCH_FILLERS = {
+    "скажи", "подскажи", "расскажи", "покажи", "найди", "пожалуйста",
+    "можешь", "можно", "мне", "нам", "информацию", "известно",
+    "какого", "какая", "какой", "что", "кто", "где", "когда", "как",
+    "до", "ли", "про", "о", "об", "это", "эта", "этой",
+    "говорили", "обсуждали", "протоколлер",
+}
+
+
+def build_search_query(question: str) -> str:
+    """Remove conversational filler while preserving names and subject terms."""
+    normalized = _normalize(question)
+    meaningful = [
+        token
+        for token in normalized.split()
+        if len(token) > 1 and token not in _SEARCH_FILLERS
+    ]
+    return " ".join(meaningful) or normalized
+
+
+def make_search_snippet(text: str, query: str, max_chars: int = 900) -> str:
+    """Return a compact excerpt around a query token, not just the text prefix."""
+    compact = re.sub(r"\s+", " ", text or "").strip()
+    if len(compact) <= max_chars:
+        return compact
+
+    lowered = compact.lower().replace("ё", "е")
+    positions: list[int] = []
+    for token in build_search_query(query).split():
+        # Prefixes also match common Russian inflections:
+        # Клевицкий → Клевицкого, Сергей → Сергея.
+        needle = token[: max(4, min(len(token), 7))]
+        if len(needle) < 4:
+            continue
+        position = lowered.find(needle)
+        if position >= 0:
+            positions.append(position)
+    center = min(positions) if positions else 0
+    start = max(0, center - max_chars // 3)
+    end = min(len(compact), start + max_chars)
+    start = max(0, end - max_chars)
+    snippet = compact[start:end].strip()
+    return f"{'…' if start else ''}{snippet}{'…' if end < len(compact) else ''}"
+
+
+def format_meeting_metadata(
+    meeting: dict | None,
+    attendee_emails: list[str],
+) -> str:
+    """Stable facts about the current meeting that live STT cannot know."""
+    if not meeting:
+        return ""
+    parts = [
+        f"Название: {meeting.get('title') or meeting.get('topic') or 'не указано'}",
+        f"Начало: {_fmt_dt(meeting.get('start_time'))}",
+    ]
+    attendees = sorted({
+        email.strip().lower()
+        for email in attendee_emails
+        if email and "@" in email
+    })
+    if attendees:
+        parts.append(f"Участники: {', '.join(attendees)}")
+    return "; ".join(parts)
+
+
 def pack_context(items: list[tuple[float, object, str]], budget: int) -> str:
     """Keep the most relevant lines under the char budget, present newest-first.
     `items` = (relevance_rank, datetime, formatted_line)."""
@@ -117,63 +183,182 @@ async def answer_question(
     *,
     scope: str,
     live_transcript: str = "",
+    meeting_metadata: str = "",
     days: int = 90,
     budget: int | None = None,
-) -> tuple[str, list[str]]:
-    """Returns (answer_text, sources_used)."""
+) -> tuple[str, list[str], list[dict], str]:
+    """Return answer, source names, admin-visible excerpts and search query."""
     q = (question or "").strip()
     if not q:
-        return "", []
+        return "", [], [], ""
 
     budget = budget or config.CHAT_MAX_CONTEXT_CHARS
+    search_query = build_search_query(q)
     sources_used: list[str] = []
+    source_details: list[dict] = []
+    metadata = (meeting_metadata or "").strip()
 
     if scope == "meeting_only":
-        context = (live_transcript or "").strip()[:budget]
-        if context:
+        context_parts = []
+        if metadata:
+            context_parts.append(f"[ТЕКУЩАЯ ВСТРЕЧА: МЕТАДАННЫЕ] {metadata}")
             sources_used.append("meeting")
+            source_details.append({
+                "source": "meeting",
+                "label": "Текущая встреча",
+                "snippet": metadata,
+            })
+        live = (live_transcript or "").strip()
+        if live:
+            live_snippet = make_search_snippet(
+                live,
+                search_query,
+                min(4_000, budget),
+            )
+            context_parts.append(
+                f"[ТЕКУЩАЯ ВСТРЕЧА: РАЗГОВОР] {live_snippet}"
+            )
+            if "meeting" not in sources_used:
+                sources_used.append("meeting")
+            source_details.append({
+                "source": "meeting",
+                "label": "Разговор текущей встречи",
+                "snippet": make_search_snippet(live, search_query, 500),
+            })
+        context = "\n".join(context_parts)[:budget]
         context = context or "Пока в этой встрече ничего не сказано."
     else:
         now = datetime.now(timezone.utc)
         df = now - timedelta(days=days)
         items: list[tuple[float, object, str]] = []
-        recent_result, mm_result, email_result = await asyncio.gather(
-            models.get_recent_meetings_with_transcripts(days=days),
-            models.search_mm_messages(q, df, now, None, 200),
-            models.search_email_messages(q, df, now, None, 200),
+        meetings_result, mm_result, email_result = await asyncio.gather(
+            models.search_meeting_transcripts(search_query, df, now, 30),
+            models.search_mm_messages(search_query, df, now, None, 60),
+            models.search_email_messages(search_query, df, now, None, 60),
             return_exceptions=True,
         )
-        # Meetings archive (no FTS — recency-ranked). Cap to the most recent few
-        # so a live answer isn't slowed by dumping the whole archive into the LLM.
-        if isinstance(recent_result, Exception):
-            logger.warning("qa: meetings retrieval failed: %s", recent_result)
+        # Query-centred excerpts avoid dropping a whole long transcript when it
+        # exceeds the live context budget.
+        if isinstance(meetings_result, Exception):
+            logger.warning("qa: meetings retrieval failed: %s", meetings_result)
         else:
-            for m in recent_result[: config.LIVE_MEETINGS_LIMIT]:
+            for m in meetings_result[: config.LIVE_MEETINGS_LIMIT]:
                 if m.get("transcript"):
-                    line = f"[ВСТРЕЧА] {_fmt_dt(m['start_time'])} «{m.get('title') or m.get('topic') or '—'}»: {m['transcript']}"
-                    items.append((0.0, m["start_time"], line))
+                    snippet = make_search_snippet(
+                        m["transcript"],
+                        search_query,
+                        1_200,
+                    )
+                    title = m.get("title") or m.get("topic") or "—"
+                    line = (
+                        f"[ВСТРЕЧА] {_fmt_dt(m['start_time'])} "
+                        f"«{title}»: {snippet}"
+                    )
+                    items.append((float(m.get("rank") or 0), m["start_time"], line))
                     sources_used.append("meetings")
+                    if sum(
+                        d["source"] == "meetings" for d in source_details
+                    ) < 3:
+                        source_details.append({
+                            "source": "meetings",
+                            "label": f"Встреча «{title}»",
+                            "snippet": make_search_snippet(
+                                snippet,
+                                search_query,
+                                500,
+                            ),
+                            "timestamp": str(m.get("start_time") or ""),
+                        })
         # Mattermost (FTS)
         if isinstance(mm_result, Exception):
             logger.warning("qa: mm search failed: %s", mm_result)
         else:
             for mm in mm_result:
-                line = f"[MM] {_fmt_dt(mm['created_at'])} @{mm.get('username') or '—'} в #{mm.get('channel_name') or mm['channel_id']}: {mm['message']}"
+                snippet = make_search_snippet(
+                    mm.get("message") or "",
+                    search_query,
+                    900,
+                )
+                channel = mm.get("channel_name") or mm["channel_id"]
+                username = mm.get("username") or "—"
+                line = (
+                    f"[MM] {_fmt_dt(mm['created_at'])} "
+                    f"@{username} в #{channel}: {snippet}"
+                )
                 items.append((float(mm.get("rank") or 0), mm["created_at"], line))
                 sources_used.append("mattermost")
+                if sum(
+                    d["source"] == "mattermost" for d in source_details
+                ) < 3:
+                    source_details.append({
+                        "source": "mattermost",
+                        "label": f"Mattermost #{channel} · @{username}",
+                        "snippet": make_search_snippet(
+                            snippet,
+                            search_query,
+                            500,
+                        ),
+                        "timestamp": str(mm.get("created_at") or ""),
+                    })
         # Email (FTS)
         if isinstance(email_result, Exception):
             logger.warning("qa: email search failed: %s", email_result)
         else:
             for em in email_result:
-                line = f"[EMAIL] {_fmt_dt(em['received_at'])} от {em.get('from_email') or '—'} / Тема: {em.get('subject') or ''} / {(em.get('body_text') or '')[:1000]}"
+                searchable = (
+                    f"{em.get('subject') or ''}\n{em.get('body_text') or ''}"
+                )
+                snippet = make_search_snippet(
+                    searchable,
+                    search_query,
+                    1_000,
+                )
+                sender = em.get("from_email") or "—"
+                subject = em.get("subject") or "Без темы"
+                line = (
+                    f"[EMAIL] {_fmt_dt(em['received_at'])} от {sender} / "
+                    f"Тема: {subject} / {snippet}"
+                )
                 items.append((float(em.get("rank") or 0), em["received_at"], line))
                 sources_used.append("email")
+                if sum(d["source"] == "email" for d in source_details) < 3:
+                    source_details.append({
+                        "source": "email",
+                        "label": f"Письмо «{subject}» · {sender}",
+                        "snippet": make_search_snippet(
+                            snippet,
+                            search_query,
+                            500,
+                        ),
+                        "timestamp": str(em.get("received_at") or ""),
+                    })
 
         live = (live_transcript or "").strip()
-        if live:
-            items.append((1e9, now, f"[ТЕКУЩАЯ ВСТРЕЧА] {live}"))  # always keep
+        if metadata:
+            items.append((
+                1e10,
+                now,
+                f"[ТЕКУЩАЯ ВСТРЕЧА: МЕТАДАННЫЕ] {metadata}",
+            ))
             sources_used.append("meeting")
+            source_details.insert(0, {
+                "source": "meeting",
+                "label": "Текущая встреча",
+                "snippet": metadata,
+            })
+        if live:
+            items.append((
+                1e9,
+                now,
+                f"[ТЕКУЩАЯ ВСТРЕЧА: РАЗГОВОР] "
+                f"{make_search_snippet(live, search_query, 4_000)}",
+            ))
+            sources_used.append("meeting")
+            source_details.insert(1 if metadata else 0, {
+                "source": "meeting",
+                "label": "Разговор текущей встречи",
+                "snippet": make_search_snippet(live, search_query, 500),
+            })
         context = pack_context(items, budget) or "Нет данных."
 
     from openai import AsyncOpenAI
@@ -187,4 +372,9 @@ async def answer_question(
         max_tokens=220,
         temperature=0.3,
     )
-    return (resp.choices[0].message.content or "").strip(), sorted(set(sources_used))
+    return (
+        (resp.choices[0].message.content or "").strip(),
+        sorted(set(sources_used)),
+        source_details[:10],
+        search_query,
+    )

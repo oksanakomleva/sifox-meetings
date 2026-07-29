@@ -279,7 +279,13 @@ async def update_meeting_tags(meeting_id: str, body: TagsUpdate, user: CurrentUs
 async def live_qa(meeting_id: str, user: CurrentUser):
     """Questions asked to the live in-meeting assistant for this meeting."""
     await _get_accessible_meeting(meeting_id, user)
-    return {"items": await models.get_live_qa(meeting_id)}
+    items = await models.get_live_qa(meeting_id)
+    # Search diagnostics may contain excerpts from corporate meetings, chat and
+    # email. They are intentionally available only through the admin endpoint.
+    for item in items:
+        item.pop("search_query", None)
+        item.pop("source_details", None)
+    return {"items": items}
 
 
 @router.get("/{meeting_id}/protocol-recipients")

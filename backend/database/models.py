@@ -851,6 +851,8 @@ async def save_live_qa(
     spoken: bool = False,
     latency_ms: int | None = None,
     error: str | None = None,
+    search_query: str | None = None,
+    source_details: list[dict] | None = None,
 ) -> None:
     """Audit log of a live in-meeting assistant Q&A."""
     pool = await get_pool()
@@ -858,8 +860,9 @@ async def save_live_qa(
         await conn.execute(
             """
             INSERT INTO live_qa
-              (meeting_id, question, answer, scope, sources, spoken, latency_ms, error)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+              (meeting_id, question, answer, scope, sources, spoken, latency_ms,
+               error, search_query, source_details)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
             """,
             meeting_id,
             question,
@@ -869,6 +872,8 @@ async def save_live_qa(
             spoken,
             latency_ms,
             error,
+            search_query,
+            json.dumps(source_details or [], ensure_ascii=False),
         )
 
 
@@ -878,11 +883,22 @@ async def get_live_qa(meeting_id: str) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT question, answer, scope, sources, spoken, latency_ms, error, "
-            "asked_at FROM live_qa "
+            "search_query, source_details, asked_at FROM live_qa "
             "WHERE meeting_id = $1 ORDER BY asked_at ASC",
             meeting_id,
         )
-    return [dict(r) for r in rows]
+    items = []
+    for row in rows:
+        item = dict(row)
+        details = item.get("source_details")
+        if isinstance(details, str):
+            try:
+                details = json.loads(details)
+            except json.JSONDecodeError:
+                details = []
+        item["source_details"] = details or []
+        items.append(item)
+    return items
 
 
 async def mark_no_show(meeting_id: str) -> None:
@@ -1149,6 +1165,67 @@ async def get_recent_meetings_with_transcripts(
             days, limit,
         )
     return [dict(r) for r in rows]
+
+
+async def search_meeting_transcripts(
+    query_text: str,
+    date_from=None,
+    date_to=None,
+    limit: int = 30,
+) -> list[dict]:
+    """FTS-ranked completed meetings for a live-assistant question.
+
+    Retrieval happens in PostgreSQL so the service no longer transfers hundreds
+    of full transcripts into Python for every spoken question.
+    """
+    args = [query_text]
+    extra = ["m.status = 'done'", "m.transcript IS NOT NULL"]
+
+    def add(expr: str, value) -> None:
+        args.append(value)
+        extra.append(expr.format(len(args)))
+
+    if date_from:
+        add("m.start_time >= ${}", date_from)
+    if date_to:
+        add("m.start_time <= ${}", date_to)
+    args.append(limit)
+    limit_arg = len(args)
+    where = " AND ".join(extra)
+    sql = f"""
+        WITH q AS (
+            SELECT replace(
+                websearch_to_tsquery('russian', $1)::text,
+                '&',
+                '|'
+            )::tsquery AS tq
+        )
+        SELECT m.id, m.title, m.topic, m.start_time, m.end_time, m.transcript,
+               m.tags,
+               ts_rank(
+                   to_tsvector(
+                       'russian',
+                       coalesce(m.title, '') || ' ' ||
+                       coalesce(m.topic, '') || ' ' ||
+                       coalesce(m.transcript, '')
+                   ),
+                   q.tq
+               ) AS rank
+        FROM meetings m, q
+        WHERE {where}
+          AND q.tq @@ to_tsvector(
+              'russian',
+              coalesce(m.title, '') || ' ' ||
+              coalesce(m.topic, '') || ' ' ||
+              coalesce(m.transcript, '')
+          )
+        ORDER BY rank DESC, m.start_time DESC
+        LIMIT ${limit_arg}
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *args)
+    return [dict(row) for row in rows]
 
 
 async def get_recent_meetings_with_transcripts_for_user(

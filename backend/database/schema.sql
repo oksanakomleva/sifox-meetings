@@ -123,6 +123,8 @@ CREATE TABLE IF NOT EXISTS live_qa (
 ALTER TABLE live_qa ADD COLUMN IF NOT EXISTS spoken BOOLEAN DEFAULT FALSE;
 ALTER TABLE live_qa ADD COLUMN IF NOT EXISTS latency_ms INTEGER;
 ALTER TABLE live_qa ADD COLUMN IF NOT EXISTS error TEXT;
+ALTER TABLE live_qa ADD COLUMN IF NOT EXISTS search_query TEXT;
+ALTER TABLE live_qa ADD COLUMN IF NOT EXISTS source_details JSONB DEFAULT '[]'::jsonb;
 CREATE INDEX IF NOT EXISTS idx_live_qa_meeting ON live_qa(meeting_id, asked_at);
 CREATE INDEX IF NOT EXISTS idx_meetings_status    ON meetings(status);
 CREATE INDEX IF NOT EXISTS idx_meetings_start     ON meetings(start_time);
@@ -296,6 +298,11 @@ CREATE INDEX IF NOT EXISTS idx_mm_fts ON mm_messages
     USING gin (to_tsvector('russian', message));
 CREATE INDEX IF NOT EXISTS idx_email_fts ON email_messages
     USING gin (to_tsvector('russian', coalesce(subject, '') || ' ' || coalesce(body_text, '')));
+CREATE INDEX IF NOT EXISTS idx_meetings_transcript_fts ON meetings
+    USING gin (to_tsvector(
+        'russian',
+        coalesce(title, '') || ' ' || coalesce(topic, '') || ' ' || coalesce(transcript, '')
+    ));
 
 -- Incremental sync cursors. source: 'mattermost:{channel_id}' | 'gmail:{email}'
 CREATE TABLE IF NOT EXISTS sync_state (

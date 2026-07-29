@@ -6,7 +6,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from services.qa_engine import (
     _SYSTEM_VOICE,
+    build_search_query,
     contains_wake_word,
+    format_meeting_metadata,
+    make_search_snippet,
     strip_wake_word,
     select_scope,
     pack_context,
@@ -93,3 +96,43 @@ class TestPackContext:
             (9.0, "2026-02-01", "useful"),
         ]
         assert pack_context(items, budget=50) == "useful"
+
+
+class TestSearchQuery:
+    def test_removes_conversational_filler_but_keeps_name(self):
+        query = build_search_query(
+            "Скажи, пожалуйста, до какого числа в отпуске Сергей Маценов?"
+        )
+        assert "скажи" not in query
+        assert "какого" not in query
+        assert "отпуске сергей маценов" in query
+
+    def test_keeps_exact_project_terms(self):
+        query = build_search_query("Что говорили по метрикам ГПБ?")
+        assert query == "по метрикам гпб"
+
+
+class TestSearchSnippet:
+    def test_centres_excerpt_on_match_in_long_text(self):
+        text = f"{'начало ' * 100}важный дедлайн 15 августа {'конец ' * 100}"
+        snippet = make_search_snippet(text, "когда важный дедлайн", 120)
+        assert "важный дедлайн" in snippet
+        assert len(snippet) <= 122
+
+    def test_matches_common_name_inflection_by_prefix(self):
+        text = f"{'вводная ' * 100}Отпуск Сергея Клевицкого продлится до пятницы"
+        snippet = make_search_snippet(text, "Сергей Клевицкий отпуск", 140)
+        assert "Сергея Клевицкого" in snippet
+
+
+def test_meeting_metadata_contains_stable_current_meeting_facts():
+    metadata = format_meeting_metadata(
+        {
+            "title": "Еженедельный статус",
+            "start_time": "2026-07-29T09:30:00+00:00",
+        },
+        ["USER@SIFOX.COM", "guest@example.com"],
+    )
+    assert "Еженедельный статус" in metadata
+    assert "user@sifox.com" in metadata
+    assert "guest@example.com" in metadata

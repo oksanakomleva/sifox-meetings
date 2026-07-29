@@ -10,9 +10,9 @@ import ShareAccessModal from '../components/ShareAccessModal'
 import MarkdownRenderer from '../components/MarkdownRenderer'
 import { isDemoOn } from '../demo/demo'
 import { useAuth } from '../hooks/useAuth'
-import type { Meeting, ChatMessage } from '../types'
+import type { Meeting, ChatMessage, LiveQaItem } from '../types'
 
-type Tab = 'protocol' | 'transcript' | 'audio' | 'chat'
+type Tab = 'protocol' | 'transcript' | 'audio' | 'chat' | 'assistant'
 
 export default function MeetingDetail() {
   const { id } = useParams<{ id: string }>()
@@ -20,6 +20,8 @@ export default function MeetingDetail() {
   const [meeting, setMeeting] = useState<Meeting | null>(null)
   const [transcript, setTranscript] = useState<string | null>(null)
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([])
+  const [liveQa, setLiveQa] = useState<LiveQaItem[]>([])
+  const [liveQaLoading, setLiveQaLoading] = useState(false)
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState<Tab>('protocol')
   const [error, setError] = useState('')
@@ -41,6 +43,15 @@ export default function MeetingDetail() {
 
     api.chat.history(id).then(r => setChatHistory(r.messages)).catch(() => {})
   }, [id])
+
+  useEffect(() => {
+    if (!id || !user?.is_admin || isDemoOn()) return
+    setLiveQaLoading(true)
+    api.admin.liveQa(id)
+      .then(r => setLiveQa(r.items))
+      .catch(() => setLiveQa([]))
+      .finally(() => setLiveQaLoading(false))
+  }, [id, user?.is_admin])
 
   const loadTranscript = async () => {
     if (!id || transcript !== null) return
@@ -167,12 +178,19 @@ export default function MeetingDetail() {
       <div className="page-body" style={{ paddingTop: 'var(--space-6)' }}>
         {/* Tabs */}
         <div className="tabs">
-          {(['protocol', 'transcript', 'audio', 'chat'] as Tab[]).map(t => {
+          {([
+            'protocol',
+            'transcript',
+            'audio',
+            'chat',
+            ...(user?.is_admin && !isDemoOn() ? ['assistant' as Tab] : []),
+          ] as Tab[]).map(t => {
             const labels: Record<Tab, string> = {
               protocol: '📋 Протокол',
               transcript: '📝 Транскрипт',
               audio: '🎵 Аудио',
               chat: '💬 AI-чат',
+              assistant: '🤖 Ассистент',
             }
             // Gate tabs on DATA, not status — a meeting that errored at the
             // analysis step still has a usable transcript/audio/chat.
@@ -181,6 +199,7 @@ export default function MeetingDetail() {
               transcript: !meeting.transcript,
               audio: !meeting.audio_path,
               chat: !meeting.transcript,
+              assistant: false,
             }
             return (
               <button
@@ -269,6 +288,144 @@ export default function MeetingDetail() {
         {tab === 'chat' && (
           <div className="card" style={{ maxWidth: 760, padding: 0, overflow: 'hidden' }}>
             <ChatWidget meetingId={id} initialHistory={chatHistory} />
+          </div>
+        )}
+
+        {tab === 'assistant' && user?.is_admin && (
+          <div style={{ maxWidth: 820 }}>
+            {liveQaLoading ? (
+              <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 40 }}>
+                <span className="spinner" style={{ width: 24, height: 24 }} />
+              </div>
+            ) : liveQa.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-state-icon">🤖</div>
+                <div className="empty-state-title">Вопросов ассистенту пока не было</div>
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gap: 'var(--space-4)' }}>
+                {liveQa.map((item, index) => (
+                  <div className="card" key={`${item.asked_at}-${index}`} style={{ padding: 'var(--space-5)' }}>
+                    <div style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      gap: 'var(--space-3)',
+                      flexWrap: 'wrap',
+                    }}>
+                      <strong style={{ fontSize: 'var(--font-size-sm)' }}>
+                        «{item.question}»
+                      </strong>
+                      <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-text-muted)' }}>
+                        {fmt(item.asked_at)}
+                      </span>
+                    </div>
+
+                    <p style={{
+                      marginTop: 'var(--space-3)',
+                      fontSize: 'var(--font-size-sm)',
+                      lineHeight: 'var(--line-height-relaxed)',
+                    }}>
+                      {item.answer || 'Ответ не сформирован'}
+                    </p>
+
+                    <div style={{
+                      display: 'flex',
+                      gap: 'var(--space-2)',
+                      flexWrap: 'wrap',
+                      marginTop: 'var(--space-3)',
+                    }}>
+                      <span className="badge">
+                        {item.scope === 'full' ? 'Корпоративные источники' : 'Только эта встреча'}
+                      </span>
+                      <span className="badge">
+                        {item.spoken ? 'Ответ озвучен' : 'Ответ не озвучен'}
+                      </span>
+                      {item.latency_ms != null && (
+                        <span className="badge">{(item.latency_ms / 1000).toFixed(1)} сек.</span>
+                      )}
+                    </div>
+
+                    {item.search_query && (
+                      <p style={{
+                        marginTop: 'var(--space-3)',
+                        fontSize: 'var(--font-size-xs)',
+                        color: 'var(--color-text-secondary)',
+                      }}>
+                        Поисковый запрос: <code>{item.search_query}</code>
+                      </p>
+                    )}
+
+                    {item.source_details?.length > 0 ? (
+                      <div style={{ marginTop: 'var(--space-4)' }}>
+                        <div style={{
+                          fontSize: 'var(--font-size-xs)',
+                          fontWeight: 700,
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.05em',
+                          color: 'var(--color-text-secondary)',
+                          marginBottom: 'var(--space-2)',
+                        }}>
+                          Найденные источники
+                        </div>
+                        <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
+                          {item.source_details.map((source, sourceIndex) => (
+                            <div key={`${source.source}-${sourceIndex}`} style={{
+                              border: '1px solid var(--color-border)',
+                              borderRadius: 'var(--radius-md)',
+                              padding: 'var(--space-3)',
+                              background: 'var(--color-surface-2)',
+                            }}>
+                              <div style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                gap: 'var(--space-2)',
+                                flexWrap: 'wrap',
+                                fontSize: 'var(--font-size-xs)',
+                                fontWeight: 600,
+                              }}>
+                                <span>{source.label}</span>
+                                {source.timestamp && (
+                                  <span style={{ color: 'var(--color-text-muted)', fontWeight: 400 }}>
+                                    {fmt(source.timestamp)}
+                                  </span>
+                                )}
+                              </div>
+                              <p style={{
+                                marginTop: 'var(--space-2)',
+                                whiteSpace: 'pre-wrap',
+                                fontSize: 'var(--font-size-xs)',
+                                lineHeight: 'var(--line-height-relaxed)',
+                                color: 'var(--color-text-secondary)',
+                              }}>
+                                {source.snippet}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <p style={{
+                        marginTop: 'var(--space-3)',
+                        fontSize: 'var(--font-size-xs)',
+                        color: 'var(--color-text-muted)',
+                      }}>
+                        Для старого вопроса фрагменты источников не сохранялись.
+                      </p>
+                    )}
+
+                    {item.error && (
+                      <p style={{
+                        marginTop: 'var(--space-3)',
+                        fontSize: 'var(--font-size-xs)',
+                        color: 'var(--color-error)',
+                      }}>
+                        Ошибка: {item.error}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

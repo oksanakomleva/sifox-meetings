@@ -378,6 +378,8 @@ async def _handle_question(
     answer = None
     scope = "unknown"
     sources: list[str] = []
+    source_details: list[dict] = []
+    search_query = ""
     saved = False
     try:
         raw = await transcribe_question(audio)
@@ -385,11 +387,16 @@ async def _handle_question(
         if not question or len(question) < 3:
             logger.info("Live assistant: empty question after wake (%s) — skipping", meeting_id[:8])
             return
+        search_query = qa_engine.build_search_query(question)
 
         # Scope: external attendees → meeting_only, unless host opted into full.
-        attendees = await models.get_meeting_attendee_emails(meeting_id)
-        full_override = await models.get_meeting_full_access(meeting_id)
+        attendees, full_override, meeting = await asyncio.gather(
+            models.get_meeting_attendee_emails(meeting_id),
+            models.get_meeting_full_access(meeting_id),
+            models.get_meeting(meeting_id),
+        )
         scope = qa_engine.select_scope(attendees, config.ALLOWED_DOMAIN, full_override)
+        meeting_metadata = qa_engine.format_meeting_metadata(meeting, attendees)
 
         context_transcript = live_transcript
         if scope == "meeting_only" and recent_audio:
@@ -397,8 +404,9 @@ async def _handle_question(
             if accurate_context:
                 context_transcript = accurate_context
 
-        answer, sources = await qa_engine.answer_question(
+        answer, sources, source_details, search_query = await qa_engine.answer_question(
             question, scope=scope, live_transcript=context_transcript,
+            meeting_metadata=meeting_metadata,
             budget=config.LIVE_CONTEXT_MAX_CHARS,
         )
         logger.info("Live assistant Q (%s, scope=%s): %r → A: %r", meeting_id[:8], scope, question, answer)
@@ -425,6 +433,8 @@ async def _handle_question(
             spoken=spoken,
             latency_ms=int((time.monotonic() - started) * 1_000),
             error=speech_error,
+            search_query=search_query,
+            source_details=source_details,
         )
         saved = True
     except Exception as e:
@@ -440,6 +450,8 @@ async def _handle_question(
                     spoken=False,
                     latency_ms=int((time.monotonic() - started) * 1_000),
                     error=f"{type(e).__name__}: {e}"[:1_000],
+                    search_query=search_query,
+                    source_details=source_details,
                 )
             except Exception:
                 logger.exception(

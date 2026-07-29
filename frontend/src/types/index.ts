@@ -94,6 +94,26 @@ export interface ChatMessage {
   created_at: string
 }
 
+export interface LiveQaSourceDetail {
+  source: string
+  label: string
+  snippet: string
+  timestamp?: string
+}
+
+export interface LiveQaItem {
+  question: string
+  answer: string | null
+  scope: 'full' | 'meeting_only' | string
+  sources: string[]
+  source_details: LiveQaSourceDetail[]
+  search_query: string | null
+  spoken: boolean
+  latency_ms: number | null
+  error: string | null
+  asked_at: string
+}
+
 export interface Invitation {
   id: number
   email: string
