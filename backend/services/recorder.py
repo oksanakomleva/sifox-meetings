@@ -407,7 +407,11 @@ async def _record_pipeline(meeting_id: str) -> None:
         page = await context.new_page()
 
         # 3. Join meeting
-        participants = await _join_meeting(page, url)
+        participants = await _join_meeting(
+            page,
+            url,
+            scheduled_start=meeting.get("start_time"),
+        )
         logger.info("Joined meeting %s, participants: %s", meeting_id[:8], participants)
 
         # 4. Start audio capture
@@ -672,15 +676,55 @@ async def transcribe_and_analyze(
 
 # ── Meeting join ──────────────────────────────────────────────────────────────
 
+_JOIN_BUTTON_SELECTORS = (
+    "button[data-testid='join-button']",
+    "button:has-text('Подключиться')",
+    "button:has-text('Присоединиться')",
+    "button:has-text('Join')",
+)
+
+
 def _is_join_confirmed(state: dict) -> bool:
-    """Interpret a bounded Telemost DOM probe after clicking Join."""
+    """Interpret a bounded Telemost DOM probe after clicking Join.
+
+    Do not rely on the Leave button alone: Telemost can briefly keep stale
+    pre-join controls mounted while the participant is already visible to
+    others. Conversely, a mic control by itself also exists on the pre-join
+    screen and is never sufficient proof.
+    """
+    if state.get("has_waiting_room"):
+        return False
     if state.get("has_leave"):
+        return True
+    in_call_signals = int(state.get("in_call_signal_count") or 0)
+    if in_call_signals >= 2:
         return True
     return bool(
         state.get("has_mic")
         and not state.get("has_join")
         and not state.get("has_name_input")
+        and in_call_signals >= 1
     )
+
+
+def _join_wait_seconds(
+    scheduled_start: datetime | None,
+    *,
+    now: datetime | None = None,
+) -> float:
+    """Bounded wait covering both UI lag and admission around meeting start."""
+    wait = float(max(30, config.TELEMOST_JOIN_TIMEOUT_SEC))
+    if scheduled_start is not None:
+        current = now or datetime.now(timezone.utc)
+        start = scheduled_start
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        seconds_until_start = (start - current).total_seconds()
+        wait = max(
+            wait,
+            seconds_until_start + config.TELEMOST_JOIN_GRACE_AFTER_START_SEC,
+        )
+    return min(wait, float(max(30, config.TELEMOST_JOIN_MAX_WAIT_SEC)))
 
 
 async def _telemost_call_state(page) -> dict:
@@ -702,6 +746,19 @@ async def _telemost_call_state(page) -> dict:
             "input[placeholder*='имя' i],input[placeholder*='name' i]," +
             "input[name='name'],input[type='text']"
           )].filter(visible);
+          const pageText = (document.body.innerText || '').toLowerCase().slice(0, 5000);
+          const inCallSignals = [
+            controls.some(x => x.includes('участник') || x.includes('participants')),
+            controls.some(x => x.includes('открыть чат') || x.includes('open chat')),
+            controls.some(x => x.includes('поднять руку') || x.includes('raise hand')),
+            controls.some(x =>
+              x.includes('демонстрац') || x.includes('share screen')
+            ),
+            controls.some(x =>
+              x.includes('пригласить') || x.includes('invite') ||
+              x.includes('копировать ссылку') || x.includes('copy link')
+            )
+          ].filter(Boolean).length;
           return {
             has_leave: controls.some(x =>
               x.includes('выйти') || x.includes('покинуть') ||
@@ -713,16 +770,50 @@ async def _telemost_call_state(page) -> dict:
             ),
             has_join: controls.some(x =>
               x.includes('подключиться') || x.includes('присоединиться') ||
-              x.includes('войти') || x.includes(' join')
+              x.trim() === 'join'
             ),
             has_name_input: inputs.length > 0,
+            has_waiting_room:
+              pageText.includes('комната ожидания') ||
+              pageText.includes('ожидайте разрешения') ||
+              pageText.includes('организатор допустит') ||
+              pageText.includes('waiting room') ||
+              pageText.includes('wait for the host'),
+            in_call_signal_count: inCallSignals,
             labels: controls.slice(0, 25)
           };
         }"""
     )
 
 
-async def _join_meeting(page, url: str) -> set[str]:
+async def _click_visible_join_button(page, *, retry: bool = False) -> str | None:
+    """Click a real visible meeting-join control, never the account Login button."""
+    for selector in _JOIN_BUTTON_SELECTORS:
+        try:
+            buttons = page.locator(selector)
+            count = await buttons.count()
+            for index in range(min(count, 5)):
+                button = buttons.nth(index)
+                if not await button.is_visible():
+                    continue
+                await button.click(force=True, timeout=3_000)
+                logger.info(
+                    "%s Telemost join via %s",
+                    "Retried" if retry else "Clicked",
+                    selector,
+                )
+                return selector
+        except Exception as exc:
+            logger.info("Join selector %s failed: %s", selector, exc)
+    return None
+
+
+async def _join_meeting(
+    page,
+    url: str,
+    *,
+    scheduled_start: datetime | None = None,
+) -> set[str]:
     debug_dir = Path("/tmp/recorder-debug")
     debug_dir.mkdir(exist_ok=True)
 
@@ -739,6 +830,21 @@ async def _join_meeting(page, url: str) -> set[str]:
     logger.info("Page URL after load: %s", page.url)
     logger.info("Page title: %s", await page.title())
 
+    # Fresh anonymous sessions sometimes show an app handoff page first.
+    try:
+        continue_buttons = page.locator(
+            "button:has-text('Продолжить в браузере')"
+        )
+        for index in range(min(await continue_buttons.count(), 3)):
+            button = continue_buttons.nth(index)
+            if await button.is_visible():
+                await button.click(force=True, timeout=3_000)
+                logger.info("Continued to Telemost in browser")
+                await page.wait_for_timeout(1_000)
+                break
+    except Exception:
+        pass
+
     # Fill name
     name_filled = False
     for sel in [
@@ -748,11 +854,15 @@ async def _join_meeting(page, url: str) -> set[str]:
         "input[type='text']",
     ]:
         try:
-            inp = page.locator(sel).first
-            if await inp.is_visible(timeout=1500):
-                await inp.fill("Protocaller", timeout=3000)
-                logger.info("Name filled via selector: %s", sel)
-                name_filled = True
+            inputs = page.locator(sel)
+            for index in range(min(await inputs.count(), 5)):
+                inp = inputs.nth(index)
+                if await inp.is_visible(timeout=1500):
+                    await inp.fill("Protocaller", timeout=3000)
+                    logger.info("Name filled via selector: %s", sel)
+                    name_filled = True
+                    break
+            if name_filled:
                 break
         except Exception:
             continue
@@ -782,30 +892,9 @@ async def _join_meeting(page, url: str) -> set[str]:
 
     await snap("2-before-join")
 
-    # Click join button — try has-text, fallback to clicking by force
-    joined = False
-    for selector in [
-        "button:has-text('Подключиться')",
-        "button:has-text('Присоединиться')",
-        "button:has-text('Войти')",
-        "button:has-text('Join')",
-        "button[data-testid='join-button']",
-    ]:
-        try:
-            btn = page.locator(selector).first
-            count = await btn.count()
-            if count == 0:
-                continue
-            # Force click even if covered (force=True bypasses visibility check)
-            await btn.click(force=True, timeout=3000)
-            logger.info("Clicked join button: %s", selector)
-            joined = True
-            break
-        except Exception as e:
-            logger.info("Selector %s failed: %s", selector, e)
-            continue
+    clicked_selector = await _click_visible_join_button(page)
 
-    if not joined:
+    if not clicked_selector:
         logger.warning("Could not find join button")
         try:
             buttons = await page.locator("button").all()
@@ -817,44 +906,51 @@ async def _join_meeting(page, url: str) -> set[str]:
         except Exception:
             pass
 
-    # A successful click is not proof that Telemost admitted the guest. It can
-    # show another media modal or leave the pre-join form in place. Verify the
-    # in-call toolbar and retry the visible Join action after dismissing modals.
+    # A successful click is not proof that Telemost admitted the guest. It may
+    # publish the participant remotely before its own DOM switches to the call.
+    # Keep the browser alive through the scheduled start/grace window and retry
+    # only a real, visible meeting-join control (never the header account login).
     state: dict = {}
-    for attempt in range(3):
-        await page.wait_for_timeout(3_000)
+    wait_seconds = _join_wait_seconds(scheduled_start)
+    deadline = time.monotonic() + wait_seconds
+    last_click_at = time.monotonic() if clicked_selector else 0.0
+    probe = 0
+    waiting_logged = False
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        await page.wait_for_timeout(min(3_000, max(250, int(remaining * 1_000))))
         await _dismiss_media_modals(page)
+        probe += 1
         try:
             state = await _telemost_call_state(page)
         except Exception as exc:
             state = {"probe_error": f"{type(exc).__name__}: {exc}"}
-        logger.info("Telemost post-join probe %d: %s", attempt + 1, state)
+        logger.info("Telemost post-join probe %d: %s", probe, state)
         if _is_join_confirmed(state):
             break
 
-        retry_clicked = False
-        for selector in [
-            "button:has-text('Подключиться')",
-            "button:has-text('Присоединиться')",
-            "button:has-text('Войти')",
-            "button:has-text('Join')",
-            "button[data-testid='join-button']",
-        ]:
-            try:
-                button = page.locator(selector).first
-                if await button.count() and await button.is_visible():
-                    await button.click(force=True, timeout=3_000)
-                    logger.info("Retried Telemost join via %s", selector)
-                    retry_clicked = True
-                    break
-            except Exception:
-                continue
-        if not retry_clicked:
-            await page.wait_for_timeout(1_000)
+        if state.get("has_waiting_room"):
+            if not waiting_logged:
+                logger.info(
+                    "Telemost guest is waiting for organizer admission "
+                    "(up to %.0fs total)",
+                    wait_seconds,
+                )
+                waiting_logged = True
+            continue
+
+        if (
+            time.monotonic() - last_click_at
+            >= max(3, config.TELEMOST_JOIN_RETRY_SEC)
+        ):
+            retried = await _click_visible_join_button(page, retry=True)
+            if retried:
+                last_click_at = time.monotonic()
     else:
         await snap("3-join-failed")
         raise RuntimeError(
-            "Telemost join was not confirmed; visible state: "
+            f"Telemost join was not confirmed after {wait_seconds:.0f}s; "
+            "visible state: "
             f"{str(state)[:1000]}"
         )
 

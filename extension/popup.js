@@ -2,6 +2,9 @@ const DEFAULT_BASE = 'https://sifox-meetings.up.railway.app'
 const $ = id => document.getElementById(id)
 
 let activeTab = null
+let stateCheckInProgress = false
+let actionInProgress = false
+let lastStateKey = null
 
 async function getBaseUrl() {
   const { baseUrl } = await chrome.storage.local.get(['baseUrl'])
@@ -132,26 +135,65 @@ async function init() {
   fillTabCard({ title: activeTab?.title, url: activeTab?.url, icon: activeTab?.favIconUrl })
   updateMicUI(await micGranted())
   checkUpdate(baseUrl)
-  const st = await chrome.runtime.sendMessage({ type: 'getState' })
-  if (st && st.recording && st.tab) {
-    // Show the tab actually being recorded (may differ from the current active tab).
-    fillTabCard(st.tab)
-    $('tabHint').textContent = 'Идёт запись этой вкладки.'
-  }
-  reflect(st && st.recording)
+  await refreshRecorderState(true)
   show('recorder')
+  setInterval(() => refreshRecorderState(), 3_000)
 }
 
-function reflect(isRecording) {
+function stateKey(st) {
+  return [!!st.recording, !!st.interrupted, !!st.recoverable].join(':')
+}
+
+function reflectAndRemember(st = {}) {
+  reflect(st)
+  lastStateKey = stateKey(st)
+}
+
+async function refreshRecorderState(force = false) {
+  if (stateCheckInProgress || (actionInProgress && !force)) return null
+  stateCheckInProgress = true
+  try {
+    const st = await chrome.runtime.sendMessage({ type: 'getState' }) || {}
+    const key = stateKey(st)
+    if (force || key !== lastStateKey) {
+      reflectAndRemember(st)
+    }
+    return st
+  } finally {
+    stateCheckInProgress = false
+  }
+}
+
+function reflect(st = {}) {
   const btn = $('toggle')
-  if (isRecording) {
+  if ((st.recording || st.interrupted) && st.tab) {
+    // Show the tab actually being recorded (may differ from the current active tab).
+    fillTabCard(st.tab)
+  }
+
+  if (st.interrupted) {
+    btn.className = 'warning'
+    if (st.recoverable) {
+      btn.textContent = '↑ Отправить сохранённое'
+      $('recStatus').textContent = '⚠ Запись прервана. Сохранённые части можно отправить на сервер.'
+    } else {
+      btn.textContent = 'Сбросить ошибку'
+      $('recStatus').textContent = '⚠ Запись прервана до сохранения аудио. Начните новую запись.'
+    }
+    $('tabHint').textContent = 'Запись этой вкладки неожиданно остановилась.'
+  } else if (st.recording) {
     btn.textContent = '■ Остановить запись'
     btn.className = 'danger'
     $('recStatus').innerHTML = '<span class="dot"></span> Идёт запись…'
+    $('tabHint').textContent = 'Идёт запись этой вкладки.'
   } else {
+    if (activeTab) {
+      fillTabCard({ title: activeTab.title, url: activeTab.url, icon: activeTab.favIconUrl })
+    }
     btn.textContent = '● Начать запись'
     btn.className = 'primary'
     $('recStatus').textContent = ''
+    $('tabHint').innerHTML = 'Записывается звук <b>этой вкладки</b> и ваш микрофон. Если звонок в другой вкладке или в приложении — откройте его и запустите запись именно на той вкладке.'
   }
 }
 
@@ -180,6 +222,9 @@ $('grantMicBig').addEventListener('click', openMicPermission)
 
 // ── Recorder view ─────────────────────────────────────────────────────────────
 $('toggle').addEventListener('click', async () => {
+  if (actionInProgress) return
+  actionInProgress = true
+  try {
   const baseUrl = await getBaseUrl()
   if (!(await ensureOriginPermission(baseUrl, true))) {
     $('recStatus').textContent = 'Разрешите расширению доступ к адресу Sifox.'
@@ -187,12 +232,24 @@ $('toggle').addEventListener('click', async () => {
   }
   const st = await chrome.runtime.sendMessage({ type: 'getState' })
 
-  if (st && st.recording) {
-    $('recStatus').textContent = 'Останавливаю и загружаю…'
+  if (st && st.interrupted && !st.recoverable) {
+    await chrome.runtime.sendMessage({ type: 'dismissInterrupted' })
+    reflectAndRemember({})
+    $('recStatus').textContent = 'Ошибка сброшена. Можно начать новую запись.'
+    return
+  }
+
+  if (st && (st.recording || (st.interrupted && st.recoverable))) {
+    const recovering = !!st.interrupted
+    $('recStatus').textContent = recovering
+      ? 'Отправляю сохранённые части…'
+      : 'Останавливаю и загружаю…'
     const res = await chrome.runtime.sendMessage({ type: 'stop' })
     if (res && res.ok) {
-      $('recStatus').textContent = '✓ Загружено. Обработка идёт на сервере.'
-      reflect(false)
+      reflectAndRemember({})
+      $('recStatus').textContent = recovering
+        ? '✓ Сохранённые части отправлены. Обработка идёт на сервере.'
+        : '✓ Загружено. Обработка идёт на сервере.'
     } else {
       $('recStatus').textContent = res && res.retryable
         ? 'Части записи сохранены локально и ожидают отправки. Ошибка: ' + (res.error || '') + ' Нажмите ещё раз, чтобы повторить.'
@@ -218,8 +275,14 @@ $('toggle').addEventListener('click', async () => {
     sourceUrl: activeTab.url,
     favIconUrl: activeTab.favIconUrl,
   })
-  if (res && res.ok) reflect(true)
+  if (res && res.ok) {
+    lastStateKey = null
+    await refreshRecorderState(true)
+  }
   else $('recStatus').textContent = 'Не удалось начать: ' + (res && res.error || '')
+  } finally {
+    actionInProgress = false
+  }
 })
 
 $('openApp').addEventListener('click', async () => {

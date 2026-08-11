@@ -1,6 +1,7 @@
 """Pure/unit coverage for live-assistant audio and UI-state helpers."""
 import asyncio
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -20,8 +21,11 @@ from services.live_assistant import (
     transcribe_wake_window,
 )
 from services.recorder import (
+    _JOIN_BUTTON_SELECTORS,
+    _click_visible_join_button,
     _create_pulse_source,
     _is_join_confirmed,
+    _join_wait_seconds,
     _mic_control_state,
 )
 
@@ -182,6 +186,7 @@ def test_join_confirmation_rejects_prejoin_form():
             "has_mic": True,
             "has_join": True,
             "has_name_input": True,
+            "in_call_signal_count": 0,
         }
     )
     assert _is_join_confirmed(
@@ -190,9 +195,87 @@ def test_join_confirmation_rejects_prejoin_form():
             "has_mic": True,
             "has_join": False,
             "has_name_input": False,
+            "in_call_signal_count": 1,
         }
     )
     assert _is_join_confirmed({"has_leave": True})
+
+
+def test_join_confirmation_accepts_in_call_toolbar_with_stale_prejoin_controls():
+    assert _is_join_confirmed(
+        {
+            "has_leave": False,
+            "has_mic": True,
+            "has_join": True,
+            "has_name_input": True,
+            "in_call_signal_count": 3,
+        }
+    )
+
+
+def test_waiting_room_is_not_mistaken_for_joined_call():
+    assert not _is_join_confirmed(
+        {
+            "has_leave": True,
+            "has_waiting_room": True,
+            "in_call_signal_count": 3,
+        }
+    )
+
+
+def test_join_selectors_never_target_yandex_account_login():
+    assert all("Войти" not in selector for selector in _JOIN_BUTTON_SELECTORS)
+
+
+def test_join_wait_covers_scheduled_start_and_grace(monkeypatch):
+    now = datetime(2026, 7, 30, 8, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(config, "TELEMOST_JOIN_TIMEOUT_SEC", 90)
+    monkeypatch.setattr(config, "TELEMOST_JOIN_GRACE_AFTER_START_SEC", 90)
+    monkeypatch.setattr(config, "TELEMOST_JOIN_MAX_WAIT_SEC", 300)
+
+    assert _join_wait_seconds(now + timedelta(seconds=120), now=now) == 210
+    assert _join_wait_seconds(now - timedelta(seconds=30), now=now) == 90
+    assert _join_wait_seconds(now + timedelta(minutes=10), now=now) == 300
+
+
+def test_join_retry_skips_hidden_duplicate_and_clicks_visible_button():
+    class FakeButton:
+        def __init__(self, visible):
+            self.visible = visible
+            self.clicked = False
+
+        async def is_visible(self):
+            return self.visible
+
+        async def click(self, **kwargs):
+            self.clicked = True
+
+    class FakeLocator:
+        def __init__(self, buttons):
+            self.buttons = buttons
+
+        async def count(self):
+            return len(self.buttons)
+
+        def nth(self, index):
+            return self.buttons[index]
+
+    hidden = FakeButton(False)
+    visible = FakeButton(True)
+
+    class FakePage:
+        def locator(self, selector):
+            if "Подключиться" in selector:
+                return FakeLocator([hidden, visible])
+            return FakeLocator([])
+
+    selector = asyncio.run(
+        _click_visible_join_button(FakePage(), retry=True)
+    )
+
+    assert "Подключиться" in selector
+    assert not hidden.clicked
+    assert visible.clicked
 
 
 def test_live_diagnostic_is_copied_and_updated():

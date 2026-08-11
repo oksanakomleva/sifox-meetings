@@ -43,6 +43,13 @@ class Config(BaseSettings):
 
     # ── Recording ─────────────────────────────────────────────────────────
     JOIN_BEFORE_MINUTES: int = 1
+    # Telemost can publish a guest to other participants before its own page
+    # finishes switching from pre-join to the in-call toolbar. Keep the browser
+    # alive long enough to cover that lag and, when applicable, organizer admit.
+    TELEMOST_JOIN_TIMEOUT_SEC: int = 90
+    TELEMOST_JOIN_GRACE_AFTER_START_SEC: int = 90
+    TELEMOST_JOIN_MAX_WAIT_SEC: int = 300
+    TELEMOST_JOIN_RETRY_SEC: int = 10
     PARTICIPANT_POLL_INTERVAL: int = 30      # seconds between polls
     EMPTY_POLLS_TO_END: int = 3             # ~90s after everyone leaves
     MAX_RECORDING_HOURS: int = 4

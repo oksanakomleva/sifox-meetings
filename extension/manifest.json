@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Sifox Meetings Recorder",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Запись любой встречи в браузере (звук вкладки + микрофон) прямо в Sifox Meetings.",
-  "permissions": ["tabCapture", "offscreen", "storage", "activeTab", "tabs", "cookies"],
+  "permissions": ["tabCapture", "offscreen", "storage", "activeTab", "tabs", "cookies", "alarms"],
   "host_permissions": [
     "https://sifox-meetings.up.railway.app/*",
     "http://localhost:8000/*"

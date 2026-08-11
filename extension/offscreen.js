@@ -117,6 +117,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch(e => sendResponse({ ok: false, error: String(e && e.message || e) }))
     return true
   }
+
+  if (msg.type === 'health') {
+    // A stop/upload in progress is still healthy: the service worker must not
+    // mistake the MediaRecorder becoming inactive for an unexpected crash.
+    sendResponse({
+      ok: true,
+      active: !!stopPromise || !!(recorder && recorder.state !== 'inactive'),
+    })
+  }
 })
 
 async function startCapture({ streamId, sessionToken, baseUrl, title, sourceUrl }) {
