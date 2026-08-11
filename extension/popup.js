@@ -174,8 +174,8 @@ function reflect(st = {}) {
   if (st.interrupted) {
     btn.className = 'warning'
     if (st.recoverable) {
-      btn.textContent = '↑ Отправить сохранённое'
-      $('recStatus').textContent = '⚠ Запись прервана. Сохранённые части можно отправить на сервер.'
+      btn.textContent = 'Отправить сохранённую запись'
+      $('recStatus').innerHTML = '<strong>Запись неожиданно прервалась</strong><br>Chrome остановил запись. Всё аудио, которое удалось сохранить до сбоя, осталось на устройстве. Нажмите «Отправить сохранённую запись», чтобы загрузить его в Sifox.'
     } else {
       btn.textContent = 'Сбросить ошибку'
       $('recStatus').textContent = '⚠ Запись прервана до сохранения аудио. Начните новую запись.'
@@ -242,17 +242,17 @@ $('toggle').addEventListener('click', async () => {
   if (st && (st.recording || (st.interrupted && st.recoverable))) {
     const recovering = !!st.interrupted
     $('recStatus').textContent = recovering
-      ? 'Отправляю сохранённые части…'
+      ? 'Отправляю сохранённую запись…'
       : 'Останавливаю и загружаю…'
     const res = await chrome.runtime.sendMessage({ type: 'stop' })
     if (res && res.ok) {
       reflectAndRemember({})
       $('recStatus').textContent = recovering
-        ? '✓ Сохранённые части отправлены. Обработка идёт на сервере.'
+        ? '✓ Сохранённая запись отправлена. Обработка идёт на сервере.'
         : '✓ Загружено. Обработка идёт на сервере.'
     } else {
       $('recStatus').textContent = res && res.retryable
-        ? 'Части записи сохранены локально и ожидают отправки. Ошибка: ' + (res.error || '') + ' Нажмите ещё раз, чтобы повторить.'
+        ? 'Запись сохранена на устройстве и ожидает отправки. Ошибка: ' + (res.error || '') + ' Нажмите ещё раз, чтобы повторить.'
         : 'Ошибка загрузки: ' + (res && res.error || '')
     }
     return
