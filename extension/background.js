@@ -155,6 +155,26 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   ;(async () => {
     try {
+      // Offscreen documents only have access to chrome.runtime. Keep all
+      // chrome.storage calls in the service worker and expose the three small
+      // operations the recorder needs through extension-internal messages.
+      if (msg.target === 'background' && msg.type === 'storage-get') {
+        sendResponse({ ok: true, value: await chrome.storage.local.get(msg.keys) })
+        return
+      }
+
+      if (msg.target === 'background' && msg.type === 'storage-set') {
+        await chrome.storage.local.set(msg.values)
+        sendResponse({ ok: true })
+        return
+      }
+
+      if (msg.target === 'background' && msg.type === 'storage-remove') {
+        await chrome.storage.local.remove(msg.keys)
+        sendResponse({ ok: true })
+        return
+      }
+
       if (msg.type === 'getState') {
         sendResponse(await getRecordingState())
         return

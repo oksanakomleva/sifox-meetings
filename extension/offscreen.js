@@ -72,13 +72,37 @@ function deleteChunk(key) {
   return runStore('readwrite', store => store.delete(key))
 }
 
+async function storageRequest(type, payload = {}) {
+  const response = await chrome.runtime.sendMessage({
+    target: 'background',
+    type,
+    ...payload,
+  })
+  if (!response || !response.ok) {
+    throw new Error(response && response.error || 'Не удалось обратиться к локальному хранилищу расширения')
+  }
+  return response.value
+}
+
+function storageGet(keys) {
+  return storageRequest('storage-get', { keys })
+}
+
+function storageSet(values) {
+  return storageRequest('storage-set', { values })
+}
+
+function storageRemove(keys) {
+  return storageRequest('storage-remove', { keys })
+}
+
 async function saveUploadContext() {
   const { sessionToken, freshSessionToken, ...safeContext } = uploadCtx
-  await chrome.storage.local.set({ pendingUpload: safeContext })
+  await storageSet({ pendingUpload: safeContext })
 }
 
 async function restoreUploadContext(freshSessionToken) {
-  const { pendingUpload } = await chrome.storage.local.get('pendingUpload')
+  const { pendingUpload } = await storageGet('pendingUpload')
   if (!pendingUpload || !pendingUpload.meetingId) return false
   uploadCtx = {
     ...pendingUpload,
@@ -129,7 +153,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 })
 
 async function startCapture({ streamId, sessionToken, baseUrl, title, sourceUrl }) {
-  const { pendingUpload } = await chrome.storage.local.get('pendingUpload')
+  const { pendingUpload } = await storageGet('pendingUpload')
   if (pendingUpload && pendingUpload.meetingId) {
     throw new Error('Сначала завершите предыдущую загрузку кнопкой «Остановить запись».')
   }
@@ -285,7 +309,7 @@ async function cancelUploadSession() {
       headers: { 'X-Session-Token': sessionToken },
     })
   } finally {
-    await chrome.storage.local.remove('pendingUpload')
+    await storageRemove('pendingUpload')
   }
 }
 
@@ -388,6 +412,6 @@ async function finishUpload() {
       error: `Завершение загрузки: HTTP ${res.status}: ${t.slice(0, 200)}`,
     }
   }
-  await chrome.storage.local.remove('pendingUpload')
+  await storageRemove('pendingUpload')
   return { ok: true, meetingId }
 }
