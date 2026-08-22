@@ -73,7 +73,10 @@ class Config(BaseSettings):
     # Keep per-meeting opt-in as the default rollout mode. Set this only after a
     # successful pilot if every recorded meeting should get the assistant.
     LIVE_ASSISTANT_ALL_MEETINGS: bool = False
-    LIVE_WAKE_WORD: str = "протоколлер"      # stem-matched (see live_assistant)
+    LIVE_WAKE_WORD: str = "протоколлер"
+    # The name alone never activates Q&A. This exact command after the name does:
+    # «Протоколлер, подскажи …». «Протоколлер, запиши …» remains a note command.
+    LIVE_WAKE_COMMAND: str = "подскажи"
     # Short wake-word windows need the same recognition quality as the final
     # transcript. The tiny local model repeatedly missed "Протоколлер" in real
     # Telemost audio, even though the post-meeting model heard the whole phrase.
@@ -81,15 +84,14 @@ class Config(BaseSettings):
     LIVE_WAKE_STT_MODEL: str = "whisper-1"
     LIVE_WAKE_MODEL: str = "tiny"            # cheap continuous wake-word STT
     LIVE_QUESTION_MODEL: str = "small"       # accurate STT for the question only
-    LIVE_WINDOW_SEC: int = 5                 # rolling window length per STT pass
-    LIVE_POLL_SEC: int = 2                   # overlapping wake-word checks
+    LIVE_WINDOW_SEC: int = 3                 # shorter wake window → faster detection
+    LIVE_POLL_SEC: int = 1                   # overlapping wake checks every second
     LIVE_MIN_RMS: int = 120                  # skip near-silent PCM before cloud STT
     LIVE_QUESTION_MAX_SEC: int = 12          # max audio transcribed as the question
-    LIVE_QUESTION_SILENCE_SEC: float = 0.9   # stop capture after this much silence
-    LIVE_QUESTION_MIN_WAIT_SEC: float = 0.8  # keep a little audio after wake window
-    LIVE_QUESTION_WAKE_ONLY_WAIT_SEC: float = 2.5  # allow «Протоколлер» + pause
+    LIVE_QUESTION_SILENCE_SEC: float = 0.8   # stop capture after this much silence
+    LIVE_QUESTION_MIN_WAIT_SEC: float = 0.5  # keep a little audio after wake window
+    LIVE_QUESTION_WAKE_ONLY_WAIT_SEC: float = 2.0  # allow activation + short pause
     LIVE_BUFFER_MIN: int = 10                # rolling live-transcript memory
-    LIVE_CONTEXT_AUDIO_SEC: int = 180        # accurate re-STT cap for meeting-only Q&A
     LIVE_STT_TIMEOUT_SEC: int = 45           # kill/restart a wedged native worker
     LIVE_STT_QUEUE_TIMEOUT_SEC: int = 5      # shed load instead of building stale audio
     LIVE_QUESTION_STT: str = "openai"        # "openai" | "local"
@@ -107,7 +109,7 @@ class Config(BaseSettings):
     # Live answers must be FAST — keep the LLM context small (FTS-ranked email/MM
     # survive; the huge meeting-transcript dump is trimmed). Far below the 1.2M
     # used for the web chat, which made live answers take ~minute.
-    LIVE_CONTEXT_MAX_CHARS: int = 24_000
+    LIVE_CONTEXT_MAX_CHARS: int = 12_000
     LIVE_MEETINGS_LIMIT: int = 20             # most-recent meetings considered live
 
     # ── Session ───────────────────────────────────────────────────────────

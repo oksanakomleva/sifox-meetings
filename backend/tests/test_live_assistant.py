@@ -17,6 +17,7 @@ from services.live_assistant import (
     get_live_diagnostic,
     merge_live_transcript,
     pcm_rms,
+    pcm_contains_speech,
     trailing_pcm_is_silent,
     transcribe_wake_window,
 )
@@ -90,7 +91,7 @@ def test_trailing_silence_ends_question_capture_before_hard_limit():
             RunningReader(),
             question_start=0,
             window_end_offset=len(speech),
-            wake_text="Протоколлер, какая погода?",
+            wake_text="Протоколлер, подскажи, какая погода?",
             max_bytes=len(speech) * 12,
         )
     )
@@ -129,7 +130,6 @@ def test_note_command_is_saved_and_acknowledged(monkeypatch):
             "00000000-0000-0000-0000-000000000001",
             b"audio",
             "",
-            b"",
             speak,
         )
     )
@@ -140,6 +140,66 @@ def test_note_command_is_saved_and_acknowledged(monkeypatch):
     )
     assert "попадёт в итоговый протокол" in speak.await_args.args[0]
     assert save_qa.await_args.args[3] == "note"
+
+
+def test_complete_wake_question_skips_duplicate_stt(monkeypatch):
+    transcribe = AsyncMock(return_value="should not be used")
+    answer_question = AsyncMock(
+        return_value=("Дедлайн в пятницу.", ["meeting"], [], "дедлайн")
+    )
+    save_qa = AsyncMock()
+    speak = AsyncMock()
+    monkeypatch.setattr(live_assistant, "transcribe_question", transcribe)
+    monkeypatch.setattr(
+        live_assistant.models,
+        "get_meeting",
+        AsyncMock(return_value={"title": "Тест"}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        live_assistant.models,
+        "get_meeting_attendee_emails",
+        AsyncMock(return_value=["user@sifox.com"]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        live_assistant.models,
+        "get_meeting_full_access",
+        AsyncMock(return_value=False),
+        raising=False,
+    )
+    monkeypatch.setattr(live_assistant.qa_engine, "answer_question", answer_question)
+    monkeypatch.setattr(
+        live_assistant.models,
+        "save_live_qa",
+        save_qa,
+        raising=False,
+    )
+
+    wake_audio = (1000).to_bytes(2, "little", signed=True) * 16_000
+    followup_silence = b"\x00\x00" * 8_000
+    asyncio.run(
+        _handle_question(
+            "00000000-0000-0000-0000-000000000002",
+            wake_audio + followup_silence,
+            "На встрече назвали дедлайн — пятница.",
+            speak,
+            wake_text="Протоколлер, подскажи, какой дедлайн?",
+            wake_window_bytes=len(wake_audio),
+        )
+    )
+
+    transcribe.assert_not_awaited()
+    assert answer_question.await_args.args[0] == "какой дедлайн"
+    speak.assert_awaited_once_with("Дедлайн в пятницу.")
+
+
+def test_pcm_speech_detection_finds_short_voice_in_long_silence():
+    silence = b"\x00\x00" * 16_000
+    speech = (1000).to_bytes(2, "little", signed=True) * 4_000
+
+    assert pcm_contains_speech(silence + speech + silence, config.LIVE_MIN_RMS)
+    assert not pcm_contains_speech(silence, config.LIVE_MIN_RMS)
 
 
 def test_mic_action_labels_map_to_current_state():
@@ -291,7 +351,7 @@ def test_live_diagnostic_is_copied_and_updated():
 
 
 def test_wake_window_uses_accurate_cloud_stt(monkeypatch):
-    cloud = AsyncMock(return_value="Протоколлер, как называется проект?")
+    cloud = AsyncMock(return_value="Протоколлер, подскажи, как называется проект?")
     local = AsyncMock(return_value="")
     monkeypatch.setattr(live_assistant, "transcribe_openai_pcm", cloud)
     monkeypatch.setattr(live_assistant, "transcribe_pcm", local)
@@ -299,7 +359,7 @@ def test_wake_window_uses_accurate_cloud_stt(monkeypatch):
 
     text = asyncio.run(transcribe_wake_window(b"\x00\x00" * 16_000))
 
-    assert "Протоколлер" in text
+    assert "Протоколлер, подскажи" in text
     cloud.assert_awaited_once()
     local.assert_not_awaited()
 

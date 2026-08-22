@@ -369,11 +369,13 @@ class SmokeTest:
                                     qa_response = self._get(
                                         f"/api/admin/meetings/{meeting_id}/live-qa"
                                     )
-                                    qa_items = (
-                                        qa_response.json().get("items", [])
+                                    qa_payload = (
+                                        qa_response.json()
                                         if qa_response.status_code == 200
-                                        else []
+                                        else {}
                                     )
+                                    qa_items = qa_payload.get("items", [])
+                                    diagnostic = qa_payload.get("diagnostic") or {}
                                     latest_qa = qa_items[-1] if qa_items else {}
                                     self._check(
                                         "Wake-word question logged",
@@ -394,6 +396,23 @@ class SmokeTest:
                                             latest_qa.get("error")
                                             or f"latency={latest_qa.get('latency_ms')}ms"
                                         ),
+                                    )
+                                    answer_ready_ms = diagnostic.get("answer_ready_ms")
+                                    total_latency_ms = (
+                                        latest_qa.get("latency_ms")
+                                        or diagnostic.get("total_latency_ms")
+                                    )
+                                    self._check(
+                                        "Assistant answer ready within 15s",
+                                        isinstance(answer_ready_ms, int)
+                                        and answer_ready_ms <= 15_000,
+                                        f"answer_ready={answer_ready_ms}ms",
+                                    )
+                                    self._check(
+                                        "Assistant voice response completed within 20s",
+                                        isinstance(total_latency_ms, int)
+                                        and total_latency_ms <= 20_000,
+                                        f"total_latency={total_latency_ms}ms",
                                     )
                                 finish_response = self._post(
                                     "/api/admin/test/finish-e2e-recording",

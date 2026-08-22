@@ -149,6 +149,15 @@ def trailing_pcm_is_silent(
     return len(tail) >= wanted and pcm_rms(tail) < min_rms
 
 
+def pcm_contains_speech(pcm: bytes, min_rms: int) -> bool:
+    """Detect any voiced quarter-second inside a longer mostly-silent tail."""
+    chunk_bytes = _BYTES_PER_SEC // 4
+    return any(
+        pcm_rms(pcm[offset:offset + chunk_bytes]) >= min_rms
+        for offset in range(0, len(pcm), chunk_bytes)
+    )
+
+
 async def capture_question_audio(
     rolling: RollingPCMBuffer,
     reader_task,
@@ -159,9 +168,10 @@ async def capture_question_audio(
 ) -> bytes:
     """Capture until speech ends instead of always waiting for the hard limit."""
     max_end = question_start + max_bytes
-    wake_question = qa_engine.strip_wake_word(
+    wake_question = qa_engine.strip_assistant_command(
         wake_text,
         config.LIVE_WAKE_WORD,
+        config.LIVE_WAKE_COMMAND,
     )
     is_empty_note, note_body = qa_engine.parse_note_command(wake_question)
     needs_followup = not wake_question.strip() or (
@@ -225,7 +235,10 @@ async def transcribe_question(pcm: bytes) -> str:
             return await transcribe_openai_pcm(
                 pcm,
                 config.LIVE_QUESTION_STT_MODEL,
-                prompt=config.LIVE_WAKE_WORD,
+                prompt=(
+                    f"{config.LIVE_WAKE_WORD}, {config.LIVE_WAKE_COMMAND}. "
+                    f"{config.LIVE_WAKE_WORD}, запиши."
+                ),
             )
         except Exception as exc:
             logger.warning("OpenAI question STT failed; using local model: %s", exc)
@@ -239,7 +252,10 @@ async def transcribe_wake_window(pcm: bytes) -> str:
             return await transcribe_openai_pcm(
                 pcm,
                 config.LIVE_WAKE_STT_MODEL,
-                prompt=config.LIVE_WAKE_WORD,
+                prompt=(
+                    f"{config.LIVE_WAKE_WORD}, {config.LIVE_WAKE_COMMAND}. "
+                    f"{config.LIVE_WAKE_WORD}, запиши."
+                ),
             )
         except Exception as exc:
             logger.warning("OpenAI wake STT failed; using local model: %s", exc)
@@ -338,7 +354,11 @@ async def run_live_assistant(
             # Accumulate a rolling live transcript (for meeting_only scope).
             live_transcript = merge_live_transcript(live_transcript, text)
 
-            if not qa_engine.contains_wake_word(text, config.LIVE_WAKE_WORD):
+            if not qa_engine.contains_assistant_command(
+                text,
+                config.LIVE_WAKE_WORD,
+                config.LIVE_WAKE_COMMAND,
+            ):
                 continue
 
             logger.info("Live assistant wake detected (%s): %r", meeting_id[:8], text)
@@ -366,8 +386,9 @@ async def run_live_assistant(
                 meeting_id,
                 question_audio,
                 live_transcript,
-                rolling.tail(config.LIVE_CONTEXT_AUDIO_SEC),
                 speak,
+                wake_text=text,
+                wake_window_bytes=len(segment),
             )
             _diagnostic_update(meeting_id, status="listening")
             mute_until = time.monotonic() + _COOLDOWN_SEC
@@ -475,8 +496,10 @@ async def _handle_question(
     meeting_id: str,
     audio: bytes,
     live_transcript: str,
-    recent_audio: bytes,
     speak: Callable[[str], Awaitable[None]] | None,
+    *,
+    wake_text: str = "",
+    wake_window_bytes: int = 0,
 ) -> None:
     started = time.monotonic()
     question = ""
@@ -487,8 +510,36 @@ async def _handle_question(
     search_query = ""
     saved = False
     try:
-        raw = await transcribe_question(audio)
-        question = qa_engine.strip_wake_word(raw, config.LIVE_WAKE_WORD)
+        # For a short question already complete inside the validated wake window,
+        # reuse that cloud transcription instead of uploading the same audio a
+        # second time. If speech continued after the window, transcribe the full
+        # captured question for accuracy.
+        wake_question = qa_engine.strip_assistant_command(
+            wake_text,
+            config.LIVE_WAKE_WORD,
+            config.LIVE_WAKE_COMMAND,
+        )
+        followup_audio = (
+            audio[wake_window_bytes:]
+            if wake_window_bytes > 0 and wake_window_bytes <= len(audio)
+            else audio
+        )
+        reuse_wake_text = bool(
+            wake_question
+            and not pcm_contains_speech(followup_audio, config.LIVE_MIN_RMS)
+        )
+        stt_started = time.monotonic()
+        raw = wake_text if reuse_wake_text else await transcribe_question(audio)
+        _diagnostic_update(
+            meeting_id,
+            question_stt_ms=int((time.monotonic() - stt_started) * 1_000),
+            question_stt_reused=reuse_wake_text,
+        )
+        question = qa_engine.strip_assistant_command(
+            raw,
+            config.LIVE_WAKE_WORD,
+            config.LIVE_WAKE_COMMAND,
+        )
         if not question or len(question) < 3:
             logger.info(
                 "Live assistant: empty question after wake (%s) — skipping",
@@ -602,11 +653,10 @@ async def _handle_question(
         )
         meeting_metadata = qa_engine.format_meeting_metadata(meeting, attendees)
 
+        # The overlapping wake windows already maintain a rolling transcript.
+        # Re-transcribing up to three minutes here made every meeting-only answer
+        # wait on another large STT request. Use the accumulated text directly.
         context_transcript = live_transcript
-        if scope == "meeting_only" and recent_audio:
-            accurate_context = await transcribe_question(recent_audio)
-            if accurate_context:
-                context_transcript = accurate_context
 
         answer, sources, source_details, search_query = (
             await qa_engine.answer_question(
@@ -676,6 +726,10 @@ async def _speak_and_save_answer(
     """Deliver one answer and persist the same auditable result for every route."""
     spoken = False
     error = initial_error
+    _diagnostic_update(
+        meeting_id,
+        answer_ready_ms=int((time.monotonic() - started) * 1_000),
+    )
     if answer and speak is not None:
         try:
             await speak(answer)
@@ -699,4 +753,8 @@ async def _speak_and_save_answer(
         error=error,
         search_query=search_query,
         source_details=source_details,
+    )
+    _diagnostic_update(
+        meeting_id,
+        total_latency_ms=int((time.monotonic() - started) * 1_000),
     )

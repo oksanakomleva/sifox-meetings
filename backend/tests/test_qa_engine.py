@@ -9,18 +9,21 @@ from services.qa_engine import (
     build_search_query,
     build_priority_search_query,
     clean_live_transcript,
+    contains_assistant_command,
     contains_wake_word,
     format_meeting_metadata,
     make_search_snippet,
     pack_context_with_quotas,
     parse_note_command,
     relevance_score,
+    strip_assistant_command,
     strip_wake_word,
     select_scope,
     pack_context,
 )
 
 WAKE = "протоколлер"
+COMMAND = "подскажи"
 
 
 class TestWakeWord:
@@ -43,6 +46,62 @@ class TestWakeWord:
 
     def test_ordinary_protocol_does_not_trigger(self):
         assert not contains_wake_word("протокол встречи готов", WAKE)
+
+
+class TestAssistantActivation:
+    def test_exact_question_command_activates(self):
+        assert contains_assistant_command(
+            "Протоколлер, подскажи, что решили по ГПБМ?",
+            WAKE,
+            COMMAND,
+        )
+
+    def test_split_asr_wake_still_activates(self):
+        assert contains_assistant_command(
+            "протокол лер подскажи какой дедлайн",
+            WAKE,
+            COMMAND,
+        )
+
+    def test_name_alone_does_not_activate(self):
+        assert not contains_assistant_command(
+            "Кажется, протоколлер сегодня молчит",
+            WAKE,
+            COMMAND,
+        )
+
+    def test_discussion_of_previous_answer_does_not_activate(self):
+        assert not contains_assistant_command(
+            "Вчера протоколлер подсказывал другую дату",
+            WAKE,
+            COMMAND,
+        )
+        assert not contains_assistant_command(
+            "Протоколлер ответил на первый вопрос",
+            WAKE,
+            COMMAND,
+        )
+
+    def test_explicit_note_command_still_activates(self):
+        assert contains_assistant_command(
+            "Протоколлер, запиши отправить договор",
+            WAKE,
+            COMMAND,
+        )
+
+    def test_strips_question_activation(self):
+        assert strip_assistant_command(
+            "Протоколлер, подскажи, что решили по ГПБМ?",
+            WAKE,
+            COMMAND,
+        ) == "что решили по гпбм"
+
+    def test_preserves_note_intent_when_stripping(self):
+        assert strip_assistant_command(
+            "Протоколлер, запиши отправить договор",
+            WAKE,
+            COMMAND,
+        ) == "запиши отправить договор"
 
 
 def test_voice_prompt_uses_archive_for_questions_about_other_meetings():

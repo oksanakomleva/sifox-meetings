@@ -68,6 +68,75 @@ def strip_wake_word(text: str, wake_word: str) -> str:
     return " ".join(out).strip()
 
 
+def _assistant_activation(
+    text: str,
+    wake_word: str,
+    question_command: str,
+) -> tuple[str, int, list[str]] | None:
+    """Return (kind, cut-index, tokens) for an explicit assistant command.
+
+    The wake name alone is deliberately insufficient: people often discuss the
+    Protocaller itself during a meeting. A question requires the exact command
+    after the name (``Протоколлер, подскажи ...``); the existing explicit note
+    command (``Протоколлер, запиши ...``) remains supported.
+    """
+    tokens = _normalize(text).split()
+    wake_variants = set(_wake_variants(wake_word))
+    question_tokens = _normalize(question_command).split()
+    if not tokens or not wake_variants or not question_tokens:
+        return None
+    max_wake_len = max(map(len, wake_variants))
+    for start in range(len(tokens)):
+        collapsed = ""
+        for end in range(start, min(len(tokens), start + 3)):
+            collapsed += tokens[end]
+            if collapsed not in wake_variants:
+                if len(collapsed) <= max_wake_len:
+                    continue
+                break
+            command_start = end + 1
+            command_end = command_start + len(question_tokens)
+            if tokens[command_start:command_end] == question_tokens:
+                return "question", command_end, tokens
+            if command_start < len(tokens) and tokens[command_start] == "запиши":
+                return "note", command_start + 1, tokens
+    return None
+
+
+def contains_assistant_command(
+    text: str,
+    wake_word: str,
+    question_command: str,
+) -> bool:
+    """Whether speech contains an explicit question or note activation."""
+    return _assistant_activation(text, wake_word, question_command) is not None
+
+
+def strip_assistant_command(
+    text: str,
+    wake_word: str,
+    question_command: str,
+) -> str:
+    """Remove the explicit activation while preserving the note intent."""
+    activation = _assistant_activation(text, wake_word, question_command)
+    if activation:
+        kind, cut, tokens = activation
+        remainder = " ".join(tokens[cut:]).strip()
+        return f"запиши {remainder}".strip() if kind == "note" else remainder
+
+    # A second STT pass can omit one activation token even though the overlapping
+    # wake window already validated it. Clean that transcription without
+    # weakening the activation rule used by the listening loop.
+    stripped = strip_wake_word(text, wake_word)
+    command = _normalize(question_command)
+    normalized = _normalize(stripped)
+    if normalized == command:
+        return ""
+    if normalized.startswith(command + " "):
+        return normalized[len(command):].strip()
+    return stripped
+
+
 _NOTE_COMMAND = re.compile(
     r"^\s*запиши(?:\s*,?\s*пожалуйста)?(?:\s+(?:в\s+)?(?:заметки?|протокол))?"
     r"\s*[:,—-]?\s*(.*)$",
@@ -718,7 +787,7 @@ async def answer_question(
             {"role": "system", "content": _SYSTEM_VOICE.format(context=context)},
             {"role": "user", "content": q},
         ],
-        max_tokens=220,
+        max_tokens=120,
         temperature=0.3,
     )
     return (
