@@ -282,12 +282,15 @@ def normalize_russian_speech_text(text: str) -> str:
         lambda m: f"{decimal_words(m.group(1), m.group(2))} процента",
         result,
     )
+
+    def replace_percent(match: re.Match[str]) -> str:
+        number = int("".join(match.group(1).split()))
+        unit = _plural(number, ("процент", "процента", "процентов"))
+        return f"{cardinal_ru(number)} {unit}"
+
     result = re.sub(
         r"(?<!\d)(\d[\d\s\u00a0]*)\s*%",
-        lambda m: (
-            f"{cardinal_ru(int(re.sub(r'\s+', '', m.group(1))))} "
-            f"{_plural(int(re.sub(r'\s+', '', m.group(1))), ('процент', 'процента', 'процентов'))}"
-        ),
+        replace_percent,
         result,
     )
 
