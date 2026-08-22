@@ -431,8 +431,11 @@ async def speak_text(text: str, sink_name: str) -> bool:
     import inspect
     import os
     import tempfile
+    from services.speech_normalizer import normalize_russian_speech_text
+
     wav_path = None
     try:
+        spoken_text = normalize_russian_speech_text(text)
         fd, wav_path = tempfile.mkstemp(suffix=".wav", prefix="tts_")
         os.close(fd)
         ok = False
@@ -444,7 +447,7 @@ async def speak_text(text: str, sink_name: str) -> bool:
                     client.audio.speech.create(
                         model=config.LIVE_TTS_MODEL,
                         voice=config.LIVE_TTS_VOICE,
-                        input=text,
+                        input=spoken_text,
                         response_format="wav",
                     ),
                     timeout=45,
@@ -459,7 +462,7 @@ async def speak_text(text: str, sink_name: str) -> bool:
                 logger.warning("OpenAI TTS failed, falling back to espeak: %s", e)
         if not ok:  # espeak-ng fallback (offline, already in the image)
             p = await asyncio.create_subprocess_exec(
-                "espeak-ng", "-v", "ru", "-s", "160", "-w", wav_path, text,
+                "espeak-ng", "-v", "ru", "-s", "160", "-w", wav_path, spoken_text,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             )
             await asyncio.wait_for(p.wait(), timeout=30)
@@ -479,7 +482,12 @@ async def speak_text(text: str, sink_name: str) -> bool:
         if p.returncode != 0:
             tail = stderr.decode(errors="replace")[-500:] if stderr else ""
             raise RuntimeError(f"paplay exited {p.returncode}: {tail}")
-        logger.info("Live assistant spoke answer into %s (%d chars)", sink_name, len(text))
+        logger.info(
+            "Live assistant spoke answer into %s (%d written / %d spoken chars)",
+            sink_name,
+            len(text),
+            len(spoken_text),
+        )
         return True
     except Exception as e:
         logger.error("speak_text failed: %s", e)

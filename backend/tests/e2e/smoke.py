@@ -54,6 +54,7 @@ def _load_env_test() -> None:
 
 _load_env_test()
 EXPECTED_LIVE_ANSWER = "мега"
+EXPECTED_NOTE_WORDS = ("сократ", "задерж")
 
 
 def _import_requests():
@@ -375,8 +376,24 @@ class SmokeTest:
                                         else {}
                                     )
                                     qa_items = qa_payload.get("items", [])
+                                    notes = qa_payload.get("notes", [])
                                     diagnostic = qa_payload.get("diagnostic") or {}
                                     latest_qa = qa_items[-1] if qa_items else {}
+                                    captured_note = next(
+                                        (
+                                            item for item in notes
+                                            if all(
+                                                word in (item.get("text") or "").lower()
+                                                for word in EXPECTED_NOTE_WORDS
+                                            )
+                                        ),
+                                        None,
+                                    )
+                                    self._check(
+                                        "Dictated note captured verbatim for audit",
+                                        captured_note is not None,
+                                        (captured_note or {}).get("text", "")[:200],
+                                    )
                                     self._check(
                                         "Wake-word question logged",
                                         bool(qa_items),
@@ -449,6 +466,21 @@ class SmokeTest:
                     tlen = target.get("transcript_length") or 0
                     self._check("Transcript not empty", tlen > 0, f"{tlen} chars")
                     self._check("Summary generated", bool(target.get("summary")), "")
+                    if live_assistant:
+                        summary_text = (target.get("summary") or "").lower()
+                        note_integrated = all(
+                            word in summary_text for word in EXPECTED_NOTE_WORDS
+                        )
+                        self._check(
+                            "Dictated note meaning integrated into summary",
+                            note_integrated,
+                            summary_text[:500],
+                        )
+                        self._check(
+                            "Summary has no separate dictated-notes section",
+                            "продиктованные заметки" not in summary_text,
+                            "",
+                        )
                     tags = target.get("tags")
                     self._check(
                         "Tags field is valid",

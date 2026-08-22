@@ -66,17 +66,22 @@ RUN espeak-ng -v ru -s 120 -p 50 \
     -w /app/backend/tests/e2e/test_audio.wav \
     && echo "✅ test_audio.wav generated"
 
-# Live-assistant E2E: enough leading silence for both browsers to join, then a
+# Live-assistant E2E: enough leading silence for both browsers to join, then an
+# explicit note command followed (after the acknowledgement has finished) by a
 # deterministic fact + wake-word question. Pad beyond the test duration so the
 # fake microphone never loops and triggers the assistant twice.
 RUN espeak-ng -v ru -s 115 -p 50 \
-    "Проект называется Мега. Проект называется Мега. Протоколлер, подскажи, как называется проект? Протоколлер, подскажи, скажи название проекта." \
+    "Проект называется Мега. Протоколлер, запиши, что нам удалось сократить задержку ответа." \
+    -w /tmp/live_assistant_note.wav \
+    && espeak-ng -v ru -s 115 -p 50 \
+    "Проект называется Мега. Протоколлер, подскажи, как называется проект? Протоколлер, подскажи, скажи название проекта." \
     -w /tmp/live_assistant_question.wav \
-    && ffmpeg -y -i /tmp/live_assistant_question.wav \
-       -af "adelay=35000,apad=pad_dur=150" -t 150 \
+    && ffmpeg -y -i /tmp/live_assistant_note.wav -i /tmp/live_assistant_question.wav \
+       -filter_complex "[0:a]adelay=35000[note];[1:a]adelay=65000[question];[note][question]amix=inputs=2:duration=longest,apad=pad_dur=150" \
+       -t 150 \
        /app/backend/tests/e2e/live_assistant_test_audio.wav \
        >/dev/null 2>&1 \
-    && rm /tmp/live_assistant_question.wav \
+    && rm /tmp/live_assistant_note.wav /tmp/live_assistant_question.wav \
     && echo "✅ live_assistant_test_audio.wav generated"
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────

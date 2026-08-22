@@ -6,8 +6,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from services.analyzer import (
     _PROTOCOL_PROMPTS,
+    _build_protocol_input,
     _build_tagging_prompt,
-    append_dictated_notes,
     normalize_tags,
 )
 
@@ -58,19 +58,23 @@ class TestProtocolPrompts:
             assert "Участники" in prompt, f"{meeting_type} missing Участники section"
 
 
-def test_dictated_notes_are_appended_verbatim_to_protocol():
-    result = append_dictated_notes(
-        "## Решения\nОсновной итог.",
+def test_dictated_notes_are_passed_as_facts_for_semantic_integration():
+    result = _build_protocol_input(
+        "Обсудили производительность сервиса.",
         [
-            {"text": "Отправить договор до пятницы"},
+            {"text": "что нам удалось сократить задержку"},
             {"text": "  Позвонить клиенту   завтра  "},
         ],
     )
 
-    assert "## Продиктованные заметки" in result
-    assert "- Отправить договор до пятницы" in result
-    assert "- Позвонить клиенту завтра" in result
+    assert "Обсудили производительность сервиса" in result
+    assert '"что нам удалось сократить задержку"' in result
+    assert '"Позвонить клиенту завтра"' in result
+    assert "Обязательно отрази смысл каждой заметки" in result
+    assert "## Продиктованные заметки" not in result
 
 
-def test_protocol_is_unchanged_without_dictated_notes():
-    assert append_dictated_notes("  Готовый протокол  ", []) == "Готовый протокол"
+def test_protocol_input_is_unchanged_without_dictated_notes():
+    assert _build_protocol_input("Готовый транскрипт", []) == (
+        "Транскрипт встречи:\nГотовый транскрипт"
+    )
