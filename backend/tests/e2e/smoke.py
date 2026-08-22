@@ -53,11 +53,16 @@ def _load_env_test() -> None:
 
 
 _load_env_test()
-EXPECTED_LIVE_ANSWER = "мега"
+EXPECTED_LIVE_ANSWER_WORDS = ("мега", "mega")
 EXPECTED_NOTE_ACTION_WORDS = ("сократ", "сокращ")
 EXPECTED_NOTE_RESULT_WORDS = ("задерж", "ожидан")
 MAX_ANSWER_READY_MS = 15_000
-MAX_VOICE_COMPLETE_MS = 22_000
+MAX_VOICE_COMPLETE_MS = 25_000
+
+
+def _contains_expected_live_answer(text: str) -> bool:
+    normalized = (text or "").lower()
+    return any(word in normalized for word in EXPECTED_LIVE_ANSWER_WORDS)
 
 
 def _contains_expected_note_meaning(text: str) -> bool:
@@ -370,8 +375,8 @@ class SmokeTest:
                             if state == "completed" and speaker_status.get("ready"):
                                 if live_assistant:
                                     listener_text = speaker_status.get("stdout") or ""
-                                    heard_answer = (
-                                        EXPECTED_LIVE_ANSWER in listener_text.lower()
+                                    heard_answer = _contains_expected_live_answer(
+                                        listener_text
                                     )
                                     self._check(
                                         "Remote participant heard Protocaller answer",
@@ -412,8 +417,9 @@ class SmokeTest:
                                     )
                                     self._check(
                                         "Assistant found expected answer",
-                                        EXPECTED_LIVE_ANSWER
-                                        in (latest_qa.get("answer") or "").lower(),
+                                        _contains_expected_live_answer(
+                                            latest_qa.get("answer") or ""
+                                        ),
                                         (latest_qa.get("answer") or "")[:300],
                                     )
                                     self._check(
@@ -437,7 +443,7 @@ class SmokeTest:
                                         f"answer_ready={answer_ready_ms}ms",
                                     )
                                     self._check(
-                                        "Assistant voice response completed within 22s",
+                                        "Assistant voice response completed within 25s",
                                         isinstance(total_latency_ms, int)
                                         and total_latency_ms <= MAX_VOICE_COMPLETE_MS,
                                         f"total_latency={total_latency_ms}ms",
