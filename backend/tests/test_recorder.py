@@ -167,7 +167,7 @@ class _Capture:
 
 
 class TestConfirmAudioCaptureStarted:
-    def test_requires_observed_file_growth(self, monkeypatch, tmp_path):
+    def test_accepts_observed_file_growth_immediately(self, monkeypatch, tmp_path):
         sizes = AsyncMock(side_effect=[12_000, 12_000, 18_000])
         monkeypatch.setattr(recorder.fsio, "size", sizes)
         monkeypatch.setattr(recorder.asyncio, "sleep", AsyncMock())
@@ -177,6 +177,17 @@ class TestConfirmAudioCaptureStarted:
         )
 
         assert sizes.await_count == 3
+
+    def test_accepts_live_capture_while_monitor_is_silent(self, monkeypatch, tmp_path):
+        sizes = AsyncMock(return_value=0)
+        monkeypatch.setattr(recorder.fsio, "size", sizes)
+        monkeypatch.setattr(recorder.asyncio, "sleep", AsyncMock())
+
+        asyncio.run(
+            _confirm_audio_capture_started(_Capture(), tmp_path / "audio.wav")
+        )
+
+        assert sizes.await_count > 1
 
     @pytest.mark.parametrize(
         ("parec_code", "ffmpeg_code"),

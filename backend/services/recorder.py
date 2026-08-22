@@ -1589,17 +1589,20 @@ async def _confirm_audio_capture_started(
     cap: AudioCapture,
     audio_path: Path,
 ) -> None:
-    """Require live subprocesses and a growing WAV before showing "Запись".
+    """Require stable live subprocesses before showing "Запись".
 
     Merely spawning parec/ffmpeg is not enough: either process can exit before
-    producing useful bytes. PulseAudio continuously emits PCM (including
-    silence), so a healthy capture grows within a few seconds even before
-    anybody speaks.
+    producing useful bytes. A null-sink monitor, however, does not necessarily
+    emit bytes until the first real sound. Requiring WAV growth here deadlocks
+    silent meetings and the E2E speaker (which launches only after this check).
+    A growing file is an early success; otherwise two seconds with both capture
+    processes alive confirms that the pipeline is ready for the first sound.
     """
     timeout = max(1, config.AUDIO_START_CONFIRM_TIMEOUT_SEC)
-    deadline = time.monotonic() + timeout
+    poll_interval = 0.25
+    checks = int(min(2, timeout) / poll_interval) + 1
     previous_size = await fsio.size(audio_path)
-    while time.monotonic() < deadline:
+    for check_index in range(checks):
         if cap.parec.returncode is not None or cap.ffmpeg.returncode is not None:
             raise RuntimeError(
                 "Аудиозапись не запустилась: процесс захвата завершился"
@@ -1608,10 +1611,9 @@ async def _confirm_audio_capture_started(
         if previous_size > 10_000 and size > previous_size:
             return
         previous_size = size
-        await asyncio.sleep(0.5)
-    raise RuntimeError(
-        f"Аудиозапись не запустилась: файл не растёт за {timeout} с"
-    )
+        if check_index < checks - 1:
+            await asyncio.sleep(poll_interval)
+    logger.info("Audio capture processes are healthy; WAV awaits first sound")
 
 
 async def _kill_if_alive(proc: asyncio.subprocess.Process, name: str) -> None:
