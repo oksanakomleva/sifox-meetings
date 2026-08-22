@@ -32,6 +32,110 @@ _e2e_finish_requested: set[str] = set()
 _shutdown_requested: bool = False
 
 
+def _find_pids_with_environment(
+    entry: str,
+    proc_root: Path = Path("/proc"),
+) -> list[int]:
+    """Find Linux processes carrying one exact environment entry.
+
+    Every Chromium child inherits ``PULSE_SINK=meet_<id>`` from its recorder
+    launch. That gives us a meeting-specific cleanup key without killing
+    browsers belonging to other, healthy recordings.
+    """
+    expected = entry.encode()
+    result: list[int] = []
+    try:
+        children = list(proc_root.iterdir())
+    except OSError:
+        return result
+    for child in children:
+        if not child.name.isdigit():
+            continue
+        try:
+            values = (child / "environ").read_bytes().split(b"\0")
+        except (OSError, PermissionError):
+            continue
+        if expected in values:
+            result.append(int(child.name))
+    return result
+
+
+def _collect_runtime_snapshot(proc_root: Path = Path("/proc")) -> str:
+    """Collect small, non-sensitive resource diagnostics after a browser stall."""
+    parts: list[str] = []
+    for label, path in (
+        ("load", proc_root / "loadavg"),
+        ("memory.current", Path("/sys/fs/cgroup/memory.current")),
+        ("memory.max", Path("/sys/fs/cgroup/memory.max")),
+        ("memory.events", Path("/sys/fs/cgroup/memory.events")),
+        ("pids.current", Path("/sys/fs/cgroup/pids.current")),
+        ("pids.max", Path("/sys/fs/cgroup/pids.max")),
+    ):
+        try:
+            value = path.read_text(encoding="utf-8").strip().replace("\n", ",")
+        except (OSError, PermissionError):
+            continue
+        parts.append(f"{label}={value}")
+
+    process_counts: dict[str, int] = {}
+    try:
+        children = list(proc_root.iterdir())
+    except OSError:
+        children = []
+    for child in children:
+        if not child.name.isdigit():
+            continue
+        try:
+            name = (child / "comm").read_text(encoding="utf-8").strip()
+        except (OSError, PermissionError):
+            continue
+        if any(token in name.lower() for token in ("chrome", "chromium", "ffmpeg", "parec")):
+            process_counts[name] = process_counts.get(name, 0) + 1
+    if process_counts:
+        parts.append(
+            "processes=" + ",".join(
+                f"{name}:{count}" for name, count in sorted(process_counts.items())
+            )
+        )
+    try:
+        parts.append(f"self.fds={len(list((proc_root / 'self' / 'fd').iterdir()))}")
+    except OSError:
+        pass
+    return " ".join(parts) or "runtime metrics unavailable"
+
+
+async def _terminate_stuck_browser(sink_name: str) -> None:
+    """Terminate only Chromium processes launched for one meeting.
+
+    Playwright occasionally cannot close a wedged renderer. Leaving that tree
+    alive consumes memory/Xvfb resources and makes later recorder launches more
+    likely to fail, so fall back to TERM then KILL after bounded normal cleanup.
+    """
+    entry = f"PULSE_SINK={sink_name}"
+    try:
+        pids = await asyncio.wait_for(
+            asyncio.to_thread(_find_pids_with_environment, entry), timeout=2
+        )
+    except Exception as exc:
+        logger.warning("Could not locate stuck browser for %s: %s", sink_name, exc)
+        return
+    if not pids:
+        return
+    logger.warning("Force-cleaning stuck browser for %s (pids=%s)", sink_name, pids)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    await asyncio.sleep(1)
+    survivors = await asyncio.to_thread(_find_pids_with_environment, entry)
+    for pid in survivors:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 class EmptyRecordingError(Exception):
     """Raised when a recording has no usable audio/speech (silence). Lets callers
     distinguish a benign 'nobody showed up' from a real failure."""
@@ -107,8 +211,9 @@ def request_e2e_finish(meeting_id: str) -> bool:
 async def recover_interrupted_meetings() -> None:
     """
     Called on startup: re-queue recordings that were interrupted by a previous deploy.
-    - status='recording'    → salvage a partial WAV if one survived on disk, else
-                              reset to 'pending' (bot re-joins if still ongoing)
+    - status='joining'/'recording' → salvage a partial WAV if one survived on
+                              disk, else reset to pending (bot re-joins if the
+                              meeting is still ongoing)
     - status='transcribing' → re-run the full pipeline from the WAV/MP3 on the volume
     - status='analyzing'    → re-run analysis from the transcript in the DB
 
@@ -120,7 +225,7 @@ async def recover_interrupted_meetings() -> None:
 
     async with pool.acquire() as conn:
         recording = await conn.fetch(
-            "SELECT id, title FROM meetings WHERE status = 'recording'"
+            "SELECT id, title FROM meetings WHERE status IN ('joining', 'recording')"
         )
         # Find meetings stuck mid-processing
         stuck = await conn.fetch(
@@ -304,6 +409,7 @@ async def _record_pipeline(meeting_id: str) -> None:
     had_participants = False
     audio_proc: AudioCapture | None = None
     pin_task: "asyncio.Task | None" = None
+    tracker: "asyncio.Task | None" = None
     browser = None
     pw = None
     live_task: "asyncio.Task | None" = None
@@ -314,6 +420,26 @@ async def _record_pipeline(meeting_id: str) -> None:
     speak_enabled = assistant_enabled and config.LIVE_ASSISTANT_SPEAK
 
     try:
+        startup_deadline = (
+            time.monotonic() + max(30, config.RECORDER_STARTUP_TIMEOUT_SEC)
+        )
+
+        async def startup_step(factory, label: str, step_timeout: float):
+            """Run one admission step within both its own and the total deadline."""
+            remaining = startup_deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(
+                    "Протоколлер не подключился: превышено время подключения"
+                )
+            try:
+                return await asyncio.wait_for(
+                    factory(), timeout=min(step_timeout, remaining)
+                )
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError(
+                    f"Протоколлер не подключился: завис этап «{label}»"
+                ) from exc
+
         # 1. PulseAudio sink — one per meeting. The browser is launched with
         # PULSE_SINK=this sink, and a background loop (_audio_pin_loop) force-moves
         # its audio stream onto this sink. We deliberately DON'T point the global
@@ -322,7 +448,9 @@ async def _record_pipeline(meeting_id: str) -> None:
         # browser's audio could land on another meeting's sink and bleed into its
         # recording. Unpinned streams fall back to the throwaway default_sink
         # (recorded by nobody); the pin loop then routes them to the right sink.
-        sink_module = await _create_pulse_sink(sink_name)
+        sink_module = await startup_step(
+            lambda: _create_pulse_sink(sink_name), "подготовка аудио", 15
+        )
         await asyncio.sleep(0.5)
 
         # 1b. Virtual microphone for the bot (Phase 3, voice answers). A remapped
@@ -332,18 +460,36 @@ async def _record_pipeline(meeting_id: str) -> None:
         if speak_enabled:
             try:
                 botmic_name = f"botmic_{meeting_id[:8]}"
-                botmic_module = await _create_pulse_sink(botmic_name)
+                botmic_module = await startup_step(
+                    lambda: _create_pulse_sink(botmic_name),
+                    "подготовка микрофона",
+                    15,
+                )
                 if botmic_module is None:
                     raise RuntimeError("could not create bot microphone sink")
                 botmic_source_name = f"botmic_source_{meeting_id[:8]}"
-                botmic_source_module = await _create_pulse_source(
-                    botmic_source_name,
-                    f"{botmic_name}.monitor",
+                botmic_source_module = await startup_step(
+                    lambda: _create_pulse_source(
+                        botmic_source_name,
+                        f"{botmic_name}.monitor",
+                    ),
+                    "подготовка микрофона",
+                    15,
                 )
             except Exception as e:
                 logger.warning("Bot mic setup failed (%s) — voice disabled: %s", meeting_id[:8], e)
                 if botmic_module is not None and botmic_name:
-                    await _delete_pulse_sink(botmic_name, botmic_module)
+                    try:
+                        await asyncio.wait_for(
+                            _delete_pulse_sink(botmic_name, botmic_module),
+                            timeout=10,
+                        )
+                    except Exception as cleanup_exc:
+                        logger.warning(
+                            "Bot mic rollback failed (%s): %s",
+                            meeting_id[:8],
+                            cleanup_exc,
+                        )
                 botmic_name = None
                 botmic_module = None
                 botmic_source_name = None
@@ -371,52 +517,73 @@ async def _record_pipeline(meeting_id: str) -> None:
             logger.warning("xdpyinfo not found — skipping Xvfb check (install x11-utils to enable)")
 
         from playwright.async_api import async_playwright
-        pw = await async_playwright().start()
-        try:
-            chromium_args = [
-                "--disable-dev-shm-usage",
-                "--autoplay-policy=no-user-gesture-required",
-                "--use-fake-ui-for-media-stream",
-            ]
-            if config.CHROMIUM_DISABLE_SANDBOX:
-                logger.warning("Chromium sandbox explicitly disabled by configuration")
-                chromium_args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
-            browser_env = {
-                **os.environ,
-                "DISPLAY": display,
-                "PULSE_SERVER": pulse,
-                "PULSE_SINK": sink_name,
-            }
-            if botmic_source_name:
-                # Bind this Chromium instance to its own virtual microphone.
-                # Relying only on PulseAudio's process-global default source
-                # races when two meetings start at the same time.
-                browser_env["PULSE_SOURCE"] = botmic_source_name
-            browser = await asyncio.wait_for(
-                pw.chromium.launch(
-                    headless=False,
-                    args=chromium_args,
-                    env=browser_env,
-                ),
-                timeout=30,
-            )
-        except asyncio.TimeoutError:
-            raise RuntimeError("chromium.launch() timed out after 30s — Xvfb/Chromium issue")
+        pw = await startup_step(
+            lambda: async_playwright().start(), "запуск управления браузером", 20
+        )
+        chromium_args = [
+            "--disable-dev-shm-usage",
+            "--autoplay-policy=no-user-gesture-required",
+            "--use-fake-ui-for-media-stream",
+        ]
+        if config.CHROMIUM_DISABLE_SANDBOX:
+            logger.warning("Chromium sandbox explicitly disabled by configuration")
+            chromium_args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
+        browser_env = {
+            **os.environ,
+            "DISPLAY": display,
+            "PULSE_SERVER": pulse,
+            "PULSE_SINK": sink_name,
+        }
+        if botmic_source_name:
+            # Bind this Chromium instance to its own virtual microphone.
+            # Relying only on PulseAudio's process-global default source
+            # races when two meetings start at the same time.
+            browser_env["PULSE_SOURCE"] = botmic_source_name
+        browser = await startup_step(
+            lambda: pw.chromium.launch(
+                headless=False,
+                args=chromium_args,
+                env=browser_env,
+            ),
+            "запуск браузера",
+            30,
+        )
         logger.info("Browser launched OK")
-        context = await browser.new_context(permissions=["microphone"])
-        page = await context.new_page()
+        context = await startup_step(
+            lambda: browser.new_context(permissions=["microphone"]),
+            "создание профиля браузера",
+            20,
+        )
+        page = await startup_step(
+            context.new_page, "открытие страницы встречи", 20
+        )
 
         # 3. Join meeting
-        participants = await _join_meeting(
-            page,
-            url,
-            scheduled_start=meeting.get("start_time"),
+        participants = await startup_step(
+            lambda: _join_meeting(
+                page,
+                url,
+                scheduled_start=meeting.get("start_time"),
+            ),
+            "вход во встречу",
+            max(30, config.RECORDER_STARTUP_TIMEOUT_SEC),
         )
         logger.info("Joined meeting %s, participants: %s", meeting_id[:8], participants)
 
         # 4. Start audio capture
+        audio_proc = await startup_step(
+            lambda: _start_audio_capture(str(audio_path), sink_name),
+            "запуск аудиозаписи",
+            20,
+        )
+        await startup_step(
+            lambda: _confirm_audio_capture_started(audio_proc, audio_path),
+            "проверка аудиозаписи",
+            max(1, config.AUDIO_START_CONFIRM_TIMEOUT_SEC) + 1,
+        )
+        # "Запись" is now factual: Telemost admitted the bot and the audio file
+        # is demonstrably growing.
         await models.update_meeting_status(meeting_id, "recording")
-        audio_proc = await _start_audio_capture(str(audio_path), sink_name)
         # Keep this browser's audio pinned to its own sink (Chromium may ignore
         # PULSE_SINK / land on the default → would bleed across concurrent meetings).
         pin_task = asyncio.create_task(
@@ -520,10 +687,18 @@ async def _record_pipeline(meeting_id: str) -> None:
         await _stop_audio_capture(audio_proc)
         audio_proc = None
 
-        await browser.close()
-        browser = None
-        await pw.stop()
-        pw = None
+        try:
+            await asyncio.wait_for(browser.close(), timeout=15)
+        except Exception as exc:
+            logger.warning("Browser close timed out for %s: %s", meeting_id[:8], exc)
+        else:
+            browser = None
+        try:
+            await asyncio.wait_for(pw.stop(), timeout=15)
+        except Exception as exc:
+            logger.warning("Playwright stop timed out for %s: %s", meeting_id[:8], exc)
+        else:
+            pw = None
 
         # 8–9. Transcribe → store → MP3 → analyze (shared with extension uploads)
         await transcribe_and_analyze(
@@ -548,36 +723,73 @@ async def _record_pipeline(meeting_id: str) -> None:
             await _finalize_no_show(meeting_id)
     except Exception as e:
         logger.error("Recording %s failed: %s", meeting_id[:8], e, exc_info=True)
+        try:
+            snapshot = await asyncio.wait_for(
+                asyncio.to_thread(_collect_runtime_snapshot), timeout=2
+            )
+            logger.error("Recorder runtime at failure (%s): %s", meeting_id[:8], snapshot)
+        except Exception as snapshot_exc:
+            logger.warning(
+                "Recorder runtime snapshot failed (%s): %s",
+                meeting_id[:8],
+                snapshot_exc,
+            )
         await models.update_meeting_status(meeting_id, "error", str(e)[:500])
     finally:
+        browser_cleanup_failed = False
         if audio_proc and audio_proc.returncode is None:
             await _stop_audio_capture(audio_proc)
         if browser:
             try:
-                await browser.close()
-            except Exception:
-                pass
+                await asyncio.wait_for(browser.close(), timeout=15)
+            except Exception as exc:
+                browser_cleanup_failed = True
+                logger.warning(
+                    "Final browser close failed for %s: %s", meeting_id[:8], exc
+                )
         if pw:
             try:
-                await pw.stop()
-            except Exception:
-                pass
+                await asyncio.wait_for(pw.stop(), timeout=15)
+            except Exception as exc:
+                browser_cleanup_failed = True
+                logger.warning(
+                    "Final Playwright stop failed for %s: %s", meeting_id[:8], exc
+                )
+        if browser_cleanup_failed:
+            await _terminate_stuck_browser(sink_name)
+        if tracker:
+            tracker.cancel()
+            await asyncio.gather(tracker, return_exceptions=True)
         if pin_task:
             pin_task.cancel()
+            await asyncio.gather(pin_task, return_exceptions=True)
         if live_task:
             live_task.cancel()
             await asyncio.gather(live_task, return_exceptions=True)
-        await _delete_pulse_sink(sink_name, sink_module)
-        if botmic_source_module is not None:
-            await _unload_pulse_module(
-                botmic_source_module,
-                botmic_source_name or "bot microphone source",
+        try:
+            await asyncio.wait_for(
+                _delete_pulse_sink(sink_name, sink_module), timeout=10
             )
+        except Exception as exc:
+            logger.warning("Pulse sink cleanup failed for %s: %s", sink_name, exc)
+        if botmic_source_module is not None:
+            try:
+                await asyncio.wait_for(
+                    _unload_pulse_module(
+                        botmic_source_module,
+                        botmic_source_name or "bot microphone source",
+                    ),
+                    timeout=10,
+                )
+            except Exception as exc:
+                logger.warning("Bot microphone cleanup failed: %s", exc)
         if botmic_name:
             try:
-                await _delete_pulse_sink(botmic_name, botmic_module)
-            except Exception:
-                pass
+                await asyncio.wait_for(
+                    _delete_pulse_sink(botmic_name, botmic_module), timeout=10
+                )
+            except Exception as exc:
+                logger.warning("Bot microphone sink cleanup failed: %s", exc)
         _e2e_finish_requested.discard(meeting_id)
 
 
@@ -818,8 +1030,19 @@ async def _join_meeting(
     debug_dir.mkdir(exist_ok=True)
 
     async def snap(name: str):
+        if not config.TELEMOST_DEBUG_SCREENSHOTS:
+            return
         try:
-            await page.screenshot(path=str(debug_dir / f"{name}.png"), full_page=True)
+            await asyncio.wait_for(
+                page.screenshot(
+                    path=str(debug_dir / f"{name}.png"),
+                    full_page=True,
+                    timeout=max(
+                        1, config.TELEMOST_DEBUG_SCREENSHOT_TIMEOUT_SEC
+                    ) * 1000,
+                ),
+                timeout=max(1, config.TELEMOST_DEBUG_SCREENSHOT_TIMEOUT_SEC) + 1,
+            )
             logger.info("Screenshot saved: %s.png", name)
         except Exception as e:
             logger.warning("Screenshot %s failed: %s", name, e)
@@ -828,7 +1051,12 @@ async def _join_meeting(
     await page.wait_for_timeout(3000)
     await snap("1-loaded")
     logger.info("Page URL after load: %s", page.url)
-    logger.info("Page title: %s", await page.title())
+    if config.TELEMOST_DEBUG_SCREENSHOTS:
+        try:
+            page_title = await asyncio.wait_for(page.title(), timeout=5)
+        except Exception as exc:
+            page_title = f"<unavailable: {type(exc).__name__}>"
+        logger.info("Page title: %s", page_title)
 
     # Fresh anonymous sessions sometimes show an app handoff page first.
     try:
@@ -1305,35 +1533,47 @@ async def _start_audio_capture(output_path: str, sink_name: str) -> AudioCapture
     """
     monitor = f"{sink_name}.monitor"
     read_fd, write_fd = os.pipe()
+    parec: asyncio.subprocess.Process | None = None
 
     try:
-        parec = await asyncio.create_subprocess_exec(
-            "parec",
-            f"--device={monitor}",
-            "--format=s16le",
-            "--rate=16000",
-            "--channels=1",
-            stdout=write_fd,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-    finally:
-        # Parent no longer needs the write end; parec inherited it
-        os.close(write_fd)
+        try:
+            parec = await asyncio.create_subprocess_exec(
+                "parec",
+                f"--device={monitor}",
+                "--format=s16le",
+                "--rate=16000",
+                "--channels=1",
+                stdout=write_fd,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        finally:
+            # Parent no longer needs the write end; parec inherited it
+            os.close(write_fd)
+    except BaseException:
+        # No child inherited the read end if parec itself could not be spawned.
+        os.close(read_fd)
+        raise
 
     try:
-        ffmpeg = await asyncio.create_subprocess_exec(
-            "ffmpeg",
-            "-y",
-            "-f", "s16le",
-            "-ar", "16000",
-            "-ac", "1",
-            "-i", "pipe:0",
-            "-acodec", "pcm_s16le",
-            output_path,
-            stdin=read_fd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
+        try:
+            ffmpeg = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-y",
+                "-f", "s16le",
+                "-ar", "16000",
+                "-ac", "1",
+                "-i", "pipe:0",
+                "-acodec", "pcm_s16le",
+                output_path,
+                stdin=read_fd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except BaseException:
+            # If ffmpeg cannot be spawned (including cancellation by the startup
+            # deadline), do not leave parec running and holding the pipe forever.
+            await _kill_if_alive(parec, "parec")
+            raise
     finally:
         # Parent no longer needs the read end; ffmpeg inherited it
         os.close(read_fd)
@@ -1343,6 +1583,35 @@ async def _start_audio_capture(output_path: str, sink_name: str) -> AudioCapture
         parec.pid, ffmpeg.pid, output_path,
     )
     return AudioCapture(parec, ffmpeg, output_path)
+
+
+async def _confirm_audio_capture_started(
+    cap: AudioCapture,
+    audio_path: Path,
+) -> None:
+    """Require live subprocesses and a growing WAV before showing "Запись".
+
+    Merely spawning parec/ffmpeg is not enough: either process can exit before
+    producing useful bytes. PulseAudio continuously emits PCM (including
+    silence), so a healthy capture grows within a few seconds even before
+    anybody speaks.
+    """
+    timeout = max(1, config.AUDIO_START_CONFIRM_TIMEOUT_SEC)
+    deadline = time.monotonic() + timeout
+    previous_size = await fsio.size(audio_path)
+    while time.monotonic() < deadline:
+        if cap.parec.returncode is not None or cap.ffmpeg.returncode is not None:
+            raise RuntimeError(
+                "Аудиозапись не запустилась: процесс захвата завершился"
+            )
+        size = await fsio.size(audio_path)
+        if previous_size > 10_000 and size > previous_size:
+            return
+        previous_size = size
+        await asyncio.sleep(0.5)
+    raise RuntimeError(
+        f"Аудиозапись не запустилась: файл не растёт за {timeout} с"
+    )
 
 
 async def _kill_if_alive(proc: asyncio.subprocess.Process, name: str) -> None:

@@ -50,6 +50,15 @@ class Config(BaseSettings):
     TELEMOST_JOIN_GRACE_AFTER_START_SEC: int = 90
     TELEMOST_JOIN_MAX_WAIT_SEC: int = 300
     TELEMOST_JOIN_RETRY_SEC: int = 10
+    # Hard ceiling for the whole Telemost admission flow, including Playwright
+    # calls before the normal post-join polling loop begins.
+    RECORDER_STARTUP_TIMEOUT_SEC: int = 360
+    # Full-page screenshots and page-title reads are diagnostics, not part of
+    # joining. Keep them off in production: a screenshot was the first
+    # Playwright operation to wedge during the 2026-08-21 incident.
+    TELEMOST_DEBUG_SCREENSHOTS: bool = False
+    TELEMOST_DEBUG_SCREENSHOT_TIMEOUT_SEC: int = 5
+    AUDIO_START_CONFIRM_TIMEOUT_SEC: int = 8
     PARTICIPANT_POLL_INTERVAL: int = 30      # seconds between polls
     EMPTY_POLLS_TO_END: int = 3             # ~90s after everyone leaves
     MAX_RECORDING_HOURS: int = 4

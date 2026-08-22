@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS meetings (
     start_time    TIMESTAMP WITH TIME ZONE,
     end_time      TIMESTAMP WITH TIME ZONE,
     status        TEXT DEFAULT 'pending',
-    -- pending → recording → transcribing → analyzing → done | error | no_show
+    -- pending → joining → recording → transcribing → analyzing → done | error | no_show
     -- no_show: bot joined but nobody came (not a failure)
     transcript    TEXT,
     summary       TEXT,

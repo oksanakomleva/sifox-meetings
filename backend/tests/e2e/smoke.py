@@ -179,7 +179,7 @@ class SmokeTest:
                 continue
             meetings = r.json().get("meetings", [])
             # Find the most recent non-done meeting
-            active = next((m for m in meetings if m.get("status") in ("pending", "recording", "transcribing", "analyzing")), None)
+            active = next((m for m in meetings if m.get("status") in ("pending", "joining", "recording", "transcribing", "analyzing")), None)
             if active:
                 if active["status"] != last_status:
                     print(f"  → meeting {active['id'][:8]} status: {active['status']}")
@@ -298,7 +298,7 @@ class SmokeTest:
                 target = next((m for m in meetings if m["id"] == meeting_id), None)
             else:
                 target = next(
-                    (m for m in meetings if m.get("status") in ("pending", "recording", "transcribing", "analyzing")),
+                    (m for m in meetings if m.get("status") in ("pending", "joining", "recording", "transcribing", "analyzing")),
                     None,
                 )
 

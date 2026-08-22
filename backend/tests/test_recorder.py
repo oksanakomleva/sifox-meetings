@@ -1,6 +1,10 @@
 """Unit tests for recorder pure functions."""
+import asyncio
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -9,8 +13,46 @@ from services.recorder import (
     _effective_speaker_timeline,
     _speaker_for_segment,
     _build_transcript,
+    _confirm_audio_capture_started,
     _fmt_time,
+    _find_pids_with_environment,
+    _collect_runtime_snapshot,
 )
+from services import recorder
+
+
+class TestRecorderProcessCleanup:
+    def test_finds_only_process_with_exact_meeting_sink(self, tmp_path):
+        proc = tmp_path / "proc"
+        (proc / "101").mkdir(parents=True)
+        (proc / "102").mkdir()
+        (proc / "not-a-pid").mkdir()
+        (proc / "101" / "environ").write_bytes(
+            b"DISPLAY=:99\0PULSE_SINK=meet_target\0"
+        )
+        (proc / "102" / "environ").write_bytes(
+            b"DISPLAY=:99\0PULSE_SINK=meet_other\0"
+        )
+
+        assert _find_pids_with_environment(
+            "PULSE_SINK=meet_target", proc
+        ) == [101]
+
+    def test_runtime_snapshot_counts_browser_and_audio_processes(self, tmp_path):
+        proc = tmp_path / "proc"
+        proc.mkdir()
+        (proc / "loadavg").write_text(
+            "0.10 0.20 0.30 1/10 1\n", encoding="utf-8"
+        )
+        for pid, name in (("101", "chrome"), ("102", "chrome"), ("103", "ffmpeg")):
+            (proc / pid).mkdir()
+            (proc / pid / "comm").write_text(name, encoding="utf-8")
+
+        result = _collect_runtime_snapshot(proc)
+
+        assert "load=0.10 0.20 0.30 1/10 1" in result
+        assert "chrome:2" in result
+        assert "ffmpeg:1" in result
 
 
 class _Seg:
@@ -111,3 +153,55 @@ class TestFmtTime:
 
     def test_hours(self):
         assert _fmt_time(3725) == "01:02:05"
+
+
+class _Proc:
+    def __init__(self, returncode=None):
+        self.returncode = returncode
+
+
+class _Capture:
+    def __init__(self, parec_returncode=None, ffmpeg_returncode=None):
+        self.parec = _Proc(parec_returncode)
+        self.ffmpeg = _Proc(ffmpeg_returncode)
+
+
+class TestConfirmAudioCaptureStarted:
+    def test_requires_observed_file_growth(self, monkeypatch, tmp_path):
+        sizes = AsyncMock(side_effect=[12_000, 12_000, 18_000])
+        monkeypatch.setattr(recorder.fsio, "size", sizes)
+        monkeypatch.setattr(recorder.asyncio, "sleep", AsyncMock())
+
+        asyncio.run(
+            _confirm_audio_capture_started(_Capture(), tmp_path / "audio.wav")
+        )
+
+        assert sizes.await_count == 3
+
+    @pytest.mark.parametrize(
+        ("parec_code", "ffmpeg_code"),
+        [(1, None), (None, 1)],
+    )
+    def test_rejects_dead_capture_process(
+        self, monkeypatch, tmp_path, parec_code, ffmpeg_code
+    ):
+        monkeypatch.setattr(recorder.fsio, "size", AsyncMock(return_value=0))
+
+        with pytest.raises(RuntimeError, match="процесс захвата завершился"):
+            asyncio.run(
+                _confirm_audio_capture_started(
+                    _Capture(parec_code, ffmpeg_code), tmp_path / "audio.wav"
+                )
+            )
+
+
+def test_claim_uses_joining_until_capture_is_confirmed():
+    source = (Path(__file__).parent.parent / "database" / "models.py").read_text(
+        encoding="utf-8"
+    )
+    claim = source.split("async def claim_meeting_for_recording", 1)[1].split(
+        "async def mark_duplicate_if_sibling_active", 1
+    )[0]
+
+    assert "SET status = 'joining'" in claim
+    assert "o.status IN ('joining', 'recording')" in claim

@@ -65,6 +65,7 @@ export interface Meeting {
 
 export type MeetingStatus =
   | 'pending'
+  | 'joining'
   | 'recording'
   | 'transcribing'
   | 'analyzing'

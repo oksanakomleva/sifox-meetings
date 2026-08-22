@@ -563,7 +563,7 @@ async def claim_meeting_for_recording(meeting_id: str) -> bool:
     Returns True if successfully claimed, False if already taken.
 
     Refuses the claim if another meeting sharing the same Telemost URL is
-    ALREADY RECORDING right now (a bot is in that room — regardless of schedule
+    ALREADY JOINING OR RECORDING right now (a bot owns that room — regardless of schedule
     gap; covers back-to-back meetings on one permanent link where the first
     overran), OR was just recorded/processed within a 15-minute window (same-time
     duplicate events). Completed E2E tests are exempt from the time-window rule
@@ -574,7 +574,7 @@ async def claim_meeting_for_recording(meeting_id: str) -> bool:
     async with pool.acquire() as conn:
         result = await conn.execute(
             """
-            UPDATE meetings SET status = 'recording', updated_at = NOW()
+            UPDATE meetings SET status = 'joining', updated_at = NOW()
             WHERE id = $1 AND status = 'pending'
               AND NOT EXISTS (
                   SELECT 1 FROM meetings o
@@ -584,7 +584,7 @@ async def claim_meeting_for_recording(meeting_id: str) -> bool:
                         -- another bot is actively recording the SAME room right
                         -- now → never send a second protocaller, no matter the
                         -- schedule gap (covers back-to-back meetings on one link)
-                        o.status = 'recording'
+                        o.status IN ('joining', 'recording')
                         -- ...or a same-time sibling just recorded/processed it
                         OR (o.status IN ('transcribing', 'analyzing', 'done')
                             AND abs(extract(epoch FROM (o.start_time - meetings.start_time))) < 900)
@@ -623,7 +623,7 @@ async def mark_duplicate_if_sibling_active(meeting_id: str) -> bool:
                   WHERE o.meeting_url = m.meeting_url
                     AND o.id <> m.id
                     AND (
-                        o.status = 'recording'
+                        o.status IN ('joining', 'recording')
                         OR (o.status IN ('transcribing', 'analyzing', 'done')
                             AND abs(extract(epoch FROM (o.start_time - m.start_time))) < 900)
                             AND NOT (
@@ -1379,7 +1379,7 @@ async def reset_stuck_meetings() -> int:
             SET status = 'error',
                 error_message = 'Прервано из-за перезапуска сервиса',
                 updated_at = NOW()
-            WHERE status IN ('recording', 'transcribing', 'analyzing')
+            WHERE status IN ('joining', 'recording', 'transcribing', 'analyzing')
             """
         )
     return int(result.split()[-1])
@@ -1630,7 +1630,7 @@ async def get_upcoming_meetings_for_user(user_id: int, is_admin: bool) -> list[d
                        meeting_url, assistant_enabled,
                        assistant_public_info_enabled
                 FROM meetings
-                WHERE status IN ('pending', 'recording', 'transcribing', 'analyzing')
+                WHERE status IN ('pending', 'joining', 'recording', 'transcribing', 'analyzing')
                   AND start_time > NOW() - interval '2 hours'
                 ORDER BY start_time ASC
                 LIMIT 100
@@ -1646,7 +1646,7 @@ async def get_upcoming_meetings_for_user(user_id: int, is_admin: bool) -> list[d
                 SELECT DISTINCT m.id, m.title, m.topic, m.start_time, m.end_time,
                        m.status, m.meeting_type
                 FROM meetings m
-                WHERE m.status IN ('pending', 'recording', 'transcribing', 'analyzing')
+                WHERE m.status IN ('pending', 'joining', 'recording', 'transcribing', 'analyzing')
                   AND m.start_time > NOW() - interval '2 hours'
                   AND (
                     -- the user is an actual attendee of the event...

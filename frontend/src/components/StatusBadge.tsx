@@ -2,6 +2,7 @@ import type { MeetingStatus } from '../types'
 
 const STATUS_LABELS: Record<MeetingStatus, string> = {
   pending:     'В ожидании',
+  joining:     'Подключается…',
   recording:   '● Запись',
   transcribing:'Транскрипция...',
   analyzing:   'Анализ...',
@@ -12,6 +13,7 @@ const STATUS_LABELS: Record<MeetingStatus, string> = {
 
 const STATUS_CLASSES: Record<MeetingStatus, string> = {
   pending:     'badge-pending',
+  joining:     'badge-pending',
   recording:   'badge-recording',
   transcribing:'badge-pending',
   analyzing:   'badge-pending',
