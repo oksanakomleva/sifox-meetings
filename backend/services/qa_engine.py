@@ -65,6 +65,29 @@ def _within_one_edit(left: str, right: str) -> bool:
     return True
 
 
+def _matches_confirmation_wake(
+    candidate: str,
+    wake_variants: set[str],
+) -> bool:
+    """Match narrowly observed Whisper endings without accepting «протоколы»."""
+    if candidate in wake_variants or any(
+        _within_one_edit(candidate, variant)
+        for variant in wake_variants
+    ):
+        return True
+    # Synthetic and real Russian ASR can drop the final «р» (протоколе) or
+    # render the unstressed ending as «и» (протоколи). Keep these explicit
+    # instead of allowing an arbitrary two-character edit, which would also
+    # admit the ordinary plural «протоколы».
+    observed_endings = {
+        shortened
+        for variant in wake_variants
+        if variant.endswith("ер")
+        for shortened in (variant[:-1], f"{variant[:-2]}и")
+    }
+    return candidate in observed_endings
+
+
 def contains_wake_word(text: str, wake_word: str) -> bool:
     collapsed = _normalize(text).replace(" ", "")
     return any(variant in collapsed for variant in _wake_variants(wake_word))
@@ -117,10 +140,7 @@ def _assistant_activation(
             collapsed += tokens[end]
             wake_matches = collapsed in wake_variants or (
                 tolerate_asr_error
-                and any(
-                    _within_one_edit(collapsed, variant)
-                    for variant in wake_variants
-                )
+                and _matches_confirmation_wake(collapsed, wake_variants)
             )
             if not wake_matches:
                 if len(collapsed) <= max_wake_len + int(tolerate_asr_error):

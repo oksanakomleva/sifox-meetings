@@ -83,21 +83,31 @@ class TestAssistantActivation:
         )
 
     def test_confirmation_can_tolerate_one_asr_error_per_command_token(self):
-        asr_text = "Протоколе подскажу как называется проект"
+        for asr_text in (
+            "Протоколе подскажу как называется проект",
+            "Протоколи подскажу как называется проект",
+        ):
+            assert not contains_assistant_command(asr_text, WAKE, COMMAND)
+            assert contains_assistant_command(
+                asr_text,
+                WAKE,
+                COMMAND,
+                tolerate_asr_error=True,
+            )
+            assert strip_assistant_command(
+                asr_text,
+                WAKE,
+                COMMAND,
+                tolerate_asr_error=True,
+            ) == "как называется проект"
 
-        assert not contains_assistant_command(asr_text, WAKE, COMMAND)
-        assert contains_assistant_command(
-            asr_text,
+    def test_tolerant_confirmation_rejects_ordinary_protocol_plural(self):
+        assert not contains_assistant_command(
+            "Протоколы подскажу где лежат документы",
             WAKE,
             COMMAND,
             tolerate_asr_error=True,
         )
-        assert strip_assistant_command(
-            asr_text,
-            WAKE,
-            COMMAND,
-            tolerate_asr_error=True,
-        ) == "как называется проект"
 
     def test_tolerant_confirmation_still_rejects_ordinary_speech(self):
         assert not contains_assistant_command(
