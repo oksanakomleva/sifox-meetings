@@ -45,8 +45,11 @@ def _diagnostic_update(meeting_id: str, **values) -> None:
             "bytes_received": 0,
             "windows_transcribed": 0,
             "silent_windows_skipped": 0,
+            "activation_rejections": 0,
             "last_rms": 0,
             "last_text": "",
+            "last_wake_text": "",
+            "last_confirmation_text": "",
             "last_error": None,
             "started_at": datetime.now(timezone.utc).isoformat(),
         },
@@ -149,15 +152,6 @@ def trailing_pcm_is_silent(
     return len(tail) >= wanted and pcm_rms(tail) < min_rms
 
 
-def pcm_contains_speech(pcm: bytes, min_rms: int) -> bool:
-    """Detect any voiced quarter-second inside a longer mostly-silent tail."""
-    chunk_bytes = _BYTES_PER_SEC // 4
-    return any(
-        pcm_rms(pcm[offset:offset + chunk_bytes]) >= min_rms
-        for offset in range(0, len(pcm), chunk_bytes)
-    )
-
-
 async def capture_question_audio(
     rolling: RollingPCMBuffer,
     reader_task,
@@ -229,16 +223,17 @@ async def _audio_reader(
 
 
 async def transcribe_question(pcm: bytes) -> str:
-    """Use cloud STT for proper nouns/latency, falling back to isolated local STT."""
+    """Transcribe captured speech without suggesting an activation phrase.
+
+    This result independently confirms that the user really said the command;
+    prompting it with the command itself would make Whisper more likely to
+    hallucinate the exact words that grant activation.
+    """
     if config.LIVE_QUESTION_STT.lower() == "openai":
         try:
             return await transcribe_openai_pcm(
                 pcm,
                 config.LIVE_QUESTION_STT_MODEL,
-                prompt=(
-                    f"{config.LIVE_WAKE_WORD}, {config.LIVE_WAKE_COMMAND}. "
-                    f"{config.LIVE_WAKE_WORD}, запиши."
-                ),
             )
         except Exception as exc:
             logger.warning("OpenAI question STT failed; using local model: %s", exc)
@@ -252,10 +247,9 @@ async def transcribe_wake_window(pcm: bytes) -> str:
             return await transcribe_openai_pcm(
                 pcm,
                 config.LIVE_WAKE_STT_MODEL,
-                prompt=(
-                    f"{config.LIVE_WAKE_WORD}, {config.LIVE_WAKE_COMMAND}. "
-                    f"{config.LIVE_WAKE_WORD}, запиши."
-                ),
+                # Hint only the unusual product name. Including whole commands
+                # here caused them to appear in otherwise unrelated speech.
+                prompt=config.LIVE_WAKE_WORD,
             )
         except Exception as exc:
             logger.warning("OpenAI wake STT failed; using local model: %s", exc)
@@ -362,7 +356,11 @@ async def run_live_assistant(
                 continue
 
             logger.info("Live assistant wake detected (%s): %r", meeting_id[:8], text)
-            _diagnostic_update(meeting_id, status="wake_detected")
+            _diagnostic_update(
+                meeting_id,
+                status="wake_detected",
+                last_wake_text=text[-500:],
+            )
             # Capture the question: this window (has wake word + maybe start of
             # question) plus the following audio up to LIVE_QUESTION_MAX_SEC.
             question_start = window_end_offset - len(segment)
@@ -388,7 +386,6 @@ async def run_live_assistant(
                 live_transcript,
                 speak,
                 wake_text=text,
-                wake_window_bytes=len(segment),
             )
             _diagnostic_update(meeting_id, status="listening")
             mute_until = time.monotonic() + _COOLDOWN_SEC
@@ -507,7 +504,6 @@ async def _handle_question(
     speak: Callable[[str], Awaitable[None]] | None,
     *,
     wake_text: str = "",
-    wake_window_bytes: int = 0,
 ) -> None:
     started = time.monotonic()
     question = ""
@@ -518,33 +514,44 @@ async def _handle_question(
     search_query = ""
     saved = False
     try:
-        # For a short question already complete inside the validated wake window,
-        # reuse that cloud transcription instead of uploading the same audio a
-        # second time. If speech continued after the window, transcribe the full
-        # captured question for accuracy.
-        wake_question = qa_engine.strip_assistant_command(
-            wake_text,
-            config.LIVE_WAKE_WORD,
-            config.LIVE_WAKE_COMMAND,
-        )
-        followup_audio = (
-            audio[wake_window_bytes:]
-            if wake_window_bytes > 0 and wake_window_bytes <= len(audio)
-            else audio
-        )
-        reuse_wake_text = bool(
-            wake_question
-            and not pcm_contains_speech(followup_audio, config.LIVE_MIN_RMS)
-        )
+        # Never trust the prompted wake-window transcription on its own. Run a
+        # second transcription over the captured audio without an activation
+        # prompt and require the complete command there as well. This prevents
+        # ordinary meeting speech from turning into an audible answer when the
+        # first STT pass hallucinates the prompted words.
         stt_started = time.monotonic()
-        raw = wake_text if reuse_wake_text else await transcribe_question(audio)
+        raw = await transcribe_question(audio)
+        confirmed_text = qa_engine.clean_live_transcript(raw)
         _diagnostic_update(
             meeting_id,
             question_stt_ms=int((time.monotonic() - stt_started) * 1_000),
-            question_stt_reused=reuse_wake_text,
+            question_stt_reused=False,
+            last_confirmation_text=confirmed_text[-500:],
         )
+        if not qa_engine.contains_assistant_command(
+            confirmed_text,
+            config.LIVE_WAKE_WORD,
+            config.LIVE_WAKE_COMMAND,
+        ):
+            rejected = _diagnostics.get(meeting_id, {}).get(
+                "activation_rejections",
+                0,
+            )
+            _diagnostic_update(
+                meeting_id,
+                status="activation_rejected",
+                activation_rejections=rejected + 1,
+            )
+            logger.warning(
+                "Live assistant activation rejected (%s): wake=%r confirmation=%r",
+                meeting_id[:8],
+                wake_text,
+                confirmed_text,
+            )
+            return
+
         question = qa_engine.strip_assistant_command(
-            raw,
+            confirmed_text,
             config.LIVE_WAKE_WORD,
             config.LIVE_WAKE_COMMAND,
         )
