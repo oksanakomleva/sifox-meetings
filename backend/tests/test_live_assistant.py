@@ -416,8 +416,8 @@ def test_wake_window_uses_accurate_cloud_stt(monkeypatch):
 
     assert "Протоколлер, подскажи" in text
     cloud.assert_awaited_once()
-    assert cloud.await_args.kwargs["prompt"] == config.LIVE_WAKE_WORD
-    assert config.LIVE_WAKE_COMMAND not in cloud.await_args.kwargs["prompt"]
+    assert config.LIVE_WAKE_COMMAND in cloud.await_args.kwargs["prompt"]
+    assert "запиши" in cloud.await_args.kwargs["prompt"]
     local.assert_not_awaited()
 
 

@@ -241,15 +241,21 @@ async def transcribe_question(pcm: bytes) -> str:
 
 
 async def transcribe_wake_window(pcm: bytes) -> str:
-    """Recognize a wake-word window accurately, with an isolated local fallback."""
+    """Recognize a possible command, with an isolated local fallback.
+
+    This pass is intentionally sensitive and may use command hints. It cannot
+    activate the assistant on its own: _handle_question independently confirms
+    the complete command from unprompted audio before answering.
+    """
     if config.LIVE_WAKE_STT.lower() == "openai":
         try:
             return await transcribe_openai_pcm(
                 pcm,
                 config.LIVE_WAKE_STT_MODEL,
-                # Hint only the unusual product name. Including whole commands
-                # here caused them to appear in otherwise unrelated speech.
-                prompt=config.LIVE_WAKE_WORD,
+                prompt=(
+                    f"{config.LIVE_WAKE_WORD}, {config.LIVE_WAKE_COMMAND}. "
+                    f"{config.LIVE_WAKE_WORD}, запиши."
+                ),
             )
         except Exception as exc:
             logger.warning("OpenAI wake STT failed; using local model: %s", exc)
