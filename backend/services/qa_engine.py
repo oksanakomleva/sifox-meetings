@@ -42,6 +42,29 @@ def _wake_variants(wake_word: str) -> tuple[str, ...]:
     return tuple(sorted((v for v in variants if v), key=len, reverse=True))
 
 
+def _within_one_edit(left: str, right: str) -> bool:
+    """Whether normalized ASR tokens differ by at most one character."""
+    if left == right:
+        return True
+    if abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) == len(right):
+        return sum(a != b for a, b in zip(left, right)) <= 1
+    if len(left) > len(right):
+        left, right = right, left
+    left_index = right_index = differences = 0
+    while left_index < len(left) and right_index < len(right):
+        if left[left_index] == right[right_index]:
+            left_index += 1
+            right_index += 1
+            continue
+        differences += 1
+        if differences > 1:
+            return False
+        right_index += 1
+    return True
+
+
 def contains_wake_word(text: str, wake_word: str) -> bool:
     collapsed = _normalize(text).replace(" ", "")
     return any(variant in collapsed for variant in _wake_variants(wake_word))
@@ -72,6 +95,8 @@ def _assistant_activation(
     text: str,
     wake_word: str,
     question_command: str,
+    *,
+    tolerate_asr_error: bool = False,
 ) -> tuple[str, int, list[str]] | None:
     """Return (kind, cut-index, tokens) for an explicit assistant command.
 
@@ -90,13 +115,32 @@ def _assistant_activation(
         collapsed = ""
         for end in range(start, min(len(tokens), start + 3)):
             collapsed += tokens[end]
-            if collapsed not in wake_variants:
-                if len(collapsed) <= max_wake_len:
+            wake_matches = collapsed in wake_variants or (
+                tolerate_asr_error
+                and any(
+                    _within_one_edit(collapsed, variant)
+                    for variant in wake_variants
+                )
+            )
+            if not wake_matches:
+                if len(collapsed) <= max_wake_len + int(tolerate_asr_error):
                     continue
                 break
             command_start = end + 1
             command_end = command_start + len(question_tokens)
-            if tokens[command_start:command_end] == question_tokens:
+            command_candidate = tokens[command_start:command_end]
+            command_matches = command_candidate == question_tokens or (
+                tolerate_asr_error
+                and len(command_candidate) == len(question_tokens)
+                and all(
+                    _within_one_edit(candidate, expected)
+                    for candidate, expected in zip(
+                        command_candidate,
+                        question_tokens,
+                    )
+                )
+            )
+            if command_matches:
                 return "question", command_end, tokens
             if command_start < len(tokens) and tokens[command_start] == "запиши":
                 return "note", command_start + 1, tokens
@@ -107,18 +151,32 @@ def contains_assistant_command(
     text: str,
     wake_word: str,
     question_command: str,
+    *,
+    tolerate_asr_error: bool = False,
 ) -> bool:
     """Whether speech contains an explicit question or note activation."""
-    return _assistant_activation(text, wake_word, question_command) is not None
+    return _assistant_activation(
+        text,
+        wake_word,
+        question_command,
+        tolerate_asr_error=tolerate_asr_error,
+    ) is not None
 
 
 def strip_assistant_command(
     text: str,
     wake_word: str,
     question_command: str,
+    *,
+    tolerate_asr_error: bool = False,
 ) -> str:
     """Remove the explicit activation while preserving the note intent."""
-    activation = _assistant_activation(text, wake_word, question_command)
+    activation = _assistant_activation(
+        text,
+        wake_word,
+        question_command,
+        tolerate_asr_error=tolerate_asr_error,
+    )
     if activation:
         kind, cut, tokens = activation
         remainder = " ".join(tokens[cut:]).strip()

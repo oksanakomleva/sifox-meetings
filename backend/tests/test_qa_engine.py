@@ -82,6 +82,31 @@ class TestAssistantActivation:
             COMMAND,
         )
 
+    def test_confirmation_can_tolerate_one_asr_error_per_command_token(self):
+        asr_text = "Протоколе подскажу как называется проект"
+
+        assert not contains_assistant_command(asr_text, WAKE, COMMAND)
+        assert contains_assistant_command(
+            asr_text,
+            WAKE,
+            COMMAND,
+            tolerate_asr_error=True,
+        )
+        assert strip_assistant_command(
+            asr_text,
+            WAKE,
+            COMMAND,
+            tolerate_asr_error=True,
+        ) == "как называется проект"
+
+    def test_tolerant_confirmation_still_rejects_ordinary_speech(self):
+        assert not contains_assistant_command(
+            "Я успела починить его вызов и проверить задержку",
+            WAKE,
+            COMMAND,
+            tolerate_asr_error=True,
+        )
+
     def test_explicit_note_command_still_activates(self):
         assert contains_assistant_command(
             "Протоколлер, запиши отправить договор",

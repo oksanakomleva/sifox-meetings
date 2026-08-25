@@ -143,7 +143,7 @@ def test_note_command_is_saved_and_acknowledged(monkeypatch):
 
 def test_complete_wake_question_requires_independent_confirmation(monkeypatch):
     transcribe = AsyncMock(
-        return_value="Протоколлер, подскажи, какой дедлайн?"
+        return_value="Протоколе подскажу какой дедлайн?"
     )
     answer_question = AsyncMock(
         return_value=("Дедлайн в пятницу.", ["meeting"], [], "дедлайн")

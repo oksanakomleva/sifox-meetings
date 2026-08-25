@@ -538,6 +538,7 @@ async def _handle_question(
             confirmed_text,
             config.LIVE_WAKE_WORD,
             config.LIVE_WAKE_COMMAND,
+            tolerate_asr_error=True,
         ):
             rejected = _diagnostics.get(meeting_id, {}).get(
                 "activation_rejections",
@@ -560,6 +561,7 @@ async def _handle_question(
             confirmed_text,
             config.LIVE_WAKE_WORD,
             config.LIVE_WAKE_COMMAND,
+            tolerate_asr_error=True,
         )
         if not question or len(question) < 3:
             logger.info(
