@@ -17,6 +17,7 @@ from services.recorder import (
     _fmt_time,
     _find_pids_with_environment,
     _collect_runtime_snapshot,
+    _create_pulse_sink,
 )
 from services import recorder
 
@@ -204,6 +205,33 @@ class TestConfirmAudioCaptureStarted:
                     _Capture(parec_code, ffmpeg_code), tmp_path / "audio.wav"
                 )
             )
+
+
+class _PulseModuleProc:
+    def __init__(self, returncode, stdout=b"", stderr=b""):
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+
+    async def communicate(self):
+        return self._stdout, self._stderr
+
+
+class TestCreatePulseSink:
+    def test_returns_module_id(self, monkeypatch):
+        create = AsyncMock(return_value=_PulseModuleProc(0, b"42\n"))
+        monkeypatch.setattr(recorder.asyncio, "create_subprocess_exec", create)
+
+        assert asyncio.run(_create_pulse_sink("meet_test")) == 42
+
+    def test_surfaces_pactl_failure(self, monkeypatch):
+        create = AsyncMock(
+            return_value=_PulseModuleProc(1, stderr=b"Connection refused")
+        )
+        monkeypatch.setattr(recorder.asyncio, "create_subprocess_exec", create)
+
+        with pytest.raises(RuntimeError, match="Connection refused"):
+            asyncio.run(_create_pulse_sink("meet_test"))
 
 
 def test_claim_uses_joining_until_capture_is_confirmed():

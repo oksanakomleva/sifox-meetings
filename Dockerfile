@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # TTS engine for E2E test audio generation
     espeak-ng \
     # Build tools
-    curl ca-certificates gosu \
+    curl ca-certificates gosu tini \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Node.js for frontend build ────────────────────────────────────────────────
@@ -101,4 +101,4 @@ ENV PYTHONPATH=/app/backend
 
 EXPOSE 8000
 
-ENTRYPOINT ["./entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "./entrypoint.sh"]

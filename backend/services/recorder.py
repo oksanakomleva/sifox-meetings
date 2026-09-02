@@ -1703,20 +1703,27 @@ async def _convert_to_mp3(src_path: Path, mp3_path: Path, *, mono: bool = True) 
 
 # ── PulseAudio ────────────────────────────────────────────────────────────────
 
-async def _create_pulse_sink(name: str) -> int | None:
+async def _create_pulse_sink(name: str) -> int:
     """Load a null-sink and return its module index (needed to unload it later —
     unloading is what stops PulseAudio leaking file descriptors across recordings)."""
     proc = await asyncio.create_subprocess_exec(
         "pactl", "load-module", "module-null-sink",
         f"sink_name={name}", f"sink_properties=device.description={name}",
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
-    out, _ = await proc.communicate()
+    out, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        tail = stderr.decode(errors="replace")[-500:] if stderr else ""
+        raise RuntimeError(
+            f"could not create PulseAudio sink {name} ({proc.returncode}): {tail}"
+        )
     try:
         return int(out.decode().strip())
-    except (ValueError, AttributeError):
-        return None
+    except (ValueError, AttributeError) as exc:
+        raise RuntimeError(
+            f"PulseAudio sink {name} returned no module id"
+        ) from exc
 
 
 async def _create_pulse_source(name: str, master_monitor: str) -> int:

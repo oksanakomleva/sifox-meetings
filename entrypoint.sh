@@ -67,6 +67,35 @@ mkdir -p /tmp/pulse-runtime
 chmod 700 /tmp/pulse-runtime
 export PULSE_RUNTIME_PATH=/tmp/pulse-runtime
 
+# Railway may restart the application process while a background PulseAudio
+# process from the previous run is still alive.  In that state a new daemon
+# refuses to start ("Daemon already running"), but the application still comes
+# up and every later `parec` exits immediately.  Stop only the daemon referenced
+# by our private runtime directory and remove its stale socket before starting a
+# fresh instance.
+stop_stale_pulseaudio() {
+  local pid_file="${PULSE_RUNTIME_PATH}/pid"
+  local pulse_pid=""
+
+  if [[ -r "${pid_file}" ]]; then
+    pulse_pid="$(tr -dc '0-9' < "${pid_file}")"
+  fi
+  if [[ -n "${pulse_pid}" ]] && kill -0 "${pulse_pid}" 2>/dev/null; then
+    echo "Stopping stale PulseAudio process ${pulse_pid}"
+    kill -TERM "${pulse_pid}" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 "${pulse_pid}" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "${pulse_pid}" 2>/dev/null; then
+      kill -KILL "${pulse_pid}" 2>/dev/null || true
+    fi
+  fi
+  rm -f "${pid_file}" /tmp/pulse.sock
+}
+
+stop_stale_pulseaudio
+
 # Start PulseAudio in a subshell so HOME=/tmp doesn't leak to Chromium/Playwright
 (
   export HOME=/tmp
@@ -81,7 +110,22 @@ export PULSE_RUNTIME_PATH=/tmp/pulse-runtime
 ) &
 
 export PULSE_SERVER=unix:/tmp/pulse.sock
-sleep 2
+
+# Do not report the service healthy until the audio server actually accepts
+# commands.  A blind sleep previously let the web app start with a dead audio
+# backend, so the failure surfaced only after the bot had joined a meeting.
+pulse_ready() {
+  pactl info >/dev/null 2>&1
+}
+
+for _ in $(seq 1 30); do
+  pulse_ready && break
+  sleep 0.2
+done
+if ! pulse_ready; then
+  echo "FATAL: PulseAudio socket ${PULSE_SERVER} did not become ready" >&2
+  exit 1
+fi
 
 echo "Xvfb and PulseAudio started"
 
