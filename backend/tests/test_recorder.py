@@ -17,6 +17,7 @@ from services.recorder import (
     _fmt_time,
     _find_pids_with_environment,
     _collect_runtime_snapshot,
+    _close_browser_runtime,
     _create_pulse_sink,
 )
 from services import recorder
@@ -54,6 +55,40 @@ class TestRecorderProcessCleanup:
         assert "load=0.10 0.20 0.30 1/10 1" in result
         assert "chrome:2" in result
         assert "ffmpeg:1" in result
+
+    def test_successful_playwright_close_still_sweeps_detached_children(
+        self, monkeypatch
+    ):
+        browser = AsyncMock()
+        playwright = AsyncMock()
+        sweep = AsyncMock()
+        monkeypatch.setattr(recorder, "_terminate_stuck_browser", sweep)
+
+        asyncio.run(
+            _close_browser_runtime(browser, playwright, "meet_target")
+        )
+
+        browser.close.assert_awaited_once()
+        playwright.stop.assert_awaited_once()
+        sweep.assert_awaited_once_with("meet_target")
+
+    def test_failed_playwright_close_still_sweeps_detached_children(
+        self, monkeypatch
+    ):
+        browser = AsyncMock()
+        browser.close.side_effect = RuntimeError("close failed")
+        sweep = AsyncMock()
+        monkeypatch.setattr(recorder, "_terminate_stuck_browser", sweep)
+
+        asyncio.run(_close_browser_runtime(browser, None, "meet_target"))
+
+        sweep.assert_awaited_once_with("meet_target")
+
+    def test_chromium_crash_reporting_is_disabled(self):
+        source = Path(recorder.__file__).read_text(encoding="utf-8")
+
+        assert '"--disable-breakpad"' in source
+        assert '"--disable-crash-reporter"' in source
 
 
 class _Seg:

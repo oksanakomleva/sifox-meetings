@@ -136,6 +136,31 @@ async def _terminate_stuck_browser(sink_name: str) -> None:
             pass
 
 
+async def _close_browser_runtime(browser, pw, sink_name: str) -> None:
+    """Close Playwright, then remove any meeting-specific Chromium leftovers.
+
+    ``browser.close()`` can report success while detached Chromium/crashpad
+    children remain alive. Those processes accumulated across meetings until
+    the container reached its PID limit, at which point unrelated uploads and
+    new recorder launches failed. The environment marker is unique per meeting,
+    so the final sweep cannot touch another active recording.
+    """
+    if browser:
+        try:
+            await asyncio.wait_for(browser.close(), timeout=15)
+        except Exception as exc:
+            logger.warning("Final browser close failed for %s: %s", sink_name, exc)
+    if pw:
+        try:
+            await asyncio.wait_for(pw.stop(), timeout=15)
+        except Exception as exc:
+            logger.warning("Final Playwright stop failed for %s: %s", sink_name, exc)
+
+    # Always verify the process tree. A successful Playwright close is not proof
+    # that detached crashpad/render processes exited.
+    await _terminate_stuck_browser(sink_name)
+
+
 class EmptyRecordingError(Exception):
     """Raised when a recording has no usable audio/speech (silence). Lets callers
     distinguish a benign 'nobody showed up' from a real failure."""
@@ -522,6 +547,8 @@ async def _record_pipeline(meeting_id: str) -> None:
         )
         chromium_args = [
             "--disable-dev-shm-usage",
+            "--disable-breakpad",
+            "--disable-crash-reporter",
             "--autoplay-policy=no-user-gesture-required",
             "--use-fake-ui-for-media-stream",
         ]
@@ -687,18 +714,9 @@ async def _record_pipeline(meeting_id: str) -> None:
         await _stop_audio_capture(audio_proc)
         audio_proc = None
 
-        try:
-            await asyncio.wait_for(browser.close(), timeout=15)
-        except Exception as exc:
-            logger.warning("Browser close timed out for %s: %s", meeting_id[:8], exc)
-        else:
-            browser = None
-        try:
-            await asyncio.wait_for(pw.stop(), timeout=15)
-        except Exception as exc:
-            logger.warning("Playwright stop timed out for %s: %s", meeting_id[:8], exc)
-        else:
-            pw = None
+        await _close_browser_runtime(browser, pw, sink_name)
+        browser = None
+        pw = None
 
         # 8–9. Transcribe → store → MP3 → analyze (shared with extension uploads)
         await transcribe_and_analyze(
@@ -736,27 +754,10 @@ async def _record_pipeline(meeting_id: str) -> None:
             )
         await models.update_meeting_status(meeting_id, "error", str(e)[:500])
     finally:
-        browser_cleanup_failed = False
         if audio_proc and audio_proc.returncode is None:
             await _stop_audio_capture(audio_proc)
-        if browser:
-            try:
-                await asyncio.wait_for(browser.close(), timeout=15)
-            except Exception as exc:
-                browser_cleanup_failed = True
-                logger.warning(
-                    "Final browser close failed for %s: %s", meeting_id[:8], exc
-                )
-        if pw:
-            try:
-                await asyncio.wait_for(pw.stop(), timeout=15)
-            except Exception as exc:
-                browser_cleanup_failed = True
-                logger.warning(
-                    "Final Playwright stop failed for %s: %s", meeting_id[:8], exc
-                )
-        if browser_cleanup_failed:
-            await _terminate_stuck_browser(sink_name)
+        if browser or pw:
+            await _close_browser_runtime(browser, pw, sink_name)
         if tracker:
             tracker.cancel()
             await asyncio.gather(tracker, return_exceptions=True)
