@@ -108,6 +108,15 @@ async def start_resumable_upload(body: StartUploadRequest, user: ExtensionUser):
     )
 
 
+@router.get("/upload/{meeting_id}/status")
+async def resumable_upload_status(meeting_id: str, user: ExtensionUser):
+    from services.uploads import get_chunked_upload_status
+    return await get_chunked_upload_status(
+        meeting_id,
+        recorder_user_id=user["user_id"],
+    )
+
+
 @router.post("/upload/{meeting_id}/chunk")
 async def upload_chunk(
     meeting_id: str,

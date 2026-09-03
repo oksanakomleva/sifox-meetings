@@ -71,6 +71,7 @@ async function getRecordingState() {
         interrupted: true,
         recoverable,
         tab: state.capturedTab || null,
+        savedUpload: state.pendingUpload || null,
       }
     }
   }
@@ -80,6 +81,7 @@ async function getRecordingState() {
     interrupted: !!state.recordingInterrupted,
     recoverable: !!state.interruptionRecoverable,
     tab: state.capturedTab || null,
+    savedUpload: state.pendingUpload || null,
   }
 }
 
@@ -187,6 +189,26 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return
       }
 
+      if (msg.type === 'discardInterrupted') {
+        await ensureOffscreen()
+        const stored = await chrome.storage.local.get(['capturedBaseUrl', 'pendingUpload'])
+        const baseUrl = stored.capturedBaseUrl || stored.pendingUpload?.baseUrl
+        const sessionToken = baseUrl ? await getSessionToken(baseUrl) : null
+        const result = await chrome.runtime.sendMessage({
+          target: 'offscreen',
+          type: 'discard',
+          sessionToken,
+        })
+        if (!result || !result.ok) {
+          sendResponse(result || { ok: false, error: 'Не удалось удалить локальную запись' })
+          return
+        }
+        await setRecording(false)
+        await chrome.storage.local.remove(['capturedTabId', 'capturedTab', 'capturedBaseUrl'])
+        sendResponse(result)
+        return
+      }
+
       if (msg.type === 'recording-ended') {
         // Offscreen auto-stopped (e.g. captured tab was closed) and uploaded.
         if (msg.result && msg.result.ok) {
@@ -227,7 +249,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return
       }
     } catch (e) {
-      if (msg.type !== 'stop') await setRecording(false)
+      if (!['stop', 'discardInterrupted'].includes(msg.type)) await setRecording(false)
       sendResponse({ ok: false, error: String(e && e.message || e) })
     }
   })()

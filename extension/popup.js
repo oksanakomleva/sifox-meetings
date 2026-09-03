@@ -166,6 +166,8 @@ async function refreshRecorderState(force = false) {
 
 function reflect(st = {}) {
   const btn = $('toggle')
+  const discard = $('discardSaved')
+  discard.classList.toggle('hidden', !(st.interrupted && st.recoverable))
   if ((st.recording || st.interrupted) && st.tab) {
     // Show the tab actually being recorded (may differ from the current active tab).
     fillTabCard(st.tab)
@@ -175,7 +177,11 @@ function reflect(st = {}) {
     btn.className = 'warning'
     if (st.recoverable) {
       btn.textContent = 'Отправить сохранённую запись'
-      $('recStatus').innerHTML = '<strong>Запись неожиданно прервалась</strong><br>Chrome остановил запись. Всё аудио, которое удалось сохранить до сбоя, осталось на устройстве. Нажмите «Отправить сохранённую запись», чтобы загрузить его в Sifox.'
+      const savedAt = st.savedUpload?.startedAt
+        ? new Date(st.savedUpload.startedAt).toLocaleString('ru-RU')
+        : ''
+      const when = savedAt ? `<br><span class="muted">Начало записи: ${savedAt}</span>` : ''
+      $('recStatus').innerHTML = '<strong>Запись неожиданно прервалась</strong><br>Chrome остановил запись. Всё аудио, которое удалось сохранить до сбоя, осталось на устройстве. Нажмите «Отправить сохранённую запись», чтобы загрузить его в Sifox.' + when
     } else {
       btn.textContent = 'Сбросить ошибку'
       $('recStatus').textContent = '⚠ Запись прервана до сохранения аудио. Начните новую запись.'
@@ -280,6 +286,24 @@ $('toggle').addEventListener('click', async () => {
     await refreshRecorderState(true)
   }
   else $('recStatus').textContent = 'Не удалось начать: ' + (res && res.error || '')
+  } finally {
+    actionInProgress = false
+  }
+})
+
+$('discardSaved').addEventListener('click', async () => {
+  if (actionInProgress) return
+  if (!confirm('Удалить сохранённую запись с этого устройства? Восстановить её будет невозможно.')) return
+  actionInProgress = true
+  try {
+    $('recStatus').textContent = 'Удаляю сохранённую запись…'
+    const result = await chrome.runtime.sendMessage({ type: 'discardInterrupted' })
+    if (result && result.ok) {
+      reflectAndRemember({})
+      $('recStatus').textContent = 'Сохранённая запись удалена. Можно начать новую запись.'
+    } else {
+      $('recStatus').textContent = 'Не удалось удалить запись: ' + (result && result.error || '')
+    }
   } finally {
     actionInProgress = false
   }

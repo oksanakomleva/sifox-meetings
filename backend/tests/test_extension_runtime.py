@@ -30,4 +30,22 @@ def test_extension_version_notifies_affected_users():
         (EXTENSION / "manifest.json").read_text(encoding="utf-8")
     )
 
-    assert manifest["version"] == "0.3.2"
+    assert manifest["version"] == "0.3.3"
+    assert "unlimitedStorage" in manifest["permissions"]
+
+
+def test_extension_keeps_a_complete_copy_until_server_completion():
+    source = (EXTENSION / "offscreen.js").read_text(encoding="utf-8")
+
+    assert "acknowledged: false" in source
+    assert "replaceServerUploadSession" in source
+    assert "completeLocalUpload" in source
+    assert "await deleteChunks(uploadCtx.localRecordingId" in source
+
+
+def test_extension_exposes_explicit_local_recording_discard():
+    background = (EXTENSION / "background.js").read_text(encoding="utf-8")
+    popup = (EXTENSION / "popup.js").read_text(encoding="utf-8")
+
+    assert "discardInterrupted" in background
+    assert "discardInterrupted" in popup

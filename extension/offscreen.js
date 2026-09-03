@@ -1,6 +1,6 @@
 // Captures tab audio + microphone and incrementally uploads webm/opus chunks.
-// Unacknowledged chunks live in IndexedDB, so an offscreen/service-worker
-// restart does not destroy the only copy of the recording.
+// The complete recording lives in IndexedDB until the server confirms finish,
+// so an offscreen/service-worker/server restart does not destroy its only copy.
 
 let recorder = null
 let flushPromise = null
@@ -51,8 +51,30 @@ async function runStore(mode, operation) {
 }
 
 function persistChunk(meetingId, seq, blob) {
-  const key = `${meetingId}:${String(seq).padStart(10, '0')}`
-  return runStore('readwrite', store => store.put({ key, meetingId, seq, blob }))
+  const key = chunkKey(meetingId, seq)
+  return runStore('readwrite', store => store.put({
+    key,
+    meetingId,
+    seq,
+    blob,
+    acknowledged: false,
+  }))
+}
+
+function chunkKey(meetingId, seq) {
+  return `${meetingId}:${String(seq).padStart(10, '0')}`
+}
+
+async function getChunk(meetingId, seq) {
+  const db = await openChunkDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CHUNK_STORE, 'readonly')
+    const req = tx.objectStore(CHUNK_STORE).get(chunkKey(meetingId, seq))
+    req.onsuccess = () => resolve(req.result || null)
+    req.onerror = () => reject(req.error)
+    tx.oncomplete = () => db.close()
+    tx.onerror = () => { db.close(); reject(tx.error) }
+  })
 }
 
 async function listChunks(meetingId) {
@@ -68,8 +90,81 @@ async function listChunks(meetingId) {
   })
 }
 
-function deleteChunk(key) {
-  return runStore('readwrite', store => store.delete(key))
+function putChunk(chunk) {
+  return runStore('readwrite', store => store.put(chunk))
+}
+
+async function deleteChunks(meetingId) {
+  const chunks = await listChunks(meetingId)
+  if (!chunks.length) return { count: 0, bytes: 0 }
+  const bytes = chunks.reduce((sum, item) => sum + (item.blob?.size || 0), 0)
+  await runStore('readwrite', store => {
+    for (const item of chunks) store.delete(item.key)
+  })
+  return { count: chunks.length, bytes }
+}
+
+async function resetChunkAcknowledgements(meetingId) {
+  const chunks = await listChunks(meetingId)
+  const changed = []
+  for (const chunk of chunks) {
+    if (chunk.acknowledged) {
+      chunk.acknowledged = false
+      changed.push(chunk)
+    }
+  }
+  if (changed.length) {
+    await runStore('readwrite', store => {
+      for (const chunk of changed) store.put(chunk)
+    })
+  }
+  return chunks
+}
+
+async function reconcileChunkAcknowledgements(meetingId, serverOffset) {
+  const chunks = await listChunks(meetingId)
+  if (!chunks.length) return null
+  // New recorder versions retain the complete stream from sequence zero. Old
+  // versions may only have a tail; their persisted offset remains authoritative.
+  if (chunks[0].seq !== 0) return chunks.find(chunk => !chunk.acknowledged)?.seq ?? null
+  let cumulative = 0
+  let offsetAligned = serverOffset === 0
+  const changed = []
+  for (const chunk of chunks) {
+    const end = cumulative + (chunk.blob?.size || 0)
+    if (end === serverOffset) offsetAligned = true
+    const acknowledged = end <= serverOffset
+    if (!!chunk.acknowledged !== acknowledged) {
+      chunk.acknowledged = acknowledged
+      changed.push(chunk)
+    }
+    cumulative = end
+  }
+  if (serverOffset > cumulative) {
+    throw new Error('Сервер принял больше данных, чем сохранилось на устройстве')
+  }
+  if (!offsetAligned) {
+    const error = new Error('Сервер сохранил неполный фрагмент записи')
+    error.code = 'unaligned_server_offset'
+    throw error
+  }
+  if (changed.length) {
+    await runStore('readwrite', store => {
+      for (const chunk of changed) store.put(chunk)
+    })
+  }
+  return chunks.find(chunk => !chunk.acknowledged)?.seq ?? null
+}
+
+async function localUploadInfo(meetingId) {
+  const chunks = meetingId ? await listChunks(meetingId) : []
+  return {
+    count: chunks.length,
+    bytes: chunks.reduce((sum, item) => sum + (item.blob?.size || 0), 0),
+    firstSequence: chunks.length ? chunks[0].seq : null,
+    lastSequence: chunks.length ? chunks[chunks.length - 1].seq : null,
+    completeFromStart: !!chunks.length && chunks[0].seq === 0,
+  }
 }
 
 async function storageRequest(type, payload = {}) {
@@ -106,6 +201,7 @@ async function restoreUploadContext(freshSessionToken) {
   if (!pendingUpload || !pendingUpload.meetingId) return false
   uploadCtx = {
     ...pendingUpload,
+    localRecordingId: pendingUpload.localRecordingId || pendingUpload.meetingId,
     sessionToken: freshSessionToken || pendingUpload.sessionToken,
   }
   return true
@@ -149,6 +245,33 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       ok: true,
       active: !!stopPromise || !!(recorder && recorder.state !== 'inactive'),
     })
+    return
+  }
+
+  if (msg.type === 'recovery-info') {
+    restoreUploadContext(msg.sessionToken)
+      .then(found => found
+        ? localUploadInfo(uploadCtx.localRecordingId || uploadCtx.meetingId)
+        : { count: 0, bytes: 0, completeFromStart: false })
+      .then(info => sendResponse({ ok: true, info }))
+      .catch(e => sendResponse({ ok: false, error: String(e && e.message || e) }))
+    return true
+  }
+
+  if (msg.type === 'discard') {
+    restoreUploadContext(msg.sessionToken)
+      .then(async found => {
+        if (!found) return { count: 0, bytes: 0 }
+        const localId = uploadCtx.localRecordingId || uploadCtx.meetingId
+        await abandonServerUpload(uploadCtx.meetingId)
+        const removed = await deleteChunks(localId)
+        await storageRemove('pendingUpload')
+        uploadCtx = {}
+        return removed
+      })
+      .then(removed => sendResponse({ ok: true, ...removed }))
+      .catch(e => sendResponse({ ok: false, error: String(e && e.message || e) }))
+    return true
   }
 })
 
@@ -164,6 +287,10 @@ async function startCapture({ streamId, sessionToken, baseUrl, title, sourceUrl 
   volatileChunks = new Map()
   nextChunkSeq = 0
   streams = []
+
+  // Ask Chrome to avoid evicting the only local copy under storage pressure.
+  // This is best-effort: recording still works when persistent storage is denied.
+  try { await navigator.storage?.persist?.() } catch (_) {}
 
   // Tab audio via the stream id minted by the service worker.
   const tabStream = await navigator.mediaDevices.getUserMedia({
@@ -280,6 +407,17 @@ function performStopAndUpload() {
 }
 
 async function startUploadSession() {
+  const data = await createServerUploadSession()
+  uploadCtx.meetingId = data.meeting_id
+  uploadCtx.localRecordingId = data.meeting_id
+  uploadCtx.offset = data.offset || 0
+  uploadCtx.lastError = null
+  uploadCtx.recoveryCount = 0
+  uploadCtx.nextUploadSeq = 0
+  await saveUploadContext()
+}
+
+async function createServerUploadSession() {
   const { sessionToken, baseUrl, title, sourceUrl, startedAt } = uploadCtx
   const res = await fetchWithTimeout(`${baseUrl}/api/extension/upload/start`, {
     method: 'POST',
@@ -293,11 +431,7 @@ async function startUploadSession() {
     const t = await res.text().catch(() => '')
     throw new Error(`Не удалось начать загрузку: HTTP ${res.status}: ${t.slice(0, 200)}`)
   }
-  const data = await res.json()
-  uploadCtx.meetingId = data.meeting_id
-  uploadCtx.offset = data.offset || 0
-  uploadCtx.lastError = null
-  await saveUploadContext()
+  return await res.json()
 }
 
 async function cancelUploadSession() {
@@ -307,16 +441,36 @@ async function cancelUploadSession() {
     await fetchWithTimeout(`${baseUrl}/api/extension/upload/${meetingId}/cancel`, {
       method: 'POST',
       headers: { 'X-Session-Token': sessionToken },
-    })
+    }, 5_000)
   } finally {
+    await deleteChunks(uploadCtx.localRecordingId || meetingId)
     await storageRemove('pendingUpload')
+  }
+}
+
+async function abandonServerUpload(meetingId) {
+  const { sessionToken, baseUrl } = uploadCtx
+  if (!meetingId || !sessionToken || !baseUrl) return
+  try {
+    await fetchWithTimeout(`${baseUrl}/api/extension/upload/${meetingId}/cancel`, {
+      method: 'POST',
+      headers: { 'X-Session-Token': sessionToken },
+    })
+  } catch (error) {
+    // The old session may already be gone or the network may be offline. Local
+    // recovery/discard must remain possible in either case.
+    console.warn('Could not close old server upload:', error)
   }
 }
 
 async function persistVolatileChunks() {
   const pending = [...volatileChunks.entries()].sort((a, b) => a[0] - b[0])
   for (const [seq, blob] of pending) {
-    await persistChunk(uploadCtx.meetingId, seq, blob)
+    await persistChunk(
+      uploadCtx.localRecordingId || uploadCtx.meetingId,
+      seq,
+      blob,
+    )
     volatileChunks.delete(seq)
   }
 }
@@ -336,9 +490,22 @@ function queueFlush() {
 
 async function flushPending() {
   while (true) {
-    const stored = await listChunks(uploadCtx.meetingId)
-    if (!stored.length) return
-    const currentChunk = stored[0]
+    if (uploadCtx.serverCompleted) return
+    const localId = uploadCtx.localRecordingId || uploadCtx.meetingId
+    if (!Number.isInteger(uploadCtx.nextUploadSeq)) {
+      const stored = await listChunks(localId)
+      const firstPending = stored.find(chunk => !chunk.acknowledged)
+      if (!firstPending) return
+      uploadCtx.nextUploadSeq = firstPending.seq
+      await saveUploadContext()
+    }
+    const currentChunk = await getChunk(localId, uploadCtx.nextUploadSeq)
+    if (!currentChunk) return
+    if (currentChunk.acknowledged) {
+      uploadCtx.nextUploadSeq = currentChunk.seq + 1
+      await saveUploadContext()
+      continue
+    }
     const body = await currentChunk.blob.arrayBuffer()
     const { sessionToken, baseUrl, meetingId, offset } = uploadCtx
     const res = await fetchWithTimeout(
@@ -353,15 +520,134 @@ async function flushPending() {
       },
     )
     if (!res.ok) {
+      if (res.status === 409) {
+        await handleUploadConflict(res)
+        continue
+      }
       const t = await res.text().catch(() => '')
       throw new Error(`Загрузка части записи: HTTP ${res.status}: ${t.slice(0, 200)}`)
     }
     const data = await res.json()
+    currentChunk.acknowledged = true
+    await putChunk(currentChunk)
     uploadCtx.offset = data.offset
+    uploadCtx.nextUploadSeq = currentChunk.seq + 1
     uploadCtx.lastError = null
-    await deleteChunk(currentChunk.key)
     await saveUploadContext()
   }
+}
+
+async function fetchUploadStatus() {
+  const { sessionToken, baseUrl, meetingId } = uploadCtx
+  const res = await fetchWithTimeout(
+    `${baseUrl}/api/extension/upload/${meetingId}/status`,
+    { headers: { 'X-Session-Token': sessionToken } },
+  )
+  if (res.status === 404) return null
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`Не удалось проверить загрузку: HTTP ${res.status}: ${text.slice(0, 200)}`)
+  }
+  return await res.json()
+}
+
+async function replaceServerUploadSession() {
+  const localId = uploadCtx.localRecordingId || uploadCtx.meetingId
+  const info = await localUploadInfo(localId)
+  if (!info.completeFromStart) {
+    throw new Error(
+      'Старая серверная загрузка закрыта, а на устройстве осталось только окончание записи. '
+      + 'Автоматическая повторная отправка невозможна; запись можно удалить.',
+    )
+  }
+  const chunks = await resetChunkAcknowledgements(localId)
+  const previousMeetingId = uploadCtx.meetingId
+  uploadCtx.nextUploadSeq = chunks[0].seq
+  await saveUploadContext()
+  await abandonServerUpload(previousMeetingId)
+  const data = await createServerUploadSession()
+  uploadCtx.meetingId = data.meeting_id
+  uploadCtx.localRecordingId = localId
+  uploadCtx.offset = data.offset || 0
+  uploadCtx.serverCompleted = false
+  uploadCtx.nextUploadSeq = chunks[0].seq
+  uploadCtx.recoveryCount = (uploadCtx.recoveryCount || 0) + 1
+  uploadCtx.recoveredFromMeetingId = previousMeetingId
+  uploadCtx.lastError = null
+  await saveUploadContext()
+}
+
+async function recoverOrReconcileUpload() {
+  const status = await fetchUploadStatus()
+  if (status && status.completed) {
+    uploadCtx.serverCompleted = true
+    await saveUploadContext()
+    return
+  }
+  if (status && status.accepting_chunks) {
+    const localId = uploadCtx.localRecordingId || uploadCtx.meetingId
+    const info = await localUploadInfo(localId)
+    if (!info.completeFromStart && status.offset !== uploadCtx.offset) {
+      throw new Error(
+        'Серверная часть старой записи больше не совпадает с данными на устройстве. '
+        + 'Отправлять только окончание небезопасно; запись можно удалить.',
+      )
+    }
+    uploadCtx.offset = status.offset || 0
+    try {
+      uploadCtx.nextUploadSeq = await reconcileChunkAcknowledgements(
+        localId,
+        uploadCtx.offset,
+      )
+    } catch (error) {
+      if (error && error.code === 'unaligned_server_offset') {
+        await replaceServerUploadSession()
+        return
+      }
+      throw error
+    }
+    await saveUploadContext()
+    return
+  }
+  await replaceServerUploadSession()
+}
+
+async function handleUploadConflict(response) {
+  const data = await response.json().catch(() => null)
+  const expected = data && data.detail && data.detail.expected_offset
+  if (Number.isInteger(expected) && expected >= 0) {
+    const localId = uploadCtx.localRecordingId || uploadCtx.meetingId
+    const info = await localUploadInfo(localId)
+    if (!info.completeFromStart && expected !== uploadCtx.offset) {
+      throw new Error(
+        'Серверная часть старой записи больше не совпадает с данными на устройстве. '
+        + 'Отправлять только окончание небезопасно; запись можно удалить.',
+      )
+    }
+    uploadCtx.offset = expected
+    try {
+      uploadCtx.nextUploadSeq = await reconcileChunkAcknowledgements(
+        localId,
+        expected,
+      )
+    } catch (error) {
+      if (error && error.code === 'unaligned_server_offset') {
+        await replaceServerUploadSession()
+        return
+      }
+      throw error
+    }
+    await saveUploadContext()
+    return
+  }
+  await recoverOrReconcileUpload()
+}
+
+async function completeLocalUpload(meetingId) {
+  await deleteChunks(uploadCtx.localRecordingId || meetingId)
+  await storageRemove('pendingUpload')
+  uploadCtx = {}
+  return { ok: true, meetingId }
 }
 
 async function finishUpload() {
@@ -370,7 +656,12 @@ async function finishUpload() {
   }).then(() => persistVolatileChunks())
   await persistChain
   await queueFlush()
-  const remaining = await listChunks(uploadCtx.meetingId)
+  if (uploadCtx.serverCompleted) {
+    return await completeLocalUpload(uploadCtx.meetingId)
+  }
+  const remaining = (await listChunks(
+    uploadCtx.localRecordingId || uploadCtx.meetingId,
+  )).filter(chunk => !chunk.acknowledged)
   if (remaining.length) {
     return {
       ok: false,
@@ -379,39 +670,35 @@ async function finishUpload() {
     }
   }
 
-  const { sessionToken, baseUrl, meetingId, offset } = uploadCtx
-  let res = await fetchWithTimeout(`${baseUrl}/api/extension/upload/${meetingId}/finish`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Session-Token': sessionToken,
-    },
-    body: JSON.stringify({ total_bytes: offset }),
-  })
-  if (res.status === 409) {
-    const data = await res.json().catch(() => null)
-    const expected = data && data.detail && data.detail.expected_offset
-    if (Number.isInteger(expected) && expected > offset) {
-      uploadCtx.offset = expected
-      await saveUploadContext()
-      res = await fetchWithTimeout(`${baseUrl}/api/extension/upload/${meetingId}/finish`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Session-Token': sessionToken,
-        },
-        body: JSON.stringify({ total_bytes: expected }),
-      })
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { sessionToken, baseUrl, meetingId, offset } = uploadCtx
+    const res = await fetchWithTimeout(`${baseUrl}/api/extension/upload/${meetingId}/finish`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Session-Token': sessionToken,
+      },
+      body: JSON.stringify({ total_bytes: offset }),
+    })
+    if (res.ok) return await completeLocalUpload(meetingId)
+    if (res.status === 409) {
+      await handleUploadConflict(res)
+      if (uploadCtx.serverCompleted) {
+        return await completeLocalUpload(uploadCtx.meetingId)
+      }
+      await flushPending()
+      continue
     }
-  }
-  if (!res.ok) {
-    const t = await res.text().catch(() => '')
+    const text = await res.text().catch(() => '')
     return {
       ok: false,
       retryable: true,
-      error: `Завершение загрузки: HTTP ${res.status}: ${t.slice(0, 200)}`,
+      error: `Завершение загрузки: HTTP ${res.status}: ${text.slice(0, 200)}`,
     }
   }
-  await storageRemove('pendingUpload')
-  return { ok: true, meetingId }
+  return {
+    ok: false,
+    retryable: true,
+    error: 'Не удалось согласовать состояние загрузки после трёх попыток.',
+  }
 }

@@ -207,8 +207,49 @@ async def _owned_upload(meeting_id: str, recorder_user_id: int) -> dict:
     if meeting.get("recorder_user_id") != recorder_user_id:
         raise HTTPException(403, "Upload belongs to another user")
     if meeting.get("status") != "uploading":
-        raise HTTPException(409, "Upload is no longer accepting chunks")
+        raise HTTPException(
+            409,
+            detail={
+                "code": "upload_closed",
+                "message": "Upload is no longer accepting chunks",
+                "status": meeting.get("status"),
+            },
+        )
     return meeting
+
+
+async def get_chunked_upload_status(
+    meeting_id: str,
+    *,
+    recorder_user_id: int,
+) -> dict[str, Any]:
+    """Return resumable state without changing or finalizing the upload."""
+    meeting = await models.get_meeting(meeting_id)
+    if not meeting:
+        raise HTTPException(404, detail={"code": "upload_not_found"})
+    if meeting.get("recorder_user_id") != recorder_user_id:
+        raise HTTPException(403, "Upload belongs to another user")
+
+    status = str(meeting.get("status") or "unknown")
+    accepting = status == "uploading"
+    offset = 0
+    if accepting:
+        part_path = Path(config.AUDIO_DIR) / f"{meeting_id}.webm.part"
+        try:
+            # size() returns -1 for a missing part; append can safely recreate
+            # an empty file when the client still has the complete recording.
+            offset = max(0, await fsio.size(part_path))
+        except (asyncio.TimeoutError, OSError) as exc:
+            raise HTTPException(503, "Storage temporarily unavailable") from exc
+
+    return {
+        "meeting_id": meeting_id,
+        "status": status,
+        "accepting_chunks": accepting,
+        "offset": offset,
+        "completed": status in ("transcribing", "analyzing", "done"),
+        "error": meeting.get("error_message"),
+    }
 
 
 async def append_upload_chunk(
@@ -279,7 +320,14 @@ async def finish_chunked_upload(
     if meeting.get("status") in ("transcribing", "analyzing", "done"):
         return
     if meeting.get("status") != "uploading":
-        raise HTTPException(409, "Upload is no longer accepting chunks")
+        raise HTTPException(
+            409,
+            detail={
+                "code": "upload_closed",
+                "message": "Upload is no longer accepting chunks",
+                "status": meeting.get("status"),
+            },
+        )
     lock = _chunk_locks.setdefault(meeting_id, asyncio.Lock())
     async with lock:
         part_path = Path(config.AUDIO_DIR) / f"{meeting_id}.webm.part"
