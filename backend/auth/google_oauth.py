@@ -69,7 +69,10 @@ _CLIENT_CONFIG = {
     "web": {
         "client_id": config.GOOGLE_CLIENT_ID,
         "client_secret": config.GOOGLE_CLIENT_SECRET,
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        # Google documents the v2 authorization endpoint for web-server OAuth.
+        # Keeping it explicit avoids relying on the legacy endpoint's redirect
+        # and consent-page compatibility behaviour.
+        "auth_uri": "https://accounts.google.com/o/oauth2/v2/auth",
         "token_uri": "https://oauth2.googleapis.com/token",
         "redirect_uris": [config.GOOGLE_REDIRECT_URI],
     }
