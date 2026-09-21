@@ -933,7 +933,7 @@ def _telemost_join_surfaces(page) -> list[tuple[str, object]]:
         except Exception:
             continue
         if "/private-join/" in url:
-            surfaces.append((f"private-join iframe ({url[:160]})", frame))
+            surfaces.append(("private-join iframe", frame))
     surfaces.append(("top-level page", page))
     return surfaces
 
@@ -1135,7 +1135,21 @@ async def _click_visible_join_button(page, *, retry: bool = False) -> str | None
                     button = buttons.nth(index)
                     if not await button.is_visible():
                         continue
-                    await button.click(force=True, timeout=3_000)
+                    try:
+                        if not await button.is_enabled():
+                            logger.info(
+                                "Telemost join button on %s is still disabled",
+                                surface_label,
+                            )
+                            continue
+                    except Exception:
+                        # Old Playwright fakes/builds may not expose is_enabled;
+                        # a normal click still provides an actionability check.
+                        pass
+                    # Do not force this click.  Telemost 3 can render the button
+                    # below onboarding/device overlays; force=True reports
+                    # success while the application ignores the blocked action.
+                    await button.click(timeout=5_000)
                     logger.info(
                         "%s Telemost join via %s on %s",
                         "Retried" if retry else "Clicked",

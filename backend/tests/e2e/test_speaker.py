@@ -62,6 +62,24 @@ async def _wait_for_join_control(page, selectors, *, timeout_ms=20_000):
     )
 
 
+async def _guest_join_form_is_visible(page) -> bool:
+    for _, surface in _join_surfaces(page):
+        for selector in (
+            "button[data-testid='join-button']",
+            "button:has-text('Подключиться')",
+            "button:has-text('Присоединиться')",
+            "button:has-text('Join')",
+        ):
+            try:
+                candidates = surface.locator(selector)
+                for index in range(min(await candidates.count(), 5)):
+                    if await candidates.nth(index).is_visible():
+                        return True
+            except Exception:
+                continue
+    return False
+
+
 async def _dismiss_modals(page) -> None:
     """Dismiss Telemost informational overlays that can cover media/join buttons."""
     selectors = [
@@ -657,9 +675,17 @@ async def speak_in_meeting(
                     "button:has-text('Join')",
                 ),
             )
-            await join_btn.click(force=True)
+            if not await join_btn.is_enabled():
+                raise RuntimeError("Telemost guest Join button is disabled")
+            await join_btn.click(timeout=5_000)
             logger.info("Clicked join via %s on %s", selector, surface_label)
             await page.wait_for_timeout(5_000)
+
+            if await _guest_join_form_is_visible(page):
+                await _capture_debug(page, "e2e-speaker-join-form-still-visible.png")
+                raise RuntimeError(
+                    "Telemost guest join form is still visible after clicking Join"
+                )
 
             # The in-call toolbar may be a different DOM tree from pre-join.
             # Verify once more and fail loudly instead of reporting a false pass.

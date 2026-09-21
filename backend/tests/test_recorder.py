@@ -260,6 +260,9 @@ class _JoinElement:
     async def click(self, **kwargs):
         self.clicked = True
 
+    async def is_enabled(self):
+        return True
+
     async def fill(self, value, **kwargs):
         self.value = value
 
