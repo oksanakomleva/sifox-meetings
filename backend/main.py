@@ -180,6 +180,11 @@ async def health():
         "database": "ok",
         "active_recordings": len(_active),
         "shutdown_requested": _shutdown_requested,
+        "revision": (
+            os.getenv("RAILWAY_GIT_COMMIT_SHA")
+            or os.getenv("GIT_COMMIT_SHA")
+            or "unknown"
+        )[:8],
     }
 
 
