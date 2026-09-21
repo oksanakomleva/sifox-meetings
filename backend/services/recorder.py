@@ -626,6 +626,12 @@ async def _record_pipeline(meeting_id: str) -> None:
             "--disable-breakpad",
             "--disable-crash-reporter",
             "--autoplay-policy=no-user-gesture-required",
+            # Telemost 3 does not complete anonymous admission in Railway's
+            # Chromium unless native media devices are exposed.  The browser's
+            # fake-device backend is the same proven path used by our Test
+            # Speaker E2E and is independent from the meeting-audio output that
+            # parec records from the private Pulse sink.
+            "--use-fake-device-for-media-stream",
             "--use-fake-ui-for-media-stream",
         ]
         if config.CHROMIUM_DISABLE_SANDBOX:
