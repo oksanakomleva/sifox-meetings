@@ -478,47 +478,52 @@ async def _record_pipeline(meeting_id: str) -> None:
         )
         await asyncio.sleep(0.5)
 
-        # 1b. Virtual microphone for the bot (Phase 3, voice answers). A remapped
-        # source over this sink's monitor becomes Chromium's capture device before
-        # launch; paplay-ing TTS into the sink then transmits it to the meeting.
-        # Best effort — on any failure we disable voice and keep recording.
-        if speak_enabled:
-            try:
-                botmic_name = f"botmic_{meeting_id[:8]}"
-                botmic_module = await startup_step(
-                    lambda: _create_pulse_sink(botmic_name),
-                    "подготовка микрофона",
-                    15,
-                )
-                if botmic_module is None:
-                    raise RuntimeError("could not create bot microphone sink")
-                botmic_source_name = f"botmic_source_{meeting_id[:8]}"
-                botmic_source_module = await startup_step(
-                    lambda: _create_pulse_source(
-                        botmic_source_name,
-                        f"{botmic_name}.monitor",
-                    ),
-                    "подготовка микрофона",
-                    15,
-                )
-            except Exception as e:
-                logger.warning("Bot mic setup failed (%s) — voice disabled: %s", meeting_id[:8], e)
-                if botmic_module is not None and botmic_name:
-                    try:
-                        await asyncio.wait_for(
-                            _delete_pulse_sink(botmic_name, botmic_module),
-                            timeout=10,
-                        )
-                    except Exception as cleanup_exc:
-                        logger.warning(
-                            "Bot mic rollback failed (%s): %s",
-                            meeting_id[:8],
-                            cleanup_exc,
-                        )
-                botmic_name = None
-                botmic_module = None
-                botmic_source_name = None
-                botmic_source_module = None
+        # 1b. Always expose an isolated virtual microphone to Chromium.  The
+        # previous implementation created it only for voice-enabled meetings,
+        # but Telemost 3 refuses to finish anonymous admission when the browser
+        # has no audio-input device at all.  It remains muted/silent for normal
+        # recording; for the live assistant, paplay-ing TTS into this sink sends
+        # the answer to the meeting exactly as before.
+        try:
+            botmic_name = f"botmic_{meeting_id[:8]}"
+            botmic_module = await startup_step(
+                lambda: _create_pulse_sink(botmic_name),
+                "подготовка микрофона",
+                15,
+            )
+            if botmic_module is None:
+                raise RuntimeError("could not create bot microphone sink")
+            botmic_source_name = f"botmic_source_{meeting_id[:8]}"
+            botmic_source_module = await startup_step(
+                lambda: _create_pulse_source(
+                    botmic_source_name,
+                    f"{botmic_name}.monitor",
+                ),
+                "подготовка микрофона",
+                15,
+            )
+        except Exception as e:
+            logger.warning(
+                "Bot microphone setup failed (%s) — Telemost admission may fail: %s",
+                meeting_id[:8],
+                e,
+            )
+            if botmic_module is not None and botmic_name:
+                try:
+                    await asyncio.wait_for(
+                        _delete_pulse_sink(botmic_name, botmic_module),
+                        timeout=10,
+                    )
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "Bot mic rollback failed (%s): %s",
+                        meeting_id[:8],
+                        cleanup_exc,
+                    )
+            botmic_name = None
+            botmic_module = None
+            botmic_source_name = None
+            botmic_source_module = None
 
         # 2. Browser — check Xvfb is alive, then launch with timeout
         display = os.environ.get("DISPLAY", ":99")
