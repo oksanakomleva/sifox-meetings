@@ -24,9 +24,18 @@ from services.recorder import (
     _fill_guest_name,
     _is_join_confirmed,
     _telemost_call_state,
+    _SYNTHETIC_CAMERA_INIT_SCRIPT,
 )
 from services import recorder
 from tests.e2e.test_speaker import _wait_for_join_control
+
+
+def test_synthetic_camera_preserves_real_audio_capture():
+    assert "kind === 'videoinput'" in _SYNTHETIC_CAMERA_INIT_SCRIPT
+    assert "nativeGetUserMedia({ audio: constraints.audio, video: false })" in (
+        _SYNTHETIC_CAMERA_INIT_SCRIPT
+    )
+    assert "--use-fake-device-for-media-stream" not in _SYNTHETIC_CAMERA_INIT_SCRIPT
 
 
 class TestRecorderProcessCleanup:

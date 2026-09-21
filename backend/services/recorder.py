@@ -31,6 +31,77 @@ _e2e_finish_requested: set[str] = set()
 # Set to True on SIGTERM — scheduler stops launching new recordings
 _shutdown_requested: bool = False
 
+# Telemost 3 requires Chromium to expose both media-device kinds before it will
+# finish anonymous admission.  Railway has PulseAudio microphones but no Linux
+# camera device.  Supply a local black canvas track for video requests while
+# leaving getUserMedia audio untouched, so live-assistant TTS continues to use
+# the meeting-specific Pulse source.
+_SYNTHETIC_CAMERA_INIT_SCRIPT = r"""
+(() => {
+  const devices = navigator.mediaDevices;
+  if (!devices || devices.__sifoxSyntheticCamera) return;
+  Object.defineProperty(devices, '__sifoxSyntheticCamera', { value: true });
+
+  const nativeEnumerate = devices.enumerateDevices?.bind(devices);
+  if (nativeEnumerate) {
+    Object.defineProperty(devices, 'enumerateDevices', {
+      configurable: true,
+      value: async () => {
+        const found = await nativeEnumerate();
+        if (found.some(device => device.kind === 'videoinput')) return found;
+        return found.concat([{
+          deviceId: 'sifox-synthetic-camera',
+          groupId: 'sifox-synthetic-media',
+          kind: 'videoinput',
+          label: 'Sifox virtual camera',
+          toJSON() {
+            return {
+              deviceId: this.deviceId,
+              groupId: this.groupId,
+              kind: this.kind,
+              label: this.label,
+            };
+          },
+        }]);
+      },
+    });
+  }
+
+  const nativeGetUserMedia = devices.getUserMedia?.bind(devices);
+  if (!nativeGetUserMedia) return;
+
+  const makeVideoTrack = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = 360;
+    const context = canvas.getContext('2d');
+    if (context) {
+      context.fillStyle = '#000';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    const stream = canvas.captureStream(1);
+    const track = stream.getVideoTracks()[0];
+    // Keep the backing canvas alive for as long as the MediaStreamTrack lives.
+    track.__sifoxCanvas = canvas;
+    return track;
+  };
+
+  Object.defineProperty(devices, 'getUserMedia', {
+    configurable: true,
+    value: async constraints => {
+      if (!constraints || !constraints.video) {
+        return nativeGetUserMedia(constraints);
+      }
+      const stream = constraints.audio
+        ? await nativeGetUserMedia({ audio: constraints.audio, video: false })
+        : new MediaStream();
+      stream.addTrack(makeVideoTrack());
+      return stream;
+    },
+  });
+})();
+"""
+
 
 def _find_pids_with_environment(
     entry: str,
@@ -585,6 +656,11 @@ async def _record_pipeline(meeting_id: str) -> None:
             lambda: browser.new_context(permissions=["microphone"]),
             "создание профиля браузера",
             20,
+        )
+        await startup_step(
+            lambda: context.add_init_script(script=_SYNTHETIC_CAMERA_INIT_SCRIPT),
+            "подготовка виртуальной камеры",
+            10,
         )
         page = await startup_step(
             context.new_page, "открытие страницы встречи", 20
