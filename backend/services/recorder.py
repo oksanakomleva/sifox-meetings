@@ -644,9 +644,16 @@ async def _record_pipeline(meeting_id: str) -> None:
             browser_env["PULSE_SOURCE"] = botmic_source_name
         browser = await startup_step(
             lambda: pw.chromium.launch(
-                headless=False,
+                # Telemost 3's anonymous guest flow completes reliably in
+                # Chromium's current headless implementation.  The former
+                # Xvfb/headful path leaves the private-join iframe mounted even
+                # after an actionable Join click.  Playwright normally adds
+                # --mute-audio in headless mode, so remove that default: the
+                # recorder must still receive the meeting's audio via Pulse.
+                headless=True,
                 args=chromium_args,
                 env=browser_env,
+                ignore_default_args=["--mute-audio"],
             ),
             "запуск браузера",
             30,
