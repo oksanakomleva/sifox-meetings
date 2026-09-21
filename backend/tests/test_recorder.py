@@ -1,6 +1,7 @@
 """Unit tests for recorder pure functions."""
 import asyncio
 import sys
+import wave
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -22,6 +23,7 @@ from services.recorder import (
     _click_visible_join_button,
     _dismiss_join_overlays,
     _fill_guest_name,
+    _ensure_silent_fake_audio_file,
     _is_join_confirmed,
     _telemost_call_state,
     _SYNTHETIC_CAMERA_INIT_SCRIPT,
@@ -36,6 +38,22 @@ def test_synthetic_camera_preserves_real_audio_capture():
         _SYNTHETIC_CAMERA_INIT_SCRIPT
     )
     assert "--use-fake-device-for-media-stream" not in _SYNTHETIC_CAMERA_INIT_SCRIPT
+
+
+def test_silent_fake_audio_file_is_valid_and_reused(tmp_path):
+    path = tmp_path / "silence.wav"
+
+    created = _ensure_silent_fake_audio_file(path)
+    original_size = created.stat().st_size
+    reused = _ensure_silent_fake_audio_file(path)
+
+    assert reused == created
+    assert reused.stat().st_size == original_size
+    with wave.open(str(created), "rb") as source:
+        assert source.getnchannels() == 1
+        assert source.getsampwidth() == 2
+        assert source.getframerate() == 16_000
+        assert source.getnframes() == 80_000
 
 
 class TestRecorderProcessCleanup:

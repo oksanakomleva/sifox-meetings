@@ -131,6 +131,44 @@ def _find_pids_with_environment(
     return result
 
 
+def _ensure_silent_fake_audio_file(
+    path: Path = Path("/tmp/sifox-fake-mic-silence.wav"),
+) -> Path:
+    """Create the valid WAV backing Chromium's fake capture device once.
+
+    Telemost 3 only completes guest admission when the fake media device has a
+    concrete audio source.  The silent file is unrelated to the Pulse output
+    sink used for recording remote participants.
+    """
+    if path.exists() and path.stat().st_size > 44:
+        return path
+
+    import tempfile
+    import wave
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix="sifox-fake-mic-",
+        suffix=".wav",
+        dir=str(path.parent),
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        with wave.open(str(temporary_path), "wb") as target:
+            target.setnchannels(1)
+            target.setsampwidth(2)
+            target.setframerate(16_000)
+            target.writeframes(b"\x00\x00" * 16_000 * 5)
+        os.replace(temporary_path, path)
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+    return path
+
+
 def _collect_runtime_snapshot(proc_root: Path = Path("/proc")) -> str:
     """Collect small, non-sensitive resource diagnostics after a browser stall."""
     parts: list[str] = []
@@ -621,6 +659,11 @@ async def _record_pipeline(meeting_id: str) -> None:
         pw = await startup_step(
             lambda: async_playwright().start(), "запуск управления браузером", 20
         )
+        fake_audio_file = await startup_step(
+            lambda: asyncio.to_thread(_ensure_silent_fake_audio_file),
+            "подготовка устройства микрофона",
+            10,
+        )
         chromium_args = [
             "--disable-dev-shm-usage",
             "--disable-breakpad",
@@ -632,6 +675,7 @@ async def _record_pipeline(meeting_id: str) -> None:
             # Speaker E2E and is independent from the meeting-audio output that
             # parec records from the private Pulse sink.
             "--use-fake-device-for-media-stream",
+            f"--use-file-for-fake-audio-capture={fake_audio_file}",
             "--use-fake-ui-for-media-stream",
         ]
         if config.CHROMIUM_DISABLE_SANDBOX:
