@@ -890,6 +890,8 @@ class LaunchSpeakerRequest(BaseModel):
     meeting_url: str = Field(min_length=10, max_length=2000)
     duration_minutes: int = Field(default=5, ge=1, le=15)
     audio_profile: Literal["standard", "live_assistant"] = "standard"
+    fake_media: bool = True
+    headless: bool = True
 
 
 _speaker_jobs: dict[str, dict] = {}
@@ -1010,6 +1012,8 @@ async def launch_test_speaker(req: LaunchSpeakerRequest, caller: TestOrAdminUser
             req.meeting_url,
             req.duration_minutes,
             req.audio_profile,
+            fake_media=req.fake_media,
+            headless=req.headless,
         ),
         name=f"e2e-speaker-{job_id[:8]}",
     )
@@ -1061,6 +1065,9 @@ async def _launch_speaker(
     meeting_url: str,
     duration_minutes: int,
     audio_profile: str = "standard",
+    *,
+    fake_media: bool = True,
+    headless: bool = True,
 ) -> None:
     """Launch test_speaker.py as a subprocess — no delay."""
     job = _speaker_jobs[job_id]
@@ -1088,11 +1095,18 @@ async def _launch_speaker(
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
     try:
-        proc = await asyncio.create_subprocess_exec(
+        command = [
             sys.executable, speaker_script,
             "--url", meeting_url,
             "--duration", str(duration_minutes),
             "--audio-profile", audio_profile,
+        ]
+        if not fake_media:
+            command.append("--real-media")
+        if not headless:
+            command.append("--headful")
+        proc = await asyncio.create_subprocess_exec(
+            *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

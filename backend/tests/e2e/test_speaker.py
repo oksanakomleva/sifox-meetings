@@ -525,6 +525,9 @@ async def speak_in_meeting(
     meeting_url: str,
     duration_minutes: int = 5,
     audio_profile: str = "standard",
+    *,
+    fake_media: bool = True,
+    headless: bool = True,
 ) -> bool:
     from playwright.async_api import async_playwright
 
@@ -574,9 +577,6 @@ async def speak_in_meeting(
             )
 
         browser_args = [
-            # Fake microphone — loops test_audio.wav as mic input
-            "--use-fake-device-for-media-stream",
-            f"--use-file-for-fake-audio-capture={audio_file}",
             "--use-fake-ui-for-media-stream",
             "--autoplay-policy=no-user-gesture-required",
             "--allow-file-access-from-files",
@@ -591,6 +591,14 @@ async def speak_in_meeting(
             "--no-first-run",
             "--js-flags=--max-old-space-size=128",
         ]
+        if fake_media:
+            # Fake microphone — loops test_audio.wav as mic input.  The switch
+            # also exposes a fake camera, which is useful when isolating join
+            # regressions caused by Chromium device enumeration.
+            browser_args.extend([
+                "--use-fake-device-for-media-stream",
+                f"--use-file-for-fake-audio-capture={audio_file}",
+            ])
         if audio_profile != "live_assistant":
             # The normal recorder E2E only needs to speak. The live-assistant E2E
             # must also capture what the remote Protocaller sends back.
@@ -610,7 +618,7 @@ async def speak_in_meeting(
                 # headless=True saves ~300MB RAM vs headless=False.
                 # Two Chromium instances (recorder + speaker) running simultaneously would OOM.
                 # Fake mic (--use-file-for-fake-audio-capture) works fine in headless mode.
-                headless=True,
+                headless=headless,
                 args=browser_args,
                 env=launch_env,
                 **launch_options,
@@ -760,9 +768,25 @@ if __name__ == "__main__":
         choices=("standard", "live_assistant"),
         default="standard",
     )
+    ap.add_argument(
+        "--real-media",
+        action="store_true",
+        help="Diagnostic mode: use the container's real media devices",
+    )
+    ap.add_argument(
+        "--headful",
+        action="store_true",
+        help="Diagnostic mode: run Chromium against Xvfb instead of headless",
+    )
     args = ap.parse_args()
 
     ok = asyncio.run(
-        speak_in_meeting(args.url, args.duration, args.audio_profile)
+        speak_in_meeting(
+            args.url,
+            args.duration,
+            args.audio_profile,
+            fake_media=not args.real_media,
+            headless=not args.headful,
+        )
     )
     sys.exit(0 if ok else 1)
