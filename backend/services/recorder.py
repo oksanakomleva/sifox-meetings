@@ -1085,21 +1085,36 @@ async def _telemost_call_state(page) -> dict:
 
 
 async def _dismiss_join_overlays(page) -> bool:
-    """Dismiss Telemost onboarding/popups that block anonymous join controls."""
-    for selector in _JOIN_OVERLAY_SELECTORS:
-        try:
-            buttons = page.locator(selector)
-            for index in range(min(await buttons.count(), 5)):
-                button = buttons.nth(index)
-                if not await button.is_visible():
-                    continue
-                await button.click(force=True, timeout=3_000)
-                logger.info("Dismissed Telemost join overlay via %s", selector)
-                await page.wait_for_timeout(500)
-                return True
-        except Exception:
-            continue
-    return False
+    """Dismiss the bounded chain of Telemost onboarding/media popups.
+
+    Telemost 3 currently shows the product tour followed by two consecutive
+    ``Понятно`` dialogs.  Closing only the first visible dialog leaves the next
+    one above the guest iframe, so the Join control is present and enabled but
+    its click never reaches the application.
+    """
+    dismissed_any = False
+    for _ in range(5):
+        dismissed_this_pass = False
+        for selector in _JOIN_OVERLAY_SELECTORS:
+            try:
+                buttons = page.locator(selector)
+                for index in range(min(await buttons.count(), 5)):
+                    button = buttons.nth(index)
+                    if not await button.is_visible():
+                        continue
+                    await button.click(force=True, timeout=3_000)
+                    logger.info("Dismissed Telemost join overlay via %s", selector)
+                    await page.wait_for_timeout(500)
+                    dismissed_any = True
+                    dismissed_this_pass = True
+                    break
+            except Exception:
+                continue
+            if dismissed_this_pass:
+                break
+        if not dismissed_this_pass:
+            break
+    return dismissed_any
 
 
 async def _fill_guest_name(page, name: str = "Protocaller") -> str | None:

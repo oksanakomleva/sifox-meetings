@@ -249,8 +249,9 @@ class TestConfirmAudioCaptureStarted:
 
 
 class _JoinElement:
-    def __init__(self, *, visible=True):
+    def __init__(self, *, visible=True, hide_on_click=False):
         self.visible = visible
+        self.hide_on_click = hide_on_click
         self.clicked = False
         self.value = None
 
@@ -259,6 +260,8 @@ class _JoinElement:
 
     async def click(self, **kwargs):
         self.clicked = True
+        if self.hide_on_click:
+            self.visible = False
 
     async def is_enabled(self):
         return True
@@ -324,7 +327,7 @@ class TestTelemostThreeJoin:
         assert join.clicked
 
     def test_dismisses_new_onboarding_overlay(self):
-        button = _JoinElement()
+        button = _JoinElement(hide_on_click=True)
         page = _JoinPage(
             selector_elements={"button:has-text('Звучит отлично')": [button]}
         )
@@ -333,6 +336,27 @@ class TestTelemostThreeJoin:
 
         assert dismissed
         assert button.clicked
+
+    def test_dismisses_entire_chain_of_join_overlays(self):
+        welcome = _JoinElement(hide_on_click=True)
+        understood_first = _JoinElement(hide_on_click=True)
+        understood_second = _JoinElement(hide_on_click=True)
+        page = _JoinPage(
+            selector_elements={
+                "button:has-text('Звучит отлично')": [welcome],
+                "button:has-text('Понятно')": [
+                    understood_first,
+                    understood_second,
+                ],
+            }
+        )
+
+        dismissed = asyncio.run(_dismiss_join_overlays(page))
+
+        assert dismissed
+        assert welcome.clicked
+        assert understood_first.clicked
+        assert understood_second.clicked
 
     def test_prejoin_iframe_wins_over_background_end_call_control(self):
         frame = _JoinSurface(
