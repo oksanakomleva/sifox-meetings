@@ -22,6 +22,7 @@ from services.recorder import (
     _create_pulse_sink,
     _click_visible_join_button,
     _dismiss_join_overlays,
+    _ensure_prejoin_camera_off,
     _fill_guest_name,
     _ensure_silent_fake_audio_file,
     _is_join_confirmed,
@@ -276,9 +277,10 @@ class TestConfirmAudioCaptureStarted:
 
 
 class _JoinElement:
-    def __init__(self, *, visible=True, hide_on_click=False):
+    def __init__(self, *, visible=True, hide_on_click=False, attributes=None):
         self.visible = visible
         self.hide_on_click = hide_on_click
+        self.attributes = attributes or {}
         self.clicked = False
         self.value = None
 
@@ -292,6 +294,9 @@ class _JoinElement:
 
     async def is_enabled(self):
         return True
+
+    async def get_attribute(self, name):
+        return self.attributes.get(name)
 
     async def fill(self, value, **kwargs):
         self.value = value
@@ -384,6 +389,36 @@ class TestTelemostThreeJoin:
         assert welcome.clicked
         assert understood_first.clicked
         assert understood_second.clicked
+
+    def test_turns_off_explicitly_enabled_prejoin_camera(self):
+        camera = _JoinElement(
+            attributes={"aria-label": "Выключить камеру"},
+        )
+        frame = _JoinSurface(
+            "https://telemost.yandex.ru/private-join/test",
+            selector_elements={"button,[role='button']": [camera]},
+        )
+        page = _JoinPage(frames=[frame])
+
+        changed = asyncio.run(_ensure_prejoin_camera_off(page))
+
+        assert changed
+        assert camera.clicked
+
+    def test_does_not_enable_already_disabled_prejoin_camera(self):
+        camera = _JoinElement(
+            attributes={"aria-label": "Включить камеру"},
+        )
+        frame = _JoinSurface(
+            "https://telemost.yandex.ru/private-join/test",
+            selector_elements={"button,[role='button']": [camera]},
+        )
+        page = _JoinPage(frames=[frame])
+
+        changed = asyncio.run(_ensure_prejoin_camera_off(page))
+
+        assert not changed
+        assert not camera.clicked
 
     def test_prejoin_iframe_wins_over_background_end_call_control(self):
         frame = _JoinSurface(

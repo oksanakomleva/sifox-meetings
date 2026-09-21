@@ -1028,6 +1028,7 @@ async def transcribe_and_analyze(
 # ── Meeting join ──────────────────────────────────────────────────────────────
 
 _JOIN_BUTTON_SELECTORS = (
+    "button[data-testid='enter-conference-button']",
     "button[data-testid='join-button']",
     "button:has-text('Подключиться')",
     "button:has-text('Присоединиться')",
@@ -1255,6 +1256,54 @@ async def _dismiss_join_overlays(page) -> bool:
     return dismissed_any
 
 
+async def _prepare_join_surfaces(page) -> bool:
+    """Dismiss blocking dialogs in the shell and Telemost 3 guest iframe."""
+    dismissed = await _dismiss_join_overlays(page)
+    for surface_label, surface in _telemost_join_surfaces(page):
+        if surface is page:
+            continue
+        if await _dismiss_join_overlays(surface):
+            logger.info("Dismissed Telemost join overlay on %s", surface_label)
+            dismissed = True
+    return dismissed
+
+
+async def _ensure_prejoin_camera_off(page) -> bool:
+    """Match the proven Test Speaker admission flow without toggling camera on."""
+    for surface_label, surface in _telemost_join_surfaces(page):
+        if surface is page:
+            continue
+        try:
+            controls = surface.locator("button,[role='button']")
+            for index in range(min(await controls.count(), 30)):
+                control = controls.nth(index)
+                if not await control.is_visible():
+                    continue
+                label = " ".join(filter(None, [
+                    await control.get_attribute("aria-label"),
+                    await control.get_attribute("title"),
+                ])).strip()
+                normalized = label.lower()
+                if (
+                    any(term in normalized for term in ("камер", "camera"))
+                    and any(
+                        term in normalized
+                        for term in ("выключить", "turn off", "disable")
+                    )
+                ):
+                    await control.click(timeout=3_000)
+                    await page.wait_for_timeout(500)
+                    logger.info(
+                        "Telemost pre-join camera turned off via %r on %s",
+                        label,
+                        surface_label,
+                    )
+                    return True
+        except Exception as exc:
+            logger.info("Could not inspect camera control on %s: %s", surface_label, exc)
+    return False
+
+
 async def _fill_guest_name(page, name: str = "Protocaller") -> str | None:
     """Fill the visible anonymous name field in either Telemost layout."""
     for surface_label, surface in _telemost_join_surfaces(page):
@@ -1376,7 +1425,7 @@ async def _join_meeting(
     # Telemost 3 shows a product-onboarding modal above the anonymous join
     # iframe in every fresh browser profile.  Dismiss it before looking for the
     # guest name field; otherwise the iframe controls are present but blocked.
-    await _dismiss_join_overlays(page)
+    await _prepare_join_surfaces(page)
 
     # Fill name
     if not await _fill_guest_name(page):
@@ -1384,11 +1433,13 @@ async def _join_meeting(
 
     await page.wait_for_timeout(500)
 
-    # Telemost has mic/cam OFF by default — don't click them, it triggers
-    # permission errors and modals that block the join button.
+    # Match the Test Speaker flow: camera may now default to ON when Chromium
+    # exposes its fake device. Never blindly toggle; click only an explicit
+    # "turn off camera" action.
+    await _ensure_prejoin_camera_off(page)
 
     # A delayed popup can still appear while devices initialise.
-    await _dismiss_join_overlays(page)
+    await _prepare_join_surfaces(page)
 
     await snap("2-before-join")
 
@@ -1419,7 +1470,7 @@ async def _join_meeting(
     while time.monotonic() < deadline:
         remaining = deadline - time.monotonic()
         await page.wait_for_timeout(min(3_000, max(250, int(remaining * 1_000))))
-        await _dismiss_join_overlays(page)
+        await _prepare_join_surfaces(page)
         await _dismiss_media_modals(page)
         probe += 1
         try:
