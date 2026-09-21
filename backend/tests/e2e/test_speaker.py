@@ -25,9 +25,48 @@ DISPLAY = os.environ.get("DISPLAY", ":99")
 PULSE_SERVER = os.environ.get("PULSE_SERVER", "unix:/tmp/pulse.sock")
 
 
+def _join_surfaces(page):
+    """Prefer Telemost 3's anonymous ``private-join`` iframe, then legacy DOM."""
+    surfaces = []
+    try:
+        frames = page.frames
+    except Exception:
+        frames = []
+    for frame in frames or []:
+        try:
+            if "/private-join/" in (frame.url or ""):
+                surfaces.append(("private-join iframe", frame))
+        except Exception:
+            continue
+    surfaces.append(("top-level page", page))
+    return surfaces
+
+
+async def _wait_for_join_control(page, selectors, *, timeout_ms=20_000):
+    """Find one visible guest-join control across current Page/Frame surfaces."""
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    while asyncio.get_running_loop().time() < deadline:
+        for surface_label, surface in _join_surfaces(page):
+            for selector in selectors:
+                try:
+                    candidates = surface.locator(selector)
+                    for index in range(min(await candidates.count(), 5)):
+                        candidate = candidates.nth(index)
+                        if await candidate.is_visible():
+                            return surface_label, surface, selector, candidate
+                except Exception:
+                    continue
+        await page.wait_for_timeout(250)
+    raise RuntimeError(
+        "Visible Telemost guest-join control not found: " + ", ".join(selectors)
+    )
+
+
 async def _dismiss_modals(page) -> None:
     """Dismiss Telemost informational overlays that can cover media/join buttons."""
     selectors = [
+        "button:has-text('Звучит отлично')",
+        "button[aria-label*='Закрыть ознакомление' i]",
         "button:has-text('Понятно')",
         "button:has-text('Хорошо')",
         "button:has-text('Продолжить')",
@@ -580,32 +619,46 @@ async def speak_in_meeting(
             await page.goto(meeting_url, timeout=30_000)
             await page.wait_for_timeout(3_000)
 
+            # Telemost 3 shows onboarding above the guest iframe in every
+            # fresh headless browser profile.
+            await _dismiss_modals(page)
+
             # Fill guest name
-            name_input = page.locator(
-                "input[placeholder*='имя'], input[placeholder*='name'], input[type='text']"
-            ).first
-            await name_input.wait_for(state="visible", timeout=20_000)
+            surface_label, join_surface, _, name_input = await _wait_for_join_control(
+                page,
+                (
+                    "input[placeholder*='имя']",
+                    "input[placeholder*='name']",
+                    "input[name='name']",
+                    "input[type='text']",
+                ),
+            )
             await name_input.fill("Test Speaker")
-            logger.info("Filled name: Test Speaker")
+            logger.info("Filled name on %s: Test Speaker", surface_label)
 
             # Keep video disabled, but don't blindly click a camera button: the
             # previous code could turn an already-disabled camera back on.
-            await _ensure_camera_off(page)
+            await _ensure_camera_off(join_surface)
 
             # Do not enable the microphone on the pre-join screen. Telemost may
             # open a permission/info modal there; that overlay then intercepts
             # the Join click. Join muted first, enable mic in the in-call toolbar.
             await _dismiss_modals(page)
+            if join_surface is not page:
+                await _dismiss_modals(join_surface)
 
             # Join the meeting — mic ON (we want to speak)
-            join_btn = page.locator(
-                "button:has-text('Подключиться'), "
-                "button:has-text('Войти'), "
-                "button:has-text('Присоединиться'), "
-                "button:has-text('Join')"
-            ).first
-            await join_btn.wait_for(state="visible", timeout=20_000)
+            surface_label, _, selector, join_btn = await _wait_for_join_control(
+                page,
+                (
+                    "button[data-testid='join-button']",
+                    "button:has-text('Подключиться')",
+                    "button:has-text('Присоединиться')",
+                    "button:has-text('Join')",
+                ),
+            )
             await join_btn.click(force=True)
+            logger.info("Clicked join via %s on %s", selector, surface_label)
             await page.wait_for_timeout(5_000)
 
             # The in-call toolbar may be a different DOM tree from pre-join.

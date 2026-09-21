@@ -896,6 +896,47 @@ _JOIN_BUTTON_SELECTORS = (
     "button:has-text('Join')",
 )
 
+_JOIN_OVERLAY_SELECTORS = (
+    # Telemost 3 onboarding shown to every fresh anonymous browser profile.
+    "button:has-text('Звучит отлично')",
+    "button[aria-label*='Закрыть ознакомление' i]",
+    "button:has-text('Понятно')",
+    "button:has-text('OK')",
+    "button:has-text('Закрыть')",
+    "button[aria-label*='Закрыть' i]",
+)
+
+_GUEST_NAME_SELECTORS = (
+    "input[placeholder*='имя']",
+    "input[placeholder*='name']",
+    "input[name='name']",
+    "input[type='text']",
+)
+
+
+def _telemost_join_surfaces(page) -> list[tuple[str, object]]:
+    """Return current guest-join DOM surfaces, preferring Telemost 3's iframe.
+
+    Telemost 3 moved the anonymous name field and Join button from the top-level
+    document into a ``/private-join/`` iframe.  Page and Frame intentionally
+    share Playwright's ``locator``/``evaluate`` API, so callers can support both
+    layouts without maintaining two separate join implementations.
+    """
+    surfaces: list[tuple[str, object]] = []
+    try:
+        frames = page.frames
+    except Exception:
+        frames = []
+    for frame in frames or []:
+        try:
+            url = frame.url or ""
+        except Exception:
+            continue
+        if "/private-join/" in url:
+            surfaces.append((f"private-join iframe ({url[:160]})", frame))
+    surfaces.append(("top-level page", page))
+    return surfaces
+
 
 def _is_join_confirmed(state: dict) -> bool:
     """Interpret a bounded Telemost DOM probe after clicking Join.
@@ -906,6 +947,11 @@ def _is_join_confirmed(state: dict) -> bool:
     screen and is never sufficient proof.
     """
     if state.get("has_waiting_room"):
+        return False
+    # Telemost 3 renders an in-call shell (including the end-call control)
+    # behind its guest-join iframe.  Never accept those background controls as
+    # proof while the visible anonymous join form is still present.
+    if state.get("has_visible_prejoin"):
         return False
     if state.get("has_leave"):
         return True
@@ -940,9 +986,8 @@ def _join_wait_seconds(
     return min(wait, float(max(30, config.TELEMOST_JOIN_MAX_WAIT_SEC)))
 
 
-async def _telemost_call_state(page) -> dict:
-    """Probe only the visible controls needed to prove that the call was joined."""
-    return await page.evaluate(
+async def _telemost_surface_state(surface) -> dict:
+    return await surface.evaluate(
         """() => {
           const visible = e => {
             const r = e.getBoundingClientRect();
@@ -975,7 +1020,9 @@ async def _telemost_call_state(page) -> dict:
           return {
             has_leave: controls.some(x =>
               x.includes('выйти') || x.includes('покинуть') ||
-              x.includes('leave') || x.includes('hang up')
+              x.includes('завершить звонок') ||
+              x.includes('leave') || x.includes('hang up') ||
+              x.includes('end call')
             ),
             has_mic: controls.some(x =>
               x.includes('микроф') || x.includes('microphone') ||
@@ -999,25 +1046,110 @@ async def _telemost_call_state(page) -> dict:
     )
 
 
-async def _click_visible_join_button(page, *, retry: bool = False) -> str | None:
-    """Click a real visible meeting-join control, never the account Login button."""
-    for selector in _JOIN_BUTTON_SELECTORS:
+async def _telemost_call_state(page) -> dict:
+    """Probe visible controls across both legacy and Telemost 3 join DOMs."""
+    states: list[tuple[str, dict]] = []
+    errors: list[str] = []
+    for label, surface in _telemost_join_surfaces(page):
+        try:
+            states.append((label, await _telemost_surface_state(surface)))
+        except Exception as exc:
+            errors.append(f"{label}: {type(exc).__name__}: {exc}")
+
+    if not states:
+        raise RuntimeError("Telemost call state unavailable: " + "; ".join(errors))
+
+    combined = {
+        "has_leave": any(s.get("has_leave") for _, s in states),
+        "has_mic": any(s.get("has_mic") for _, s in states),
+        "has_join": any(s.get("has_join") for _, s in states),
+        "has_name_input": any(s.get("has_name_input") for _, s in states),
+        "has_waiting_room": any(s.get("has_waiting_room") for _, s in states),
+        "in_call_signal_count": max(
+            (int(s.get("in_call_signal_count") or 0) for _, s in states),
+            default=0,
+        ),
+    }
+    combined["has_visible_prejoin"] = bool(
+        combined["has_join"] or combined["has_name_input"]
+    )
+    combined["surfaces"] = [label for label, _ in states]
+    combined["labels"] = [
+        f"[{label}] {control}"
+        for label, state in states
+        for control in (state.get("labels") or [])[:25]
+    ][:50]
+    if errors:
+        combined["surface_errors"] = errors
+    return combined
+
+
+async def _dismiss_join_overlays(page) -> bool:
+    """Dismiss Telemost onboarding/popups that block anonymous join controls."""
+    for selector in _JOIN_OVERLAY_SELECTORS:
         try:
             buttons = page.locator(selector)
-            count = await buttons.count()
-            for index in range(min(count, 5)):
+            for index in range(min(await buttons.count(), 5)):
                 button = buttons.nth(index)
                 if not await button.is_visible():
                     continue
                 await button.click(force=True, timeout=3_000)
+                logger.info("Dismissed Telemost join overlay via %s", selector)
+                await page.wait_for_timeout(500)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _fill_guest_name(page, name: str = "Protocaller") -> str | None:
+    """Fill the visible anonymous name field in either Telemost layout."""
+    for surface_label, surface in _telemost_join_surfaces(page):
+        for selector in _GUEST_NAME_SELECTORS:
+            try:
+                inputs = surface.locator(selector)
+                for index in range(min(await inputs.count(), 5)):
+                    field = inputs.nth(index)
+                    if not await field.is_visible(timeout=1_500):
+                        continue
+                    await field.fill(name, timeout=3_000)
+                    logger.info(
+                        "Name filled via selector %s on %s",
+                        selector,
+                        surface_label,
+                    )
+                    return f"{surface_label}: {selector}"
+            except Exception:
+                continue
+    return None
+
+
+async def _click_visible_join_button(page, *, retry: bool = False) -> str | None:
+    """Click a real visible meeting-join control, never the account Login button."""
+    for surface_label, surface in _telemost_join_surfaces(page):
+        for selector in _JOIN_BUTTON_SELECTORS:
+            try:
+                buttons = surface.locator(selector)
+                count = await buttons.count()
+                for index in range(min(count, 5)):
+                    button = buttons.nth(index)
+                    if not await button.is_visible():
+                        continue
+                    await button.click(force=True, timeout=3_000)
+                    logger.info(
+                        "%s Telemost join via %s on %s",
+                        "Retried" if retry else "Clicked",
+                        selector,
+                        surface_label,
+                    )
+                    return f"{surface_label}: {selector}"
+            except Exception as exc:
                 logger.info(
-                    "%s Telemost join via %s",
-                    "Retried" if retry else "Clicked",
+                    "Join selector %s on %s failed: %s",
                     selector,
+                    surface_label,
+                    exc,
                 )
-                return selector
-        except Exception as exc:
-            logger.info("Join selector %s failed: %s", selector, exc)
     return None
 
 
@@ -1074,28 +1206,13 @@ async def _join_meeting(
     except Exception:
         pass
 
+    # Telemost 3 shows a product-onboarding modal above the anonymous join
+    # iframe in every fresh browser profile.  Dismiss it before looking for the
+    # guest name field; otherwise the iframe controls are present but blocked.
+    await _dismiss_join_overlays(page)
+
     # Fill name
-    name_filled = False
-    for sel in [
-        "input[placeholder*='имя']",
-        "input[placeholder*='name']",
-        "input[name='name']",
-        "input[type='text']",
-    ]:
-        try:
-            inputs = page.locator(sel)
-            for index in range(min(await inputs.count(), 5)):
-                inp = inputs.nth(index)
-                if await inp.is_visible(timeout=1500):
-                    await inp.fill("Protocaller", timeout=3000)
-                    logger.info("Name filled via selector: %s", sel)
-                    name_filled = True
-                    break
-            if name_filled:
-                break
-        except Exception:
-            continue
-    if not name_filled:
+    if not await _fill_guest_name(page):
         logger.warning("Could not find name input")
 
     await page.wait_for_timeout(500)
@@ -1103,21 +1220,8 @@ async def _join_meeting(
     # Telemost has mic/cam OFF by default — don't click them, it triggers
     # permission errors and modals that block the join button.
 
-    # Dismiss any modal/popup (e.g. "Понятно", "Закрыть") that might block join
-    for selector in [
-        "button:has-text('Понятно')",
-        "button:has-text('OK')",
-        "button:has-text('Закрыть')",
-        "button[aria-label*='Закрыть' i]",
-    ]:
-        try:
-            btn = page.locator(selector).first
-            if await btn.is_visible(timeout=500):
-                await btn.click()
-                logger.info("Dismissed modal: %s", selector)
-                await page.wait_for_timeout(500)
-        except Exception:
-            pass
+    # A delayed popup can still appear while devices initialise.
+    await _dismiss_join_overlays(page)
 
     await snap("2-before-join")
 
@@ -1148,6 +1252,7 @@ async def _join_meeting(
     while time.monotonic() < deadline:
         remaining = deadline - time.monotonic()
         await page.wait_for_timeout(min(3_000, max(250, int(remaining * 1_000))))
+        await _dismiss_join_overlays(page)
         await _dismiss_media_modals(page)
         probe += 1
         try:

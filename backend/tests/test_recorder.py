@@ -19,8 +19,14 @@ from services.recorder import (
     _collect_runtime_snapshot,
     _close_browser_runtime,
     _create_pulse_sink,
+    _click_visible_join_button,
+    _dismiss_join_overlays,
+    _fill_guest_name,
+    _is_join_confirmed,
+    _telemost_call_state,
 )
 from services import recorder
+from tests.e2e.test_speaker import _wait_for_join_control
 
 
 class TestRecorderProcessCleanup:
@@ -240,6 +246,160 @@ class TestConfirmAudioCaptureStarted:
                     _Capture(parec_code, ffmpeg_code), tmp_path / "audio.wav"
                 )
             )
+
+
+class _JoinElement:
+    def __init__(self, *, visible=True):
+        self.visible = visible
+        self.clicked = False
+        self.value = None
+
+    async def is_visible(self, **kwargs):
+        return self.visible
+
+    async def click(self, **kwargs):
+        self.clicked = True
+
+    async def fill(self, value, **kwargs):
+        self.value = value
+
+
+class _JoinLocator:
+    def __init__(self, elements=()):
+        self.elements = list(elements)
+
+    async def count(self):
+        return len(self.elements)
+
+    def nth(self, index):
+        return self.elements[index]
+
+
+class _JoinSurface:
+    def __init__(self, url, *, selector_elements=None, state=None):
+        self.url = url
+        self.selector_elements = selector_elements or {}
+        self.state = state or {}
+
+    def locator(self, selector):
+        return _JoinLocator(self.selector_elements.get(selector, ()))
+
+    async def evaluate(self, script):
+        return self.state
+
+
+class _JoinPage(_JoinSurface):
+    def __init__(self, *, frames=(), selector_elements=None, state=None):
+        super().__init__(
+            "https://telemost.yandex.ru/j/test",
+            selector_elements=selector_elements,
+            state=state,
+        )
+        self.frames = list(frames)
+        self.wait_for_timeout = AsyncMock()
+
+
+class TestTelemostThreeJoin:
+    def test_fills_name_and_clicks_join_inside_private_join_iframe(self):
+        name = _JoinElement()
+        join = _JoinElement()
+        frame = _JoinSurface(
+            "https://telemost.yandex.ru/private-join/test",
+            selector_elements={
+                "input[type='text']": [name],
+                "button:has-text('Подключиться')": [join],
+            },
+        )
+        page = _JoinPage(frames=[frame])
+
+        filled_via = asyncio.run(_fill_guest_name(page))
+        clicked_via = asyncio.run(_click_visible_join_button(page))
+
+        assert filled_via.startswith("private-join iframe")
+        assert clicked_via.startswith("private-join iframe")
+        assert name.value == "Protocaller"
+        assert join.clicked
+
+    def test_dismisses_new_onboarding_overlay(self):
+        button = _JoinElement()
+        page = _JoinPage(
+            selector_elements={"button:has-text('Звучит отлично')": [button]}
+        )
+
+        dismissed = asyncio.run(_dismiss_join_overlays(page))
+
+        assert dismissed
+        assert button.clicked
+
+    def test_prejoin_iframe_wins_over_background_end_call_control(self):
+        frame = _JoinSurface(
+            "https://telemost.yandex.ru/private-join/test",
+            state={
+                "has_leave": False,
+                "has_mic": True,
+                "has_join": True,
+                "has_name_input": True,
+                "has_waiting_room": False,
+                "in_call_signal_count": 0,
+                "labels": ["подключиться"],
+            },
+        )
+        page = _JoinPage(
+            frames=[frame],
+            state={
+                "has_leave": True,
+                "has_mic": True,
+                "has_join": False,
+                "has_name_input": False,
+                "has_waiting_room": False,
+                "in_call_signal_count": 0,
+                "labels": ["завершить звонок"],
+            },
+        )
+
+        state = asyncio.run(_telemost_call_state(page))
+
+        assert state["has_leave"]
+        assert state["has_visible_prejoin"]
+        assert not _is_join_confirmed(state)
+
+    def test_new_call_shell_is_confirmed_after_prejoin_iframe_disappears(self):
+        page = _JoinPage(
+            state={
+                "has_leave": True,
+                "has_mic": True,
+                "has_join": False,
+                "has_name_input": False,
+                "has_waiting_room": False,
+                "in_call_signal_count": 0,
+                "labels": ["завершить звонок"],
+            }
+        )
+
+        state = asyncio.run(_telemost_call_state(page))
+
+        assert not state["has_visible_prejoin"]
+        assert _is_join_confirmed(state)
+
+    def test_e2e_speaker_uses_same_private_join_iframe(self):
+        join = _JoinElement()
+        frame = _JoinSurface(
+            "https://telemost.yandex.ru/private-join/test",
+            selector_elements={"button:has-text('Подключиться')": [join]},
+        )
+        page = _JoinPage(frames=[frame])
+
+        surface, _, selector, found = asyncio.run(
+            _wait_for_join_control(
+                page,
+                ("button:has-text('Подключиться')",),
+                timeout_ms=100,
+            )
+        )
+
+        assert surface == "private-join iframe"
+        assert selector == "button:has-text('Подключиться')"
+        assert found is join
 
 
 class _PulseModuleProc:
