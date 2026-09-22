@@ -270,6 +270,7 @@ class SmokeTest:
         timeout_minutes: int = 20,
         *,
         live_assistant: bool = False,
+        retention: bool = False,
     ) -> bool:
         """
         Fully automated E2E:
@@ -283,7 +284,8 @@ class SmokeTest:
         print("  +0 min  — calendar event created, sync triggered")
         print("  +3 min  — recorder bot joins the meeting")
         print("  +3 min  — Test Speaker joins with mic ON and streams test_audio.wav")
-        print("  +5 min  — Test Speaker leaves; recorder gets a graceful E2E finish signal")
+        print("  +16 min — Test Speaker leaves; recorder must detect departure itself" if retention else
+              "  +5 min  — Test Speaker leaves; recorder gets a graceful E2E finish signal")
         print("  +7 min  — Whisper transcribes, OpenAI analyzes")
         print("  +10 min — status=done, artifacts ready\n")
 
@@ -309,6 +311,7 @@ class SmokeTest:
         speaker_confirmed = False
         e2e_finish_requested = False
         captured_note_text = ""
+        speaker_started_at = None
         meeting_url = e2e_data.get("meeting_url", "")
 
         while time.time() < deadline:
@@ -355,7 +358,7 @@ class SmokeTest:
                             "/api/admin/test/launch-speaker",
                             json={
                                 "meeting_url": meeting_url,
-                                "duration_minutes": 2,
+                                "duration_minutes": 13 if retention else 2,
                                 "audio_profile": (
                                     "live_assistant"
                                     if live_assistant
@@ -367,6 +370,7 @@ class SmokeTest:
                             data = sr.json()
                             speaker_job_id = data.get("job_id")
                             speaker_launched = bool(speaker_job_id)
+                            speaker_started_at = time.monotonic()
                             print(f"  [speaker] Job started — id={(speaker_job_id or '')[:8]}")
                         else:
                             print(f"  [speaker] WARNING: launch returned {sr.status_code}: {sr.text[:100]}")
@@ -393,6 +397,17 @@ class SmokeTest:
                                     f"job {speaker_job_id[:8]} status={state}",
                                 )
                             if state == "completed" and speaker_status.get("ready"):
+                                if retention:
+                                    self._check(
+                                        "Recorder stayed with participant beyond 11 minutes",
+                                        status == "recording" and speaker_started_at is not None
+                                        and time.monotonic() - speaker_started_at >= 12 * 60,
+                                        f"recorder status={status}; speaker completed 13-minute session",
+                                    )
+                                    # No finish endpoint: verify real participant departure.
+                                    e2e_finish_requested = True
+                                    print("  [speaker] Left; waiting for natural recorder stop")
+                                    continue
                                 if live_assistant:
                                     listener_text = speaker_status.get("stdout") or ""
                                     heard_answer = _contains_expected_live_answer(
@@ -485,6 +500,10 @@ class SmokeTest:
                                 break
                     except Exception as se:
                         print(f"  [speaker] status unavailable, retrying: {se}")
+
+                if retention and speaker_launched and not e2e_finish_requested and status != "recording":
+                    self._check("Recorder did not leave while Test Speaker was present", False, f"early status={status}")
+                    break
 
                 if status == "done" and target.get("summary"):
                     if not speaker_confirmed:
@@ -583,6 +602,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--record", action="store_true", help="Wait for a pending meeting to be recorded (15min timeout)")
     ap.add_argument("--full-e2e", action="store_true", help="Fully automated E2E: creates calendar event + launches Test Speaker on Railway (~20min)")
+    ap.add_argument("--retention-e2e", action="store_true", help="13-minute participant presence and natural recorder stop (no forced finish)")
     ap.add_argument(
         "--live-assistant-e2e",
         action="store_true",
@@ -603,7 +623,7 @@ def main():
 
     smoke = SmokeTest(args.url, args.cookie, test_api_key=args.api_key)
 
-    if args.full_e2e or args.live_assistant_e2e:
+    if args.full_e2e or args.live_assistant_e2e or args.retention_e2e:
         print(f"[>>] Pre-checks against {args.url}\n")
         smoke.test_health()
         smoke.test_auth_required()
@@ -611,7 +631,8 @@ def main():
         if not is_admin:
             print("\n❌ Need admin auth for full E2E (set TEST_API_KEY in .env.test)")
             sys.exit(1)
-        ok = smoke.run_full_e2e(live_assistant=args.live_assistant_e2e)
+        ok = smoke.run_full_e2e(timeout_minutes=35 if args.retention_e2e else 20,
+                              live_assistant=args.live_assistant_e2e, retention=args.retention_e2e)
     else:
         ok = smoke.run(record_mode=args.record)
 

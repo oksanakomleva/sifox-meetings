@@ -12,6 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlsplit
 
 from config import config
 from database import models
@@ -1348,6 +1349,12 @@ async def _click_visible_join_button(page, *, retry: bool = False) -> str | None
                         # Old Playwright fakes/builds may not expose is_enabled;
                         # a normal click still provides an actionability check.
                         pass
+                    # The guest iframe can mount after the initial page setup.
+                    # Fill its name only once an actionable Join control exists;
+                    # otherwise an early lookup can miss the form and a later
+                    # successful click admits the recorder as the default Guest.
+                    if not await _fill_guest_name(page):
+                        logger.warning("Could not fill guest name before Telemost join")
                     # Do not force this click.  Telemost 3 can render the button
                     # below onboarding/device overlays; force=True reports
                     # success while the application ignores the blocked action.
@@ -1426,10 +1433,6 @@ async def _join_meeting(
     # iframe in every fresh browser profile.  Dismiss it before looking for the
     # guest name field; otherwise the iframe controls are present but blocked.
     await _prepare_join_surfaces(page)
-
-    # Fill name
-    if not await _fill_guest_name(page):
-        logger.warning("Could not find name input")
 
     await page.wait_for_timeout(500)
 
@@ -1537,38 +1540,70 @@ def _is_real_name(text: str) -> bool:
     return True
 
 
-async def _get_participant_names(page) -> set[str]:
-    try:
-        # Try specific participant list selectors first
-        for selector in [
-            "div[class*='ParticipantName']",
-            "div[class*='participant-name']",
-            "span[class*='participant-name']",
-            "div[class*='MemberName']",
-            "div[data-testid*='participant'] span",
-        ]:
-            elements = await page.locator(selector).all()
-            if elements:
-                names = set()
-                for el in elements:
-                    text = (await el.text_content() or "").strip()
-                    if _is_real_name(text) and text != "Protocaller":
-                        names.add(text)
-                if names:
-                    return names
+_PARTICIPANT_SNAPSHOT_SCRIPT = r"""() => {
+  const visible = e => {
+    const r = e.getBoundingClientRect();
+    const s = getComputedStyle(e);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+  };
+  // Telemost 3: TextName_* lives inside the private-join iframe even in-call.
+  // Keep legacy name selectors, but never infer an empty room from no matches.
+  const names = [...document.querySelectorAll(
+    "span[class*='TextName_'], div[class*='ParticipantName'], " +
+    "div[class*='participant-name'], span[class*='participant-name'], " +
+    "div[class*='MemberName'], div[data-testid*='participant'] span"
+  )].filter(visible).map(e => (e.getAttribute('title') || e.textContent || '').trim());
+  const buttons = [...document.querySelectorAll('button,[role="button"]')].filter(visible);
+  const prejoin = buttons.some(e => e.dataset.testid === 'enter-conference-button' ||
+    /^(подключиться|присоединиться|join)$/i.test((e.textContent || '').trim()));
+  const counts = [];
+  for (const button of buttons) {
+    const label = (button.getAttribute('aria-label') || button.getAttribute('title') || '').trim();
+    if (button.dataset.testid !== 'participants-button' && !/^(участники|participants)$/i.test(label)) continue;
+    const badge = [...button.querySelectorAll('[class*="badge_"]')].find(visible);
+    const text = (badge ? badge.textContent : button.textContent || '').trim();
+    const match = text.match(/^(?:(?:участники|participants)\s*)?(\d+)$/i);
+    if (match && Number(match[1]) >= 1) counts.push(Number(match[1]));
+  }
+  return {names, count: !prejoin && counts.length ? Math.max(...counts) : null, prejoin};
+}"""
 
-        # Fallback: broader selector with strict filtering
-        elements = await page.locator(
-            "div[class*='participant'], div[class*='member']"
-        ).all()
-        names = set()
-        for el in elements:
-            text = (await el.text_content() or "").strip()
-            if _is_real_name(text) and text != "Protocaller":
-                names.add(text)
-        return names
-    except Exception:
-        return set()
+
+async def _participant_snapshot(page) -> dict:
+    """Tri-state presence: a failed/missing DOM probe is UNKNOWN, never empty."""
+    names: set[str] = set()
+    counts: list[int] = []
+    errors: list[str] = []
+    prejoin = False
+    for label, surface in _telemost_join_surfaces(page):
+        try:
+            state = await asyncio.wait_for(
+                surface.evaluate(_PARTICIPANT_SNAPSHOT_SCRIPT), timeout=5,
+            )
+            prejoin = prejoin or bool(state.get("prejoin"))
+            names.update(n for n in state.get("names", []) if _is_real_name(n))
+            count = state.get("count")
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 1:
+                counts.append(count)
+        except Exception as exc:
+            errors.append(f"{label}: {type(exc).__name__}")
+    count = max(counts) if counts else None
+    # The visible count includes the recorder itself. It remains reliable when
+    # tiles are virtualized or a guest name did not get applied.
+    if not prejoin and count is not None and count > 1:
+        presence = "present"
+    elif not prejoin and count == 1 and not errors:
+        presence = "alone"
+        names.clear()  # A sole "Гость" can be the recorder itself.
+    elif not prejoin and names and count is None:
+        presence = "present"
+    else:
+        presence = "unknown"
+    return {"names": names, "count": count, "presence": presence, "errors": errors}
+
+
+async def _get_participant_names(page) -> set[str]:
+    return (await _participant_snapshot(page))["names"]
 
 
 async def _get_active_speakers(page) -> list[str]:
@@ -1763,6 +1798,7 @@ async def _wait_for_meeting_end(
     Protocaller) was ever present — False means nobody showed up (no_show)."""
     meeting_started = len(initial_participants) > 0
     empty_polls = 0
+    unknown_polls = 0
     deadline = time.monotonic() + config.MAX_RECORDING_HOURS * 3600
     # Grace period after scheduled start — wait this long for someone to arrive
     # before giving up on a meeting that never started
@@ -1782,26 +1818,46 @@ async def _wait_for_meeting_end(
 
         try:
             current_url = page.url
-            if "telemost" not in current_url.lower():
+            if "telemost" not in current_url.lower() or not urlsplit(current_url).path.strip("/"):
                 logger.info("URL changed — meeting ended")
                 return meeting_started
         except Exception:
             logger.info("Page crashed — meeting ended")
             return meeting_started
 
-        new_names = await _get_participant_names(page)
-        others = [n for n in new_names if n != "Protocaller"]
-
-        if others:
+        snapshot = await _participant_snapshot(page)
+        logger.info(
+            "Participant probe %s: presence=%s count=%s names=%d errors=%s",
+            (meeting_id or "unknown")[:8], snapshot["presence"], snapshot["count"],
+            len(snapshot["names"]), snapshot["errors"],
+        )
+        if snapshot["presence"] == "present":
             meeting_started = True
             empty_polls = 0
+            unknown_polls = 0
             continue
+
+        if snapshot["presence"] == "unknown":
+            # A UI update, detached frame or slow browser is not evidence that
+            # participants left. Retain the existing hard recording deadline.
+            empty_polls = 0
+            unknown_polls += 1
+            if unknown_polls == 1 or unknown_polls % 10 == 0:
+                logger.warning(
+                    "Participant state unknown for %s (%d polls); keeping recording",
+                    (meeting_id or "unknown")[:8], unknown_polls,
+                )
+            continue
+        unknown_polls = 0
 
         # No one present. Decide whether to end or keep waiting.
         if not meeting_started and scheduled_start is not None:
             now = datetime.now(timezone.utc)
             # If we're still before scheduled start + grace, keep waiting
-            grace_until = scheduled_start + timedelta(minutes=GRACE_MINUTES)
+            start = scheduled_start
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            grace_until = start + timedelta(minutes=GRACE_MINUTES)
             if now < grace_until:
                 logger.info(
                     "Empty but within grace period (until %s, now %s) — waiting",

@@ -33,6 +33,98 @@ from services import recorder
 from tests.e2e.test_speaker import _wait_for_join_control
 
 
+class TestParticipantPresence:
+    def test_new_iframe_names_and_count_are_used(self):
+        frame = _JoinSurface("https://telemost.yandex.ru/private-join/test", state={
+            "names": ["Protocaller", "Анна"], "count": 2,
+        })
+        snapshot = asyncio.run(recorder._participant_snapshot(_JoinPage(frames=[frame])))
+        assert snapshot["presence"] == "present"
+        assert snapshot["names"] == {"Анна"}
+        assert snapshot["count"] == 2
+
+    def test_no_matching_dom_is_unknown_not_empty(self):
+        snapshot = asyncio.run(recorder._participant_snapshot(_JoinPage()))
+        assert snapshot["presence"] == "unknown"
+
+    def test_return_to_telemost_home_is_a_real_end(self, monkeypatch):
+        page = _JoinPage()
+        page.url = "https://telemost.yandex.ru/"
+        monkeypatch.setattr(recorder.asyncio, "sleep", AsyncMock())
+        probe = AsyncMock()
+        monkeypatch.setattr(recorder, "_participant_snapshot", probe)
+        assert asyncio.run(recorder._wait_for_meeting_end(page, {"Анна"}))
+        probe.assert_not_awaited()
+
+    def test_hidden_names_do_not_override_counter(self):
+        page = _JoinPage(state={"names": [], "count": 3})
+        assert asyncio.run(recorder._participant_snapshot(page))["presence"] == "present"
+
+    def test_single_guest_is_alone_even_if_bot_name_was_not_applied(self):
+        page = _JoinPage(state={"names": ["Гость"], "count": 1})
+        assert asyncio.run(recorder._participant_snapshot(page))["presence"] == "alone"
+
+    def test_one_failed_surface_cannot_prove_an_empty_room(self):
+        frame = _JoinSurface("https://telemost.yandex.ru/private-join/test")
+        frame.evaluate = AsyncMock(side_effect=RuntimeError("detached"))
+        page = _JoinPage(frames=[frame], state={"count": 1})
+        snapshot = asyncio.run(recorder._participant_snapshot(page))
+        assert snapshot["presence"] == "unknown"
+        assert snapshot["errors"]
+
+    def test_prejoin_does_not_count_as_confirmed_alone(self):
+        page = _JoinPage(state={"count": 1, "prejoin": True})
+        assert asyncio.run(recorder._participant_snapshot(page))["presence"] == "unknown"
+
+    @pytest.mark.parametrize("mode", ["present", "unknown", "alone", "interrupted_empty"])
+    def test_end_detection_with_virtual_clock(self, monkeypatch, mode):
+        from datetime import datetime, timezone, timedelta
+        start = datetime(2026, 9, 22, 11, tzinfo=timezone.utc)
+        elapsed = [0]
+
+        async def advance(seconds):
+            elapsed[0] += seconds
+
+        async def probe(page):
+            if mode == "interrupted_empty":
+                state = "unknown" if elapsed[0] == 60 else "alone"
+            else:
+                state = mode if elapsed[0] <= 15 * 60 else "alone"
+            return {"presence": state, "count": {"present": 2, "alone": 1}.get(state), "names": set(), "errors": []}
+
+        class Clock:
+            @staticmethod
+            def now(tz):
+                return start + timedelta(seconds=elapsed[0])
+
+        monkeypatch.setattr(recorder.asyncio, "sleep", advance)
+        monkeypatch.setattr(recorder.time, "monotonic", lambda: elapsed[0])
+        monkeypatch.setattr(recorder, "datetime", Clock)
+        monkeypatch.setattr(recorder, "_participant_snapshot", probe)
+        monkeypatch.setattr(recorder.config, "PARTICIPANT_POLL_INTERVAL", 30)
+        monkeypatch.setattr(recorder.config, "EMPTY_POLLS_TO_END", 3)
+        initial = {"Анна"} if mode == "interrupted_empty" else set()
+        result = asyncio.run(recorder._wait_for_meeting_end(_JoinPage(), initial, start))
+        assert elapsed[0] == {"present": 990, "unknown": 990, "alone": 660, "interrupted_empty": 150}[mode]
+        assert result is (mode in ("present", "interrupted_empty"))
+
+    def test_unknown_state_still_respects_hard_deadline(self, monkeypatch):
+        elapsed = [0]
+
+        async def advance(seconds):
+            elapsed[0] += seconds
+
+        monkeypatch.setattr(recorder.asyncio, "sleep", advance)
+        monkeypatch.setattr(recorder.time, "monotonic", lambda: elapsed[0])
+        monkeypatch.setattr(recorder.config, "MAX_RECORDING_HOURS", 1)
+        monkeypatch.setattr(recorder.config, "PARTICIPANT_POLL_INTERVAL", 30)
+        monkeypatch.setattr(recorder, "_participant_snapshot", AsyncMock(return_value={
+            "presence": "unknown", "count": None, "names": set(), "errors": [],
+        }))
+        asyncio.run(recorder._wait_for_meeting_end(_JoinPage(), set()))
+        assert elapsed[0] == 3630
+
+
 def test_synthetic_camera_preserves_real_audio_capture():
     assert "kind === 'videoinput'" in _SYNTHETIC_CAMERA_INIT_SCRIPT
     assert "nativeGetUserMedia({ audio: constraints.audio, video: false })" in (
@@ -338,6 +430,34 @@ class _JoinPage(_JoinSurface):
 
 
 class TestTelemostThreeJoin:
+    @pytest.mark.parametrize("retry", [False, True])
+    def test_late_guest_form_gets_name_before_join(self, retry):
+        page = _JoinPage()
+        # Initial page setup can finish before Telemost mounts its iframe.
+        assert asyncio.run(_fill_guest_name(page)) is None
+
+        name = _JoinElement()
+        name.value = "Гость"
+        join = _JoinElement()
+        names_at_click = []
+
+        async def click(**kwargs):
+            names_at_click.append(name.value)
+
+        join.click = click
+        page.frames.append(_JoinSurface(
+            "https://telemost.yandex.ru/private-join/test",
+            selector_elements={
+                "input[type='text']": [name],
+                "button[data-testid='enter-conference-button']": [join],
+            },
+        ))
+
+        clicked_via = asyncio.run(_click_visible_join_button(page, retry=retry))
+
+        assert clicked_via.startswith("private-join iframe")
+        assert names_at_click == ["Protocaller"]
+
     def test_fills_name_and_clicks_join_inside_private_join_iframe(self):
         name = _JoinElement()
         join = _JoinElement()
