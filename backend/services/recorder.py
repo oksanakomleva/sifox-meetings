@@ -783,6 +783,7 @@ async def _record_pipeline(meeting_id: str) -> None:
                         except Exception:
                             pass
                     speakers = await _get_active_speakers(page)
+                    participants.update(speakers)
                     for sp in speakers:
                         t = time.monotonic() - t0
                         if not speaker_timeline or speaker_timeline[-1][1] != sp:
@@ -1607,17 +1608,40 @@ async def _get_participant_names(page) -> set[str]:
 
 
 async def _get_active_speakers(page) -> list[str]:
-    try:
-        elements = await page.locator("div[class*='rootStroke'], div[class*='speaking']").all()
-        speakers = []
-        for el in elements:
-            name = await el.get_attribute("data-name") or await el.text_content() or ""
-            name = name.strip()
-            if name and name != "Protocaller":
-                speakers.append(name)
-        return speakers
-    except Exception:
-        return []
+    """Read active speakers from both the legacy page and Telemost 3 iframe."""
+    script = r"""() => {
+      const visible = e => {
+        const r = e.getBoundingClientRect();
+        const s = getComputedStyle(e);
+        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+      };
+      const result = [];
+      const active = document.querySelectorAll(
+        "[class*='rootStroke'], [class*='speaking'], [class*='Speaking'], " +
+        "[class*='activeSpeaker'], [data-speaking='true']"
+      );
+      for (const node of active) {
+        if (!visible(node)) continue;
+        const nameNode = node.matches("[class*='TextName_'],[data-name]")
+          ? node
+          : node.querySelector(
+              "[class*='TextName_'][title], [class*='participant-name'], [data-name]"
+            );
+        const name = nameNode
+          ? (nameNode.getAttribute('data-name') || nameNode.getAttribute('title') || nameNode.textContent || '').trim()
+          : (node.getAttribute('data-name') || '').trim();
+        if (name) result.push(name);
+      }
+      return [...new Set(result)];
+    }"""
+    speakers: list[str] = []
+    for _label, surface in _telemost_join_surfaces(page):
+        try:
+            names = await asyncio.wait_for(surface.evaluate(script), timeout=3)
+            speakers.extend(name for name in names if _is_real_name(name))
+        except Exception:
+            continue
+    return list(dict.fromkeys(speakers))
 
 
 def _mic_control_state(label: str) -> str:
@@ -1826,6 +1850,7 @@ async def _wait_for_meeting_end(
             return meeting_started
 
         snapshot = await _participant_snapshot(page)
+        initial_participants.update(snapshot["names"])
         logger.info(
             "Participant probe %s: presence=%s count=%s names=%d errors=%s",
             (meeting_id or "unknown")[:8], snapshot["presence"], snapshot["count"],

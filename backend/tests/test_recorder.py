@@ -43,6 +43,22 @@ class TestParticipantPresence:
         assert snapshot["names"] == {"Анна"}
         assert snapshot["count"] == 2
 
+    def test_active_speaker_is_read_from_new_iframe(self):
+        frame = _JoinSurface(
+            "https://telemost.yandex.ru/private-join/test",
+            state=["Анна", "Protocaller"],
+        )
+        speakers = asyncio.run(recorder._get_active_speakers(_JoinPage(frames=[frame])))
+        assert speakers == ["Анна"]
+
+    def test_active_speakers_are_deduplicated_across_surfaces(self):
+        frame = _JoinSurface(
+            "https://telemost.yandex.ru/private-join/test",
+            state=["Анна", "Борис"],
+        )
+        page = _JoinPage(frames=[frame], state=["Анна"])
+        assert asyncio.run(recorder._get_active_speakers(page)) == ["Анна", "Борис"]
+
     def test_no_matching_dom_is_unknown_not_empty(self):
         snapshot = asyncio.run(recorder._participant_snapshot(_JoinPage()))
         assert snapshot["presence"] == "unknown"
@@ -123,6 +139,36 @@ class TestParticipantPresence:
         }))
         asyncio.run(recorder._wait_for_meeting_end(_JoinPage(), set()))
         assert elapsed[0] == 3630
+
+    def test_names_seen_after_join_are_retained_for_protocol(self, monkeypatch):
+        from datetime import datetime, timezone, timedelta
+        start = datetime(2026, 9, 23, 11, tzinfo=timezone.utc)
+        elapsed = [0]
+        participants = set()
+        states = iter([
+            {"presence": "present", "count": 2, "names": {"Анна"}, "errors": []},
+            {"presence": "alone", "count": 1, "names": set(), "errors": []},
+            {"presence": "alone", "count": 1, "names": set(), "errors": []},
+            {"presence": "alone", "count": 1, "names": set(), "errors": []},
+        ])
+
+        async def advance(seconds):
+            elapsed[0] += seconds
+
+        class Clock:
+            @staticmethod
+            def now(tz):
+                return start + timedelta(seconds=elapsed[0])
+
+        monkeypatch.setattr(recorder.asyncio, "sleep", advance)
+        monkeypatch.setattr(recorder.time, "monotonic", lambda: elapsed[0])
+        monkeypatch.setattr(recorder, "datetime", Clock)
+        monkeypatch.setattr(recorder, "_participant_snapshot", AsyncMock(side_effect=states))
+        monkeypatch.setattr(recorder.config, "PARTICIPANT_POLL_INTERVAL", 30)
+        monkeypatch.setattr(recorder.config, "EMPTY_POLLS_TO_END", 3)
+
+        assert asyncio.run(recorder._wait_for_meeting_end(_JoinPage(), participants, start))
+        assert participants == {"Анна"}
 
 
 def test_synthetic_camera_preserves_real_audio_capture():
