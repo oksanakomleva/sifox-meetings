@@ -94,6 +94,24 @@ export const api = {
     },
     transcript: (id: string) =>
       request<{ transcript: string }>(`/meetings/${id}/transcript`),
+    access: (id: string) =>
+      request<{ users: import('../types').MeetingAccessUser[]; visible_to_all: boolean }>(`/meetings/${id}/access`),
+    grantAccess: (id: string, userIds: number[]) =>
+      request<{ ok: boolean }>(`/meetings/${id}/access`, {
+        method: 'POST', body: JSON.stringify({ user_ids: userIds }),
+      }),
+    setVisibleToAll: (id: string, value: boolean) =>
+      request<{ visible_to_all: boolean }>(`/meetings/${id}/visible-to-all`, {
+        method: 'POST', body: JSON.stringify({ value }),
+      }),
+    createShare: (id: string, password: string) =>
+      request<{ token: string; url: string }>(`/meetings/${id}/share`, {
+        method: 'POST', body: JSON.stringify({ password }),
+      }),
+    shares: (id: string) =>
+      request<{ shares: import('../types').MeetingShareLink[] }>(`/meetings/${id}/shares`),
+    revokeShare: (id: string, token: string) =>
+      request<{ ok: boolean }>(`/meetings/${id}/shares/${encodeURIComponent(token)}`, { method: 'DELETE' }),
     protocolRecipients: (id: string) =>
       request<{ recipients: string[] }>(`/meetings/${id}/protocol-recipients`),
     sendProtocol: (id: string, payload: { subject: string; recipients: string[]; body_markdown: string }) =>

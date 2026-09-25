@@ -1,3 +1,19 @@
+export interface MeetingShareLink {
+  token: string
+  url: string
+  created_at: string
+  expires_at: string | null
+}
+
+export interface MeetingAccessUser {
+  id: number
+  email: string
+  name: string | null
+  is_active: boolean
+  explicit_grant: boolean
+  has_access: boolean
+}
+
 export interface User {
   id: number
   email: string

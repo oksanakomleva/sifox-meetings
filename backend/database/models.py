@@ -1530,6 +1530,56 @@ async def get_chat_history(
 
 # ── Access grants ─────────────────────────────────────────────────────────────
 
+async def get_meeting_access_users(meeting_id: str) -> list[dict]:
+    """Minimal colleague directory plus effective and explicit meeting access."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT u.id, u.name, u.email, u.is_active,
+                   g.user_id IS NOT NULL AS explicit_grant,
+                   (u.is_active AND (u.is_admin OR (m.status = 'done' AND (
+                       m.visible_to_all OR m.recorder_user_id = u.id
+                       OR g.user_id IS NOT NULL
+                       OR EXISTS (SELECT 1 FROM meeting_participants mp
+                                  WHERE mp.meeting_id = m.id AND mp.user_id = u.id)
+                       OR EXISTS (SELECT 1 FROM calendar_meeting_links cml
+                                  WHERE cml.meeting_id = m.id
+                                    AND u.email = ANY(cml.attendee_emails))
+                   )))) IS TRUE AS has_access
+            FROM users u
+            CROSS JOIN meetings m
+            LEFT JOIN meeting_access_grants g ON g.meeting_id = m.id AND g.user_id = u.id
+            WHERE m.id = $1 AND (u.is_active OR g.user_id IS NOT NULL)
+            ORDER BY lower(COALESCE(NULLIF(u.name, ''), u.email)), u.id
+            """,
+            meeting_id,
+        )
+    return [dict(row) for row in rows]
+
+
+async def grant_meeting_access_many(user_ids: list[int], meeting_id: str, granted_by: int) -> None:
+    """Validate the entire batch and insert atomically; retries are idempotent."""
+    ids = sorted(set(user_ids))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            rows = await conn.fetch(
+                "SELECT id FROM users WHERE id = ANY($1::bigint[]) AND is_active ORDER BY id FOR SHARE",
+                ids,
+            )
+            if len(rows) != len(ids):
+                raise ValueError("Unknown or inactive recipient")
+            await conn.execute(
+                """
+                INSERT INTO meeting_access_grants (user_id, meeting_id, granted_by)
+                SELECT id, $2::uuid, $3::bigint FROM unnest($1::bigint[]) AS recipient(id)
+                ON CONFLICT (user_id, meeting_id) DO NOTHING
+                """,
+                ids, meeting_id, granted_by if granted_by > 0 else None,
+            )
+
+
 async def grant_meeting_access(
     user_id: int, meeting_id: str, granted_by: int
 ) -> None:

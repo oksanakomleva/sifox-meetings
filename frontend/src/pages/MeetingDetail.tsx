@@ -186,7 +186,7 @@ export default function MeetingDetail() {
             </p>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-            {user?.is_admin && !isDemoOn() && (
+            {user && !user.is_preview && !isDemoOn() && (
               <button className="btn btn-secondary" onClick={() => setShowShare(true)}>
                 🔗 Доступ и публикация
               </button>
@@ -482,6 +482,7 @@ export default function MeetingDetail() {
         <ShareAccessModal
           meetingId={id}
           initialVisibleToAll={!!meeting.visible_to_all}
+          onVisibilityChange={visible => setMeeting(m => m ? { ...m, visible_to_all: visible } : m)}
           onClose={() => setShowShare(false)}
         />
       )}

@@ -2,9 +2,12 @@
 import os
 import re
 import logging
+import asyncio
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictInt
+from uuid import UUID
 from typing import Annotated
 
 from auth.deps import get_current_user
@@ -259,6 +262,83 @@ async def get_meeting(meeting_id: str, user: CurrentUser):
     meeting = await _get_accessible_meeting(meeting_id, user)
     participants = await models.get_participants(meeting_id)
     return {**meeting, "participants": participants}
+
+
+class MeetingAccessRequest(BaseModel):
+    user_ids: list[Annotated[StrictInt, Field(gt=0, le=9223372036854775807)]] = Field(min_length=1, max_length=100)
+
+
+class PublishMeetingRequest(BaseModel):
+    password: str = Field(min_length=4, max_length=256)
+    expires_at: datetime | None = None
+
+
+class MeetingVisibilityRequest(BaseModel):
+    value: bool
+
+
+async def _check_access_sharing(meeting_id: str, user: dict) -> dict:
+    # Demo access must never become a way to grant real meeting permissions.
+    if user.get("is_preview"):
+        raise HTTPException(403, "В деморежиме нельзя управлять доступом")
+    return await _get_accessible_meeting(meeting_id, user)
+
+
+@router.get("/{meeting_id}/access")
+async def meeting_access(meeting_id: UUID, user: CurrentUser):
+    meeting = await _check_access_sharing(str(meeting_id), user)
+    return {
+        "users": await models.get_meeting_access_users(str(meeting_id)),
+        "visible_to_all": bool(meeting.get("visible_to_all")),
+    }
+
+
+@router.post("/{meeting_id}/access")
+async def grant_meeting_access(meeting_id: UUID, body: MeetingAccessRequest, user: CurrentUser):
+    await _check_access_sharing(str(meeting_id), user)
+    try:
+        await models.grant_meeting_access_many(
+            list(dict.fromkeys(body.user_ids)), str(meeting_id), user["user_id"],
+        )
+    except ValueError:
+        raise HTTPException(400, "Один из выбранных пользователей не найден или отключён")
+    return {"ok": True}
+
+
+@router.post("/{meeting_id}/share")
+async def publish_meeting(meeting_id: UUID, body: PublishMeetingRequest, user: CurrentUser):
+    await _check_access_sharing(str(meeting_id), user)
+    from services import share
+    token = share.new_share_token()
+    password_hash = await asyncio.to_thread(share.hash_password, body.password)
+    await models.create_meeting_share(
+        token, str(meeting_id), password_hash, user["user_id"], body.expires_at,
+    )
+    return {"token": token, "url": f"{config.BASE_URL}/share/{token}"}
+
+
+@router.get("/{meeting_id}/shares")
+async def meeting_share_links(meeting_id: UUID, user: CurrentUser):
+    await _check_access_sharing(str(meeting_id), user)
+    shares = await models.list_meeting_shares(str(meeting_id))
+    return {"shares": [dict(s, url=f"{config.BASE_URL}/share/{s['token']}") for s in shares]}
+
+
+@router.delete("/{meeting_id}/shares/{token}")
+async def revoke_meeting_link(meeting_id: UUID, token: str, user: CurrentUser):
+    await _check_access_sharing(str(meeting_id), user)
+    link = await models.get_meeting_share(token)
+    if not link or str(link["meeting_id"]) != str(meeting_id):
+        raise HTTPException(404, "Share not found")
+    await models.delete_meeting_share(token)
+    return {"ok": True}
+
+
+@router.post("/{meeting_id}/visible-to-all")
+async def publish_to_all(meeting_id: UUID, body: MeetingVisibilityRequest, user: CurrentUser):
+    await _check_access_sharing(str(meeting_id), user)
+    await models.set_meeting_visible_to_all(str(meeting_id), body.value)
+    return {"ok": True, "visible_to_all": body.value}
 
 
 class TagsUpdate(BaseModel):
