@@ -440,6 +440,28 @@ async def get_enabled_calendars() -> list[dict]:
 
 # ── Meetings ──────────────────────────────────────────────────────────────────
 
+def _is_rescheduled_occurrence(
+    status: str,
+    old_start: datetime | None,
+    start_time: datetime,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Return whether a finished calendar occurrence moved to a new time.
+
+    ``no_show`` is terminal for the old slot, but not for the calendar event:
+    organizers commonly move a meeting after nobody joined the original slot.
+    Treat it like other finished states so the new slot gets a fresh pending row.
+    """
+    current_time = now or datetime.now(timezone.utc)
+    return (
+        status in ("done", "error", "no_show")
+        and old_start is not None
+        and abs((start_time - old_start).total_seconds()) > 60
+        and start_time >= current_time - timedelta(minutes=30)
+    )
+
+
 async def upsert_meeting(
     meeting_url: str,
     title: str,
@@ -492,11 +514,8 @@ async def upsert_meeting(
             # still-recordable time is a genuine reschedule: keep the old recording
             # and split off a fresh pending occurrence so the bot records the new
             # time (and it shows up in the upcoming list).
-            rescheduled = (
-                existing["status"] in ("done", "error")
-                and old_start is not None
-                and abs((start_time - old_start).total_seconds()) > 60
-                and start_time >= datetime.now(timezone.utc) - timedelta(minutes=30)
+            rescheduled = _is_rescheduled_occurrence(
+                existing["status"], old_start, start_time,
             )
 
             if rescheduled:
