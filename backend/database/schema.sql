@@ -101,6 +101,10 @@ ALTER TABLE meetings ADD COLUMN IF NOT EXISTS assistant_public_info_enabled BOOL
 -- Make a meeting visible in EVERY user's "Мои встречи" (for company-wide /
 -- uploaded shared recordings). Per-user grants live in meeting_access_grants.
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS visible_to_all BOOLEAN DEFAULT FALSE;
+-- Machine-readable transcription quality and speaker-attribution coverage.
+-- Kept separately from the user-facing transcript so regressions can be
+-- diagnosed without preserving raw browser DOM or other sensitive data.
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS transcription_diagnostics JSONB DEFAULT '{}'::jsonb;
 
 -- ── Public share links (view a meeting by direct link + password, no login) ──
 CREATE TABLE IF NOT EXISTS meeting_shares (

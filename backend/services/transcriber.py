@@ -27,13 +27,31 @@ _WORKER_TIMEOUT = 7200  # seconds
 
 
 @dataclass
+class TranscriptWord:
+    start: float
+    end: float
+    word: str
+    probability: float | None = None
+
+
+@dataclass
 class TranscriptSegment:
     start: float
     end: float
     text: str
+    words: list[TranscriptWord] | None = None
+    avg_logprob: float | None = None
+    no_speech_prob: float | None = None
+    compression_ratio: float | None = None
 
 
-async def transcribe_audio(audio_path: str) -> list[TranscriptSegment]:
+async def transcribe_audio(
+    audio_path: str,
+    *,
+    prompt: str | None = None,
+    hotwords: str | None = None,
+    diagnostics: dict | None = None,
+) -> list[TranscriptSegment]:
     """Transcribe a file with faster-whisper in an isolated, killable subprocess."""
     async with _transcribe_semaphore:
         # Free cached tiny/small models before loading the much larger post-call
@@ -43,13 +61,15 @@ async def transcribe_audio(audio_path: str) -> list[TranscriptSegment]:
         proc = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "services.transcribe_worker",
             audio_path, config.WHISPER_MODEL, "ru", "5",
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env={**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"},
         )
+        request = json.dumps({"prompt": prompt or "", "hotwords": hotwords or ""}).encode()
         try:
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=_WORKER_TIMEOUT
+                proc.communicate(input=request), timeout=_WORKER_TIMEOUT
             )
         except asyncio.TimeoutError:
             proc.kill()
@@ -71,13 +91,32 @@ async def transcribe_audio(audio_path: str) -> list[TranscriptSegment]:
             raise RuntimeError(
                 f"Whisper worker returned unparseable output ({e}); got: {out[:300]!r}"
             )
-        result = [
-            TranscriptSegment(start=s["start"], end=s["end"], text=s["text"])
-            for s in data.get("segments", [])
-        ]
+        result = []
+        for s in data.get("segments", []):
+            words = [
+                TranscriptWord(
+                    start=w["start"],
+                    end=w["end"],
+                    word=w["word"],
+                    probability=w.get("probability"),
+                )
+                for w in s.get("words", [])
+                if w.get("word")
+            ]
+            result.append(TranscriptSegment(
+                start=s["start"],
+                end=s["end"],
+                text=s["text"],
+                words=words or None,
+                avg_logprob=s.get("avg_logprob"),
+                no_speech_prob=s.get("no_speech_prob"),
+                compression_ratio=s.get("compression_ratio"),
+            ))
+        if diagnostics is not None:
+            diagnostics.update(data.get("diagnostics") or {})
         logger.info(
-            "Transcribed %s: %d segments, lang=%s",
-            audio_path, len(result), data.get("language"),
+            "Transcribed %s: %d segments, lang=%s, diagnostics=%s",
+            audio_path, len(result), data.get("language"), data.get("diagnostics"),
         )
         return result
 

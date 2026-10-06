@@ -13,7 +13,9 @@ from services.recorder import (
     _is_real_name,
     _effective_speaker_timeline,
     _speaker_for_segment,
+    _speaker_attribution_ratio,
     _build_transcript,
+    _transcription_hints,
     _confirm_audio_capture_started,
     _fmt_time,
     _find_pids_with_environment,
@@ -87,6 +89,30 @@ class TestParticipantPresence:
         snapshot = asyncio.run(recorder._participant_snapshot(page))
         assert snapshot["presence"] == "unknown"
         assert snapshot["errors"]
+
+    def test_repeated_partial_alone_evidence_ends_started_meeting(self, monkeypatch):
+        elapsed = [0]
+
+        async def advance(seconds):
+            elapsed[0] += seconds
+
+        monkeypatch.setattr(recorder.asyncio, "sleep", advance)
+        monkeypatch.setattr(recorder.time, "monotonic", lambda: elapsed[0])
+        monkeypatch.setattr(recorder.config, "PARTICIPANT_POLL_INTERVAL", 30)
+        monkeypatch.setattr(recorder.config, "EMPTY_POLLS_TO_END", 3)
+        monkeypatch.setattr(recorder, "_participant_snapshot", AsyncMock(return_value={
+            "presence": "unknown",
+            "count": 1,
+            "names": set(),
+            "errors": ["iframe: RuntimeError"],
+        }))
+
+        result = asyncio.run(recorder._wait_for_meeting_end(
+            _JoinPage(), {"Анна"}, meeting_id="test-meeting"
+        ))
+
+        assert result is True
+        assert elapsed[0] == 90
 
     def test_prejoin_does_not_count_as_confirmed_alone(self):
         page = _JoinPage(state={"count": 1, "prejoin": True})
@@ -265,10 +291,18 @@ class TestRecorderProcessCleanup:
 
 class _Seg:
     """Minimal stand-in for a faster-whisper segment (has start/end/text)."""
-    def __init__(self, start, end, text):
+    def __init__(self, start, end, text, words=None):
         self.start = start
         self.end = end
         self.text = text
+        self.words = words
+
+
+class _Word:
+    def __init__(self, start, end, word):
+        self.start = start
+        self.end = end
+        self.word = word
 
 
 class TestIsRealName:
@@ -324,6 +358,14 @@ class TestSpeakerForSegment:
     def test_empty_timeline_is_unknown(self):
         assert _speaker_for_segment(0.0, 5.0, []) == "Участник"
 
+    def test_explicit_silence_closes_previous_speaker(self):
+        tl = [(0.0, "Alice"), (5.0, None)]
+        assert _speaker_for_segment(6.0, 8.0, tl) == "Участник"
+
+    def test_unknown_interval_can_win_majority_overlap(self):
+        tl = [(0.0, "Alice"), (2.0, None), (9.0, "Bob")]
+        assert _speaker_for_segment(1.0, 8.0, tl) == "Участник"
+
 
 class TestBuildTranscript:
     def test_same_speaker_short_gap_merges(self):
@@ -341,6 +383,32 @@ class TestBuildTranscript:
         assert "Alice: Hi" in result
         assert "Bob: Reply" in result
 
+    def test_word_timestamps_split_one_segment_between_speakers(self):
+        segments = [_Seg(0.0, 4.0, "Привет Пока", [
+            _Word(0.0, 1.0, "Привет"),
+            _Word(3.0, 4.0, "Пока"),
+        ])]
+        result = _build_transcript(segments, [(0.0, "Alice"), (2.0, "Bob")])
+        assert "Alice: Привет" in result
+        assert "Bob: Пока" in result
+
+    def test_word_punctuation_has_no_space_before_comma(self):
+        segments = [_Seg(0.0, 2.0, "Привет, мир", [
+            _Word(0.0, 0.5, "Привет"),
+            _Word(0.5, 0.6, ","),
+            _Word(0.7, 1.0, "мир"),
+        ])]
+        result = _build_transcript(segments, [(0.0, "Alice")])
+        assert "Привет, мир" in result
+
+    def test_no_speaker_timeline_preserves_segment_formatting(self):
+        segments = [_Seg(0.0, 2.0, "«Привет» — мир!", [
+            _Word(0.0, 0.5, "«Привет»"),
+            _Word(0.7, 1.0, "— мир!"),
+        ])]
+        result = _build_transcript(segments, [])
+        assert "«Привет» — мир!" in result
+
     def test_long_monologue_splits_into_paragraphs(self):
         # Single speaker (e.g. an upload with no timeline), continuous speech with
         # tiny gaps over ~150s → must break into multiple blocks via the length cap,
@@ -350,6 +418,27 @@ class TestBuildTranscript:
         assert result.count("Участник:") > 1
         # Every segment's text is still present.
         assert "s0" in result and "s49" in result
+
+
+class TestTranscriptionDiagnostics:
+    def test_speaker_attribution_ratio_uses_word_timestamps(self):
+        segments = [_Seg(0.0, 4.0, "one two", [
+            _Word(0.0, 1.0, "one"),
+            _Word(2.0, 4.0, "two"),
+        ])]
+        ratio = _speaker_attribution_ratio(segments, [(0.0, "Alice"), (1.0, None)])
+        assert ratio == pytest.approx(1 / 3, abs=0.0001)
+
+    def test_hints_include_title_participants_and_glossary(self, monkeypatch):
+        monkeypatch.setattr(recorder.config, "WHISPER_GLOSSARY", "Sifox, ГПБМ")
+        monkeypatch.setattr(recorder.config, "WHISPER_PROMPT_MAX_CHARS", 800)
+        prompt, hotwords = _transcription_hints(
+            {"title": "ГПБМ статус"}, ["Alice", "Protocaller", "Bob"]
+        )
+        assert "ГПБМ статус" in prompt
+        assert "Alice" in prompt and "Bob" in prompt
+        assert "Protocaller" not in prompt
+        assert "Sifox" in hotwords
 
 
 class TestFmtTime:

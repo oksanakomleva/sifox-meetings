@@ -33,6 +33,10 @@ class Config(BaseSettings):
 
     # ── Whisper ───────────────────────────────────────────────────────────
     WHISPER_MODEL: str = "medium"
+    # Product/company vocabulary supplied to faster-whisper as spelling hints.
+    # Extra terms can be added in Railway without changing code.
+    WHISPER_GLOSSARY: str = "Sifox, Protocaller, Протоколлер, UZUM, Omantel, ГПБМ, МегаФон, Телемост"
+    WHISPER_PROMPT_MAX_CHARS: int = 800
 
     # ── Storage ───────────────────────────────────────────────────────────
     AUDIO_DIR: str = "/audio"

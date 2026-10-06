@@ -271,6 +271,7 @@ class SmokeTest:
         *,
         live_assistant: bool = False,
         retention: bool = False,
+        natural_exit: bool = False,
     ) -> bool:
         """
         Fully automated E2E:
@@ -284,8 +285,12 @@ class SmokeTest:
         print("  +0 min  — calendar event created, sync triggered")
         print("  +3 min  — recorder bot joins the meeting")
         print("  +3 min  — Test Speaker joins with mic ON and streams test_audio.wav")
-        print("  +16 min — Test Speaker leaves; recorder must detect departure itself" if retention else
-              "  +5 min  — Test Speaker leaves; recorder gets a graceful E2E finish signal")
+        if retention:
+            print("  +16 min — Test Speaker leaves; recorder must detect departure itself")
+        elif natural_exit:
+            print("  +5 min  — Test Speaker leaves; recorder must detect departure itself")
+        else:
+            print("  +5 min  — Test Speaker leaves; recorder gets a graceful E2E finish signal")
         print("  +7 min  — Whisper transcribes, OpenAI analyzes")
         print("  +10 min — status=done, artifacts ready\n")
 
@@ -312,6 +317,8 @@ class SmokeTest:
         e2e_finish_requested = False
         captured_note_text = ""
         speaker_started_at = None
+        speaker_completed_at = None
+        natural_stop_verified = False
         meeting_url = e2e_data.get("meeting_url", "")
 
         while time.time() < deadline:
@@ -397,15 +404,19 @@ class SmokeTest:
                                     f"job {speaker_job_id[:8]} status={state}",
                                 )
                             if state == "completed" and speaker_status.get("ready"):
-                                if retention:
+                                if retention or natural_exit:
                                     self._check(
-                                        "Recorder stayed with participant beyond 11 minutes",
+                                        "Recorder stayed while Test Speaker was present",
                                         status == "recording" and speaker_started_at is not None
-                                        and time.monotonic() - speaker_started_at >= 12 * 60,
-                                        f"recorder status={status}; speaker completed 13-minute session",
+                                        and (
+                                            not retention
+                                            or time.monotonic() - speaker_started_at >= 12 * 60
+                                        ),
+                                        f"recorder status={status}; speaker completed session",
                                     )
                                     # No finish endpoint: verify real participant departure.
                                     e2e_finish_requested = True
+                                    speaker_completed_at = time.monotonic()
                                     print("  [speaker] Left; waiting for natural recorder stop")
                                     continue
                                 if live_assistant:
@@ -501,9 +512,23 @@ class SmokeTest:
                     except Exception as se:
                         print(f"  [speaker] status unavailable, retrying: {se}")
 
-                if retention and speaker_launched and not e2e_finish_requested and status != "recording":
+                if (retention or natural_exit) and speaker_launched and not e2e_finish_requested and status != "recording":
                     self._check("Recorder did not leave while Test Speaker was present", False, f"early status={status}")
                     break
+
+                if (
+                    (retention or natural_exit)
+                    and speaker_completed_at is not None
+                    and not natural_stop_verified
+                    and status in ("transcribing", "analyzing", "done")
+                ):
+                    stop_latency = time.monotonic() - speaker_completed_at
+                    natural_stop_verified = True
+                    self._check(
+                        "Recorder left naturally after the participant exited",
+                        stop_latency <= 180,
+                        f"transitioned to {status} after {stop_latency:.0f}s",
+                    )
 
                 if status == "done" and target.get("summary"):
                     if not speaker_confirmed:
@@ -544,6 +569,42 @@ class SmokeTest:
                         tlen > 50,
                         f"{tlen} chars",
                     )
+                    diagnostics = target.get("transcription_diagnostics") or {}
+                    stt = diagnostics.get("stt") or {}
+                    tracking = diagnostics.get("speaker_tracking") or {}
+                    word_count = stt.get("word_count")
+                    avg_word_probability = stt.get("avg_word_probability")
+                    low_confidence_ratio = stt.get("low_confidence_word_ratio")
+                    attribution_ratio = tracking.get("attributed_speech_ratio")
+                    self._check(
+                        "Transcription quality metrics were saved",
+                        isinstance(word_count, int) and word_count >= 10,
+                        f"word_count={word_count}",
+                    )
+                    self._check(
+                        "Average word recognition confidence is acceptable",
+                        isinstance(avg_word_probability, (int, float))
+                        and avg_word_probability >= 0.55,
+                        f"avg_word_probability={avg_word_probability}",
+                    )
+                    self._check(
+                        "Low-confidence word share is acceptable",
+                        isinstance(low_confidence_ratio, (int, float))
+                        and low_confidence_ratio <= 0.45,
+                        f"low_confidence_word_ratio={low_confidence_ratio}",
+                    )
+                    self._check(
+                        "Speaker attribution covers the test speech",
+                        isinstance(attribution_ratio, (int, float))
+                        and attribution_ratio >= 0.25,
+                        f"attributed_speech_ratio={attribution_ratio}",
+                    )
+                    if retention or natural_exit:
+                        self._check(
+                            "Natural recorder stop was observed",
+                            natural_stop_verified,
+                            "participant left without the E2E finish endpoint",
+                        )
                     break
                 elif status == "error":
                     self._check(
@@ -603,6 +664,7 @@ def main():
     ap.add_argument("--record", action="store_true", help="Wait for a pending meeting to be recorded (15min timeout)")
     ap.add_argument("--full-e2e", action="store_true", help="Fully automated E2E: creates calendar event + launches Test Speaker on Railway (~20min)")
     ap.add_argument("--retention-e2e", action="store_true", help="13-minute participant presence and natural recorder stop (no forced finish)")
+    ap.add_argument("--natural-exit-e2e", action="store_true", help="Short E2E with natural recorder stop and transcription quality checks")
     ap.add_argument(
         "--live-assistant-e2e",
         action="store_true",
@@ -623,7 +685,7 @@ def main():
 
     smoke = SmokeTest(args.url, args.cookie, test_api_key=args.api_key)
 
-    if args.full_e2e or args.live_assistant_e2e or args.retention_e2e:
+    if args.full_e2e or args.live_assistant_e2e or args.retention_e2e or args.natural_exit_e2e:
         print(f"[>>] Pre-checks against {args.url}\n")
         smoke.test_health()
         smoke.test_auth_required()
@@ -631,8 +693,12 @@ def main():
         if not is_admin:
             print("\n❌ Need admin auth for full E2E (set TEST_API_KEY in .env.test)")
             sys.exit(1)
-        ok = smoke.run_full_e2e(timeout_minutes=35 if args.retention_e2e else 20,
-                              live_assistant=args.live_assistant_e2e, retention=args.retention_e2e)
+        ok = smoke.run_full_e2e(
+            timeout_minutes=35 if args.retention_e2e else 20,
+            live_assistant=args.live_assistant_e2e,
+            retention=args.retention_e2e,
+            natural_exit=args.natural_exit_e2e,
+        )
     else:
         ok = smoke.run(record_mode=args.record)
 

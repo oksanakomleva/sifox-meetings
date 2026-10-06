@@ -760,11 +760,22 @@ async def _record_pipeline(meeting_id: str) -> None:
         )
 
         # 5. Speaker timeline
-        speaker_timeline: list[tuple[float, str]] = []
+        # None explicitly closes the previous speaker interval. Without this,
+        # the last highlighted person used to be assigned to every later phrase
+        # when Telemost removed the highlight or changed its DOM.
+        speaker_timeline: list[tuple[float, str | None]] = []
+        speaker_diagnostics = {
+            "polls": 0,
+            "successful_polls": 0,
+            "failed_polls": 0,
+            "active_polls": 0,
+            "ambiguous_polls": 0,
+        }
         t0 = time.monotonic()
 
         async def track_speakers():
             dumped = False
+            empty_streak = 0
             while True:
                 await asyncio.sleep(1)
                 try:
@@ -782,14 +793,38 @@ async def _record_pipeline(meeting_id: str) -> None:
                                 logger.info("Speaker tile DOM sample %s: %s", meeting_id[:8], sample)
                         except Exception:
                             pass
-                    speakers = await _get_active_speakers(page)
+                    snapshot = await _active_speaker_snapshot(page)
+                    speaker_diagnostics["polls"] += 1
+                    if not snapshot["surfaces_ok"] or (not snapshot["names"] and snapshot["errors"]):
+                        # A DOM/iframe failure is not silence. Keep the current
+                        # interval open but make the failure visible in metrics.
+                        speaker_diagnostics["failed_polls"] += 1
+                        empty_streak = 0
+                        continue
+                    speaker_diagnostics["successful_polls"] += 1
+                    speakers = snapshot["names"]
                     participants.update(speakers)
-                    for sp in speakers:
-                        t = time.monotonic() - t0
-                        if not speaker_timeline or speaker_timeline[-1][1] != sp:
-                            speaker_timeline.append((t, sp))
-                except Exception:
-                    pass
+                    t = time.monotonic() - t0
+                    if len(speakers) == 1:
+                        empty_streak = 0
+                        speaker_diagnostics["active_polls"] += 1
+                        if not speaker_timeline or speaker_timeline[-1][1] != speakers[0]:
+                            speaker_timeline.append((t, speakers[0]))
+                    elif len(speakers) > 1:
+                        empty_streak = 0
+                        speaker_diagnostics["ambiguous_polls"] += 1
+                        if not speaker_timeline or speaker_timeline[-1][1] is not None:
+                            speaker_timeline.append((t, None))
+                    else:
+                        empty_streak += 1
+                        # Require two successful empty probes to avoid chopping
+                        # speech on a single missed animation frame.
+                        if empty_streak >= 2 and speaker_timeline and speaker_timeline[-1][1] is not None:
+                            speaker_timeline.append((t, None))
+                except Exception as exc:
+                    speaker_diagnostics["failed_polls"] += 1
+                    if speaker_diagnostics["failed_polls"] <= 3 or speaker_diagnostics["failed_polls"] % 30 == 0:
+                        logger.warning("Speaker tracking failed (%s): %s", meeting_id[:8], exc)
 
         tracker = asyncio.create_task(track_speakers())
 
@@ -864,6 +899,7 @@ async def _record_pipeline(meeting_id: str) -> None:
             audio_path,
             speaker_timeline=speaker_timeline,
             participants=participants,
+            speaker_diagnostics=speaker_diagnostics,
             end_time=end_time,
         )
 
@@ -942,6 +978,7 @@ async def transcribe_and_analyze(
     *,
     speaker_timeline: list | None = None,
     participants: set[str] | list[str] | None = None,
+    speaker_diagnostics: dict | None = None,
     end_time: datetime | None = None,
 ) -> None:
     """Transcribe an audio file, store the transcript, convert to MP3, run AI
@@ -961,11 +998,30 @@ async def transcribe_and_analyze(
     meeting = await models.get_meeting(meeting_id)
 
     # 1. Transcribe (faster-whisper decodes any format via ffmpeg)
-    segments = await transcribe_audio(str(audio_path))
+    stt_diagnostics: dict = {}
+    prompt, hotwords = _transcription_hints(meeting, participants)
+    segments = await transcribe_audio(
+        str(audio_path),
+        prompt=prompt,
+        hotwords=hotwords,
+        diagnostics=stt_diagnostics,
+    )
+    effective_tl = _effective_speaker_timeline(speaker_timeline or [], set(participants))
+    diagnostics = {
+        "source": "telemost" if speaker_timeline is not None else "upload",
+        "stt": stt_diagnostics,
+        "speaker_tracking": {
+            **(speaker_diagnostics or {}),
+            "timeline_events": len(effective_tl),
+            "attributed_speech_ratio": _speaker_attribution_ratio(segments, effective_tl),
+        },
+    }
+    # Persist even an empty result: speech/VAD metrics are most valuable when
+    # diagnosing why a recording was classified as empty.
+    await models.save_transcription_diagnostics(meeting_id, diagnostics)
     if not segments:
         raise EmptyRecordingError("Empty transcription")
 
-    effective_tl = _effective_speaker_timeline(speaker_timeline or [], set(participants))
     transcript_text = _build_transcript(segments, effective_tl)
     await models.save_transcript(meeting_id, transcript_text)
 
@@ -1607,8 +1663,8 @@ async def _get_participant_names(page) -> set[str]:
     return (await _participant_snapshot(page))["names"]
 
 
-async def _get_active_speakers(page) -> list[str]:
-    """Read active speakers from both the legacy page and Telemost 3 iframe."""
+async def _active_speaker_snapshot(page) -> dict:
+    """Read active speakers and distinguish real silence from a broken probe."""
     script = r"""() => {
       const visible = e => {
         const r = e.getBoundingClientRect();
@@ -1635,13 +1691,26 @@ async def _get_active_speakers(page) -> list[str]:
       return [...new Set(result)];
     }"""
     speakers: list[str] = []
+    surfaces_ok = 0
+    errors = 0
     for _label, surface in _telemost_join_surfaces(page):
         try:
             names = await asyncio.wait_for(surface.evaluate(script), timeout=3)
+            surfaces_ok += 1
             speakers.extend(name for name in names if _is_real_name(name))
         except Exception:
+            errors += 1
             continue
-    return list(dict.fromkeys(speakers))
+    return {
+        "names": list(dict.fromkeys(speakers)),
+        "surfaces_ok": surfaces_ok,
+        "errors": errors,
+    }
+
+
+async def _get_active_speakers(page) -> list[str]:
+    """Backward-compatible convenience wrapper used by diagnostics/tests."""
+    return (await _active_speaker_snapshot(page))["names"]
 
 
 def _mic_control_state(label: str) -> str:
@@ -1823,6 +1892,7 @@ async def _wait_for_meeting_end(
     meeting_started = len(initial_participants) > 0
     empty_polls = 0
     unknown_polls = 0
+    partial_alone_polls = 0
     deadline = time.monotonic() + config.MAX_RECORDING_HOURS * 3600
     # Grace period after scheduled start — wait this long for someone to arrive
     # before giving up on a meeting that never started
@@ -1856,16 +1926,40 @@ async def _wait_for_meeting_end(
             (meeting_id or "unknown")[:8], snapshot["presence"], snapshot["count"],
             len(snapshot["names"]), snapshot["errors"],
         )
-        if snapshot["presence"] == "present":
+        presence = snapshot["presence"]
+        if presence == "present":
             meeting_started = True
             empty_polls = 0
             unknown_polls = 0
+            partial_alone_polls = 0
             continue
 
-        if snapshot["presence"] == "unknown":
+        if presence == "unknown" and snapshot.get("count") == 1:
+            # Telemost 3 often detaches its old iframe after participants leave.
+            # The live page's authoritative participant counter still says 1
+            # (the recorder itself), but the detached surface adds an error and
+            # used to keep the state UNKNOWN until the four-hour hard limit.
+            # Require the same counter evidence repeatedly before treating it as
+            # an empty room; a single partial probe still cannot stop a meeting.
+            partial_alone_polls += 1
+            unknown_polls += 1
+            logger.warning(
+                "Partial alone evidence for %s (%d/%d, errors=%s)",
+                (meeting_id or "unknown")[:8],
+                partial_alone_polls,
+                config.EMPTY_POLLS_TO_END,
+                snapshot["errors"],
+            )
+            if partial_alone_polls < config.EMPTY_POLLS_TO_END:
+                continue
+            presence = "alone"
+            empty_polls = partial_alone_polls
+
+        if presence == "unknown":
             # A UI update, detached frame or slow browser is not evidence that
             # participants left. Retain the existing hard recording deadline.
             empty_polls = 0
+            partial_alone_polls = 0
             unknown_polls += 1
             if unknown_polls == 1 or unknown_polls % 10 == 0:
                 logger.warning(
@@ -1874,6 +1968,8 @@ async def _wait_for_meeting_end(
                 )
             continue
         unknown_polls = 0
+        if presence != "alone":
+            partial_alone_polls = 0
 
         # No one present. Decide whether to end or keep waiting.
         if not meeting_started and scheduled_start is not None:
@@ -1890,7 +1986,10 @@ async def _wait_for_meeting_end(
                 )
                 continue
 
-        empty_polls += 1
+        if partial_alone_polls >= config.EMPTY_POLLS_TO_END:
+            empty_polls = partial_alone_polls
+        else:
+            empty_polls += 1
         logger.info("Empty poll %d/%d (started=%s)", empty_polls, config.EMPTY_POLLS_TO_END, meeting_started)
         if empty_polls >= config.EMPTY_POLLS_TO_END:
             logger.info("Meeting ended (no participants)")
@@ -2370,9 +2469,9 @@ async def _unload_pulse_module(module_id: int, label: str) -> None:
 # ── Transcript building ───────────────────────────────────────────────────────
 
 def _effective_speaker_timeline(
-    timeline: list[tuple[float, str]],
+    timeline: list[tuple[float, str | None]],
     participants: set[str],
-) -> list[tuple[float, str]]:
+) -> list[tuple[float, str | None]]:
     if timeline:
         return timeline
     others = [p for p in participants if p != "Protocaller"]
@@ -2384,7 +2483,7 @@ def _effective_speaker_timeline(
 def _speaker_for_segment(
     start: float,
     end: float,
-    timeline: list[tuple[float, str]],
+    timeline: list[tuple[float, str | None]],
 ) -> str:
     """Speaker covering the LARGEST share of [start, end] per the timeline.
 
@@ -2405,6 +2504,7 @@ def _speaker_for_segment(
     n = len(timeline)
     for i in range(n):
         ts, name = timeline[i]
+        name = name or "Участник"
         seg_from = max(start, ts)
         seg_to = end if i == n - 1 else min(end, timeline[i + 1][0])
         if seg_to > seg_from:
@@ -2415,14 +2515,46 @@ def _speaker_for_segment(
         speaker = "Участник"
         for ts, name in reversed(timeline):
             if start >= ts:
-                speaker = name
+                speaker = name or "Участник"
                 break
         return speaker
 
     return max(durations, key=durations.get)
 
 
-def _build_transcript(segments, speaker_timeline: list[tuple[float, str]]) -> str:
+def _transcription_hints(meeting: dict | None, participants: list[str]) -> tuple[str, str]:
+    """Build bounded spelling context from metadata, never from transcript text."""
+    title = str((meeting or {}).get("title") or "").strip()
+    names = [p.strip() for p in participants if p and p != "Protocaller"]
+    glossary = str(config.WHISPER_GLOSSARY or "").strip()
+    parts = []
+    if title:
+        parts.append(f"Название встречи: {title}.")
+    if names:
+        parts.append(f"Участники: {', '.join(sorted(set(names)))}.")
+    if glossary:
+        parts.append(f"Термины: {glossary}.")
+    limit = max(0, config.WHISPER_PROMPT_MAX_CHARS)
+    prompt = " ".join(parts)[:limit]
+    hotword_parts = [glossary, title, ", ".join(sorted(set(names)))]
+    hotwords = ", ".join(part for part in hotword_parts if part)[:limit]
+    return prompt, hotwords
+
+
+def _speaker_attribution_ratio(segments, timeline: list[tuple[float, str | None]]) -> float:
+    """Share of recognized speech for which Telemost supplied a speaker name."""
+    known = total = 0.0
+    for segment in segments:
+        units = getattr(segment, "words", None) or [segment]
+        for unit in units:
+            duration = max(0.0, float(unit.end) - float(unit.start))
+            total += duration
+            if _speaker_for_segment(unit.start, unit.end, timeline) != "Участник":
+                known += duration
+    return round(known / total, 4) if total else 0.0
+
+
+def _build_transcript(segments, speaker_timeline: list[tuple[float, str | None]]) -> str:
     """
     Build transcript merging consecutive segments from the same speaker
     if the gap between them is less than PAUSE_THRESHOLD seconds.
@@ -2439,16 +2571,30 @@ def _build_transcript(segments, speaker_timeline: list[tuple[float, str]]) -> st
     # Label every Whisper segment by majority overlap with the speaker timeline
     # (robust to the ~1s polling lag and to segments spanning a speaker change),
     # not by the instantaneous speaker at seg.start.
-    labeled: list[tuple[object, str]] = [
-        (seg, _speaker_for_segment(seg.start, seg.end, speaker_timeline))
-        for seg in segments
-    ]
+    labeled: list[tuple[object, str]] = []
+    use_word_boundaries = bool(
+        speaker_timeline
+        and (len(speaker_timeline) > 1 or speaker_timeline[0][0] > 0)
+    )
+    for seg in segments:
+        words = getattr(seg, "words", None) if use_word_boundaries else None
+        if not words:
+            labeled.append((seg, _speaker_for_segment(seg.start, seg.end, speaker_timeline)))
+            continue
+        # Word timestamps let a single Whisper segment be split when the real
+        # speaker changed in its middle. Consecutive words are merged below.
+        for word in words:
+            if str(word.word).strip():
+                labeled.append((word, _speaker_for_segment(word.start, word.end, speaker_timeline)))
+
+    if not labeled:
+        return ""
 
     # Merge consecutive same-speaker segments with short gaps into one block
     blocks: list[tuple[float, str, str]] = []  # (start_time, speaker, text)
     curr_speaker = labeled[0][1]
     curr_start   = labeled[0][0].start
-    curr_texts   = [labeled[0][0].text.strip()]
+    curr_texts   = [_transcript_unit_text(labeled[0][0])]
     prev_end     = labeled[0][0].end
 
     for seg, speaker in labeled[1:]:
@@ -2456,21 +2602,31 @@ def _build_transcript(segments, speaker_timeline: list[tuple[float, str]]) -> st
         block_len = seg.start - curr_start
         if speaker == curr_speaker and gap < PAUSE_THRESHOLD and block_len < MAX_BLOCK_SECONDS:
             # Same speaker, short gap, block not too long — append to current block
-            curr_texts.append(seg.text.strip())
+            curr_texts.append(_transcript_unit_text(seg))
         else:
             # Speaker changed, long pause, or block hit the length cap — flush it
             blocks.append((curr_start, curr_speaker, " ".join(curr_texts)))
             curr_speaker = speaker
             curr_start   = seg.start
-            curr_texts   = [seg.text.strip()]
+            curr_texts   = [_transcript_unit_text(seg)]
         prev_end = seg.end
 
     blocks.append((curr_start, curr_speaker, " ".join(curr_texts)))
 
     return "\n".join(
-        f"[{_fmt_time(start)}] {speaker}: {text}"
+        f"[{_fmt_time(start)}] {speaker}: {_join_transcript_units(text)}"
         for start, speaker, text in blocks
     )
+
+
+def _transcript_unit_text(unit) -> str:
+    return str(getattr(unit, "text", getattr(unit, "word", ""))).strip()
+
+
+def _join_transcript_units(text: str) -> str:
+    # Word-level timestamps carry punctuation as standalone/space-prefixed
+    # tokens depending on model version. Normalize without producing "слово ,".
+    return re.sub(r"\s+([,.;:!?])", r"\1", text).strip()
 
 
 def _fmt_time(seconds: float) -> str:
