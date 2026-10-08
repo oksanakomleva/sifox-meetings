@@ -760,9 +760,11 @@ async def _record_pipeline(meeting_id: str) -> None:
         )
 
         # 5. Speaker timeline
-        # None explicitly closes the previous speaker interval. Without this,
-        # the last highlighted person used to be assigned to every later phrase
-        # when Telemost removed the highlight or changed its DOM.
+        # Only positive, unambiguous speaker observations change the timeline.
+        # Telemost regularly drops its speaking highlight between animation
+        # frames and even in the middle of a phrase. Treating an empty probe as
+        # an explicit unknown speaker fragmented otherwise valid speech into
+        # many short "Участник" blocks.
         speaker_timeline: list[tuple[float, str | None]] = []
         speaker_diagnostics = {
             "polls": 0,
@@ -775,7 +777,6 @@ async def _record_pipeline(meeting_id: str) -> None:
 
         async def track_speakers():
             dumped = False
-            empty_streak = 0
             while True:
                 await asyncio.sleep(1)
                 try:
@@ -799,28 +800,17 @@ async def _record_pipeline(meeting_id: str) -> None:
                         # A DOM/iframe failure is not silence. Keep the current
                         # interval open but make the failure visible in metrics.
                         speaker_diagnostics["failed_polls"] += 1
-                        empty_streak = 0
                         continue
                     speaker_diagnostics["successful_polls"] += 1
                     speakers = snapshot["names"]
                     participants.update(speakers)
                     t = time.monotonic() - t0
                     if len(speakers) == 1:
-                        empty_streak = 0
                         speaker_diagnostics["active_polls"] += 1
-                        if not speaker_timeline or speaker_timeline[-1][1] != speakers[0]:
-                            speaker_timeline.append((t, speakers[0]))
+                        _record_speaker_observation(speaker_timeline, speakers, t)
                     elif len(speakers) > 1:
-                        empty_streak = 0
                         speaker_diagnostics["ambiguous_polls"] += 1
-                        if not speaker_timeline or speaker_timeline[-1][1] is not None:
-                            speaker_timeline.append((t, None))
-                    else:
-                        empty_streak += 1
-                        # Require two successful empty probes to avoid chopping
-                        # speech on a single missed animation frame.
-                        if empty_streak >= 2 and speaker_timeline and speaker_timeline[-1][1] is not None:
-                            speaker_timeline.append((t, None))
+                        _record_speaker_observation(speaker_timeline, speakers, t)
                 except Exception as exc:
                     speaker_diagnostics["failed_polls"] += 1
                     if speaker_diagnostics["failed_polls"] <= 3 or speaker_diagnostics["failed_polls"] % 30 == 0:
@@ -1711,6 +1701,25 @@ async def _active_speaker_snapshot(page) -> dict:
 async def _get_active_speakers(page) -> list[str]:
     """Backward-compatible convenience wrapper used by diagnostics/tests."""
     return (await _active_speaker_snapshot(page))["names"]
+
+
+def _record_speaker_observation(
+    timeline: list[tuple[float, str | None]],
+    speakers: list[str],
+    at: float,
+) -> None:
+    """Add only a reliable speaker change to the timeline.
+
+    No highlight and multiple simultaneous highlights are inconclusive UI
+    states, not proof that the current speaker became unknown. Keeping the last
+    reliable name across those probes avoids producing many tiny ``Участник``
+    fragments while the Telemost animation flickers.
+    """
+    if len(speakers) != 1:
+        return
+    speaker = speakers[0]
+    if not timeline or timeline[-1][1] != speaker:
+        timeline.append((at, speaker))
 
 
 def _mic_control_state(label: str) -> str:

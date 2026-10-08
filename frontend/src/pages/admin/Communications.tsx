@@ -130,7 +130,7 @@ export default function Communications() {
         </button>
       </div>
 
-      <div className="page-body" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 420px)', gap: 'var(--space-5)', alignItems: 'start' }}>
+      <div className="page-body responsive-split">
         {/* ── Left: data ── */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
           <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
@@ -146,7 +146,7 @@ export default function Communications() {
           </div>
 
           {/* Filters */}
-          <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'center' }}>
+          <div className="form-row" style={{ gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'center' }}>
             <input className="input" placeholder="Поиск по тексту…" value={q} onChange={e => setQ(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && applyFilters()} style={{ flex: 1, minWidth: 160 }} />
             <input className="input" type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} style={{ width: 150 }} />
@@ -202,7 +202,7 @@ export default function Communications() {
               <label><input type="checkbox" checked={srcMm} onChange={e => setSrcMm(e.target.checked)} /> Mattermost</label>
               <label><input type="checkbox" checked={srcGmail} onChange={e => setSrcGmail(e.target.checked)} /> Почта</label>
             </div>
-            <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+            <div className="form-row" style={{ gap: 'var(--space-2)', alignItems: 'center' }}>
               <span style={{ color: 'var(--color-text-secondary)' }}>Период:</span>
               <input className="input" type="date" value={ctxFrom} onChange={e => setCtxFrom(e.target.value)} style={{ flex: 1 }} />
               <input className="input" type="date" value={ctxTo} onChange={e => setCtxTo(e.target.value)} style={{ flex: 1 }} />
@@ -224,7 +224,7 @@ export default function Communications() {
             {asking && <div style={{ color: 'var(--color-text-muted)', fontSize: 'var(--font-size-sm)' }}><span className="spinner" style={{ width: 14, height: 14 }} /> Думаю…</div>}
           </div>
 
-          <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+          <div className="form-row" style={{ gap: 'var(--space-2)' }}>
             <input className="input" value={question} onChange={e => setQuestion(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && ask()} placeholder="Ваш вопрос…" style={{ flex: 1 }} />
             <button className="btn btn-primary" onClick={ask} disabled={asking}>Спросить</button>

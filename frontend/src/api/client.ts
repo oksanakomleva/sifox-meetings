@@ -10,8 +10,6 @@ export interface StorageFile {
   user_email: string | null
 }
 
-import { isDemoOn, filterDemoMeetings, stripDemoTag, stripDemoFromTags } from '../demo/demo'
-
 const BASE = '/api'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -79,19 +77,9 @@ export const api = {
 
   // ── Meetings ──────────────────────────────────────────────────────────────────
   meetings: {
-    // In demo mode: real meetings, but only those tagged "демо", with the "демо"
-    // tag hidden. Other tags shown as usual.
     list: (limit = 20, offset = 0) =>
-      isDemoOn()
-        // Demo: the full curated "демо" set (preview-gated, not limited by the
-        // preview user's per-meeting access). Hide the "демо" tag itself.
-        ? request<{ meetings: import('../types').Meeting[] }>('/meetings/demo-list')
-            .then(r => ({ meetings: r.meetings.map(stripDemoTag) }))
-        : request<{ meetings: import('../types').Meeting[] }>(`/meetings?limit=${limit}&offset=${offset}`),
-    get: (id: string) => {
-      const p = request<import('../types').Meeting>(`/meetings/${id}`)
-      return isDemoOn() ? p.then(stripDemoTag) : p
-    },
+      request<{ meetings: import('../types').Meeting[] }>(`/meetings?limit=${limit}&offset=${offset}`),
+    get: (id: string) => request<import('../types').Meeting>(`/meetings/${id}`),
     transcript: (id: string) =>
       request<{ transcript: string }>(`/meetings/${id}/transcript`),
     access: (id: string) =>
@@ -123,26 +111,12 @@ export const api = {
     audioDownloadUrl: (id: string) => `/api/meetings/${id}/audio?download=1`,
     calendarStatus: () =>
       request<{ connected: boolean; has_enabled_calendar: boolean; calendar_count: number }>('/meetings/calendar-status'),
-    week: () => {
-      const p = request<{ meetings: import('../types').Meeting[] }>('/meetings/week')
-      return isDemoOn() ? p.then(r => ({ meetings: filterDemoMeetings(r.meetings) })) : p
-    },
+    week: () => request<{ meetings: import('../types').Meeting[] }>('/meetings/week'),
     weekSummary: () =>
       request<{ summary: string | null; count: number }>('/meetings/week-summary'),
-    // Demo-only: day/week summary over "демо" meetings + the fake calls (sent in).
-    demoSummary: (period: 'day' | 'week', calls: { title: string; datetime: string; transcript: string }[]) =>
-      request<{ summary: string | null }>('/meetings/demo-summary', {
-        method: 'POST',
-        body: JSON.stringify({ period, calls }),
-      }),
-    // Upcoming meetings are pending (no tags yet); in demo we show the real
-    // planned meetings from the calendar as-is.
     upcoming: () =>
       request<{ meetings: import('../types').Meeting[] }>('/meetings/upcoming'),
-    knownTags: () => {
-      const p = request<{ tags: string[] }>('/meetings/tags')
-      return isDemoOn() ? p.then(r => ({ tags: stripDemoFromTags(r.tags) })) : p
-    },
+    knownTags: () => request<{ tags: string[] }>('/meetings/tags'),
     updateTags: (id: string, tags: string[]) =>
       request<{ tags: string[] }>(`/meetings/${id}/tags`, {
         method: 'PUT',
@@ -263,26 +237,6 @@ export const api = {
       method: 'POST', body: JSON.stringify(body),
     }),
 
-    // ── MegaFon call import (interactive: start → OTP → poll status) ──
-    megafonStart: (phone?: string) =>
-      request<{ job_id: string; status: string }>('/admin/megafon/start', {
-        method: 'POST', body: JSON.stringify({ phone }),
-      }),
-    megafonOtp: (job_id: string, code: string) =>
-      request<{ job_id: string; status: string }>('/admin/megafon/otp', {
-        method: 'POST', body: JSON.stringify({ job_id, code }),
-      }),
-    megafonStatus: (job_id: string) =>
-      request<{ status: string; stats: { imported?: number } | null; error: string | null }>(
-        `/admin/megafon/status/${job_id}`
-      ),
-  },
-
-  // ── Calls (demo "Звонки" — imported from rec.megafon.ru) ───────────────────────
-  calls: {
-    list: () => request<{ calls: import('../types').Call[] }>('/calls'),
-    get: (id: string) => request<import('../types').Call>(`/calls/${id}`),
-    audioUrl: (id: string) => `/api/calls/${id}/audio`,
   },
 
   // ── Extension (browser recorder) ───────────────────────────────────────────────
@@ -292,12 +246,9 @@ export const api = {
 
   // ── Chat ──────────────────────────────────────────────────────────────────────
   chat: {
-    // Demo chat starts empty and is not persisted — never load past history.
     history: (meetingId?: string) =>
-      isDemoOn()
-        ? Promise.resolve({ messages: [] as import('../types').ChatMessage[] })
-        : request<{ messages: import('../types').ChatMessage[] }>(
-            `/chat/history${meetingId ? `?meeting_id=${meetingId}` : ''}`
-          ),
+      request<{ messages: import('../types').ChatMessage[] }>(
+        `/chat/history${meetingId ? `?meeting_id=${meetingId}` : ''}`
+      ),
   },
 }

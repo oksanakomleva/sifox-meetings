@@ -1,5 +1,4 @@
 import { useState, useRef, useEffect } from 'react'
-import { isDemoOn } from '../demo/demo'
 import type { ChatMessage } from '../types'
 
 interface Props {
@@ -35,7 +34,7 @@ export default function ChatWidget({ meetingId, initialHistory = [], emptyPlaceh
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, meeting_id: meetingId ?? null, demo: isDemoOn() }),
+        body: JSON.stringify({ message: text, meeting_id: meetingId ?? null }),
       })
 
       if (!res.ok) throw new Error('Failed')

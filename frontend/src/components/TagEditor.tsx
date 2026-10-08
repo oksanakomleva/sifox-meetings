@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { api } from '../api/client'
-import { isDemoOn } from '../demo/demo'
 
 interface Props {
   meetingId: string
@@ -72,30 +71,24 @@ export default function TagEditor({ meetingId, tags, onChange }: Props) {
 
   const suggestions = known.filter(t => !current.includes(t))
 
-  // Read-only in demo: editing would write back the visible tags and silently
-  // drop the hidden "демо" tag from the real meeting.
-  const readOnly = isDemoOn()
-
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)', alignItems: 'center' }}>
       {current.map(t => (
         <span key={t} style={chipStyle}>
           #{t}
-          {!readOnly && (
-            <button
-              type="button"
-              onClick={() => removeTag(t)}
-              aria-label={`Удалить тег ${t}`}
-              style={{
-                background: 'none', border: 'none', cursor: 'pointer', padding: 0,
-                color: 'var(--color-accent)', lineHeight: 1, fontSize: 14,
-              }}
-            >×</button>
-          )}
+          <button
+            type="button"
+            onClick={() => removeTag(t)}
+            aria-label={`Удалить тег ${t}`}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+              color: 'var(--color-accent)', lineHeight: 1, fontSize: 14,
+            }}
+          >×</button>
         </span>
       ))}
 
-      {readOnly ? null : adding ? (
+      {adding ? (
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
           <input
             ref={inputRef}

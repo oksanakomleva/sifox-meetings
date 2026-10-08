@@ -67,7 +67,7 @@ export default function AdminUsers() {
               <span className="spinner" style={{ width: 28, height: 28 }} />
             </div>
           ) : (
-            <div className="card" style={{ padding: 0 }}>
+            <div className="card table-scroll" style={{ padding: 0 }}>
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr style={{ borderBottom: '1px solid var(--color-border)' }}>

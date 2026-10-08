@@ -114,7 +114,7 @@ export default function ShareAccessModal({ meetingId, initialVisibleToAll, onVis
 
   return (
     <div style={overlay} onClick={onClose}>
-      <div style={panel} role="dialog" aria-modal="true" aria-labelledby="access-title" onClick={e => e.stopPropagation()}>
+      <div className="modal-panel" style={panel} role="dialog" aria-modal="true" aria-labelledby="access-title" onClick={e => e.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h2 id="access-title" style={{ fontSize: 'var(--font-size-lg)', fontWeight: 700, margin: 0 }}>Доступ и публикация</h2>
           <button className="btn btn-ghost" aria-label="Закрыть" onClick={onClose} style={{ padding: 4, height: 'auto' }}>✕</button>
@@ -181,13 +181,13 @@ export default function ShareAccessModal({ meetingId, initialVisibleToAll, onVis
             Доступна всем (и без аккаунта) по ссылке с этим паролем.
           </div>
           {!shareUrl ? (
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div className="form-row" style={{ gap: 8 }}>
               <input style={{ ...field, flex: 1 }} type="text" placeholder="Задайте пароль" value={password} onChange={e => setPassword(e.target.value)} />
               <button className="btn btn-primary" onClick={createLink} disabled={busy || loading}>Создать</button>
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <div className="form-row" style={{ gap: 8, alignItems: 'center' }}>
                 <input style={{ ...field, flex: 1 }} readOnly value={shareUrl} onFocus={e => e.currentTarget.select()} />
                 <button className="btn btn-secondary" onClick={() => copy(shareUrl)}>Копировать ссылку</button>
               </div>

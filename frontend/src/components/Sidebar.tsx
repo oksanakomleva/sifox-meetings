@@ -1,7 +1,6 @@
-import { useState, type CSSProperties } from 'react'
-import { NavLink, useNavigate } from 'react-router-dom'
+import { useEffect, useState, type CSSProperties } from 'react'
+import { NavLink } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
-import { isDemoOn, setDemo, clearDemo } from '../demo/demo'
 
 const IconHome = () => (
   <svg className="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
@@ -35,11 +34,6 @@ const IconStorage = () => (
     <path d="M3 9v4c0 1.38 3.134 2.5 7 2.5S17 14.38 17 13V9"/>
   </svg>
 )
-const IconCalls = () => (
-  <svg className="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
-    <path d="M4 3h3l1.5 4-2 1.5a11 11 0 005 5l1.5-2 4 1.5v3a1 1 0 01-1 1A14 14 0 013 4a1 1 0 011-1z"/>
-  </svg>
-)
 const IconComms = () => (
   <svg className="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
     <path d="M4 4h12a1 1 0 011 1v7a1 1 0 01-1 1H8l-4 3V5a1 1 0 011-1z"/>
@@ -61,14 +55,14 @@ const IconLogout = () => (
 export default function Sidebar() {
   const { user, logout } = useAuth()
   const [menuOpen, setMenuOpen] = useState(false)
-  const demoOn = isDemoOn()
+  const [mobileOpen, setMobileOpen] = useState(false)
 
-  const toggleDemo = () => {
-    setDemo(!demoOn)
-    window.location.assign('/')   // reload at home so demo data loads fresh
-  }
+  useEffect(() => {
+    document.body.style.overflow = mobileOpen ? 'hidden' : ''
+    return () => { document.body.style.overflow = '' }
+  }, [mobileOpen])
+
   const exitPreview = () => {
-    clearDemo()
     window.location.href = '/api/auth/exit-preview'
   }
 
@@ -80,28 +74,47 @@ export default function Sidebar() {
   }
 
   return (
-    <aside className="sidebar">
+    <>
+      <button
+        type="button"
+        className="mobile-nav-toggle"
+        aria-label="Открыть меню"
+        aria-expanded={mobileOpen}
+        onClick={() => setMobileOpen(true)}
+      >
+        <span />
+        <span />
+        <span />
+      </button>
+      {mobileOpen && (
+        <button
+          type="button"
+          className="mobile-nav-backdrop"
+          aria-label="Закрыть меню"
+          onClick={() => setMobileOpen(false)}
+        />
+      )}
+    <aside className={`sidebar${mobileOpen ? ' is-open' : ''}`}>
       <div className="sidebar-logo">
         <img src="/logo-white.svg" alt="Sifox" />
+        <button
+          type="button"
+          className="sidebar-close"
+          aria-label="Закрыть меню"
+          onClick={() => setMobileOpen(false)}
+        >×</button>
       </div>
 
-      <nav className="sidebar-nav">
+      <nav className="sidebar-nav" onClick={() => setMobileOpen(false)}>
         <NavLink to="/" end className={({ isActive }) => isActive ? 'active' : ''}>
           <IconHome /> Главная
         </NavLink>
         <NavLink to="/meetings" className={({ isActive }) => isActive ? 'active' : ''}>
           <IconMeetings /> Мои встречи
         </NavLink>
-        {demoOn && (
-          <NavLink to="/calls" className={({ isActive }) => isActive ? 'active' : ''}>
-            <IconCalls /> Звонки
-          </NavLink>
-        )}
-        {!demoOn && (
-          <NavLink to="/settings/extension" className={({ isActive }) => isActive ? 'active' : ''}>
-            <IconExtension /> Запись в браузере
-          </NavLink>
-        )}
+        <NavLink to="/settings/extension" className={({ isActive }) => isActive ? 'active' : ''}>
+          <IconExtension /> Запись в браузере
+        </NavLink>
 
         {user?.is_admin && (
           <>
@@ -120,9 +133,6 @@ export default function Sidebar() {
             </NavLink>
             <NavLink to="/admin/storage" className={({ isActive }) => isActive ? 'active' : ''}>
               <IconStorage /> Хранилище
-            </NavLink>
-            <NavLink to="/admin/megafon" className={({ isActive }) => isActive ? 'active' : ''}>
-              <IconStorage /> Импорт звонков
             </NavLink>
           </>
         )}
@@ -170,13 +180,6 @@ export default function Sidebar() {
             }}>
               {user?.is_preview && (
                 <>
-                  <button style={menuItemStyle} onClick={toggleDemo}>
-                    <span>Режим демонстрации</span>
-                    <span style={{
-                      fontSize: 11, fontWeight: 700,
-                      color: demoOn ? 'var(--color-accent)' : 'var(--color-text-muted)',
-                    }}>{demoOn ? '● ВКЛ' : 'ВЫКЛ'}</span>
-                  </button>
                   <button style={menuItemStyle} onClick={exitPreview}>
                     ← Вернуться к админскому виду
                   </button>
@@ -192,5 +195,6 @@ export default function Sidebar() {
         )}
       </div>
     </aside>
+    </>
   )
 }

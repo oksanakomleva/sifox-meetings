@@ -8,7 +8,6 @@ import TagEditor from '../components/TagEditor'
 import SendProtocolModal from '../components/SendProtocolModal'
 import ShareAccessModal from '../components/ShareAccessModal'
 import MarkdownRenderer from '../components/MarkdownRenderer'
-import { isDemoOn } from '../demo/demo'
 import { useAuth } from '../hooks/useAuth'
 import type { Meeting, ChatMessage, LiveQaItem, LiveQaSourceDetail } from '../types'
 
@@ -107,7 +106,7 @@ export default function MeetingDetail() {
   }, [id])
 
   useEffect(() => {
-    if (!id || !user?.is_admin || isDemoOn()) return
+    if (!id || !user?.is_admin) return
     setLiveQaLoading(true)
     api.admin.liveQa(id)
       .then(r => setLiveQa(r.items))
@@ -175,7 +174,7 @@ export default function MeetingDetail() {
           </svg>
           Назад
         </button>
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--space-4)', flexWrap: 'wrap' }}>
+        <div className="mobile-stack" style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--space-4)', flexWrap: 'wrap' }}>
           <div style={{ flex: 1 }}>
             <h1 className="page-title">{meeting.title || meeting.topic || 'Встреча'}</h1>
             <p className="page-subtitle">
@@ -185,8 +184,8 @@ export default function MeetingDetail() {
               )}
             </p>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-            {user && !user.is_preview && !isDemoOn() && (
+          <div className="form-row" style={{ alignItems: 'center', gap: 'var(--space-2)' }}>
+            {user && !user.is_preview && (
               <button className="btn btn-secondary" onClick={() => setShowShare(true)}>
                 🔗 Доступ и публикация
               </button>
@@ -245,7 +244,7 @@ export default function MeetingDetail() {
             'transcript',
             'audio',
             'chat',
-            ...(user?.is_admin && !isDemoOn() ? ['assistant' as Tab] : []),
+            ...(user?.is_admin ? ['assistant' as Tab] : []),
           ] as Tab[]).map(t => {
             const labels: Record<Tab, string> = {
               protocol: '📋 Протокол',
@@ -282,18 +281,16 @@ export default function MeetingDetail() {
           <div style={{ maxWidth: 760 }}>
             {meeting.summary ? (
               <>
-                {!isDemoOn() && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginBottom: 'var(--space-4)', flexWrap: 'wrap' }}>
-                    <button className="btn btn-primary" onClick={() => setShowSend(true)}>
-                      📧 Отправить участникам
-                    </button>
-                    {meeting.protocol_sent_at && (
-                      <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-text-muted)' }}>
-                        Отправлено {new Date(meeting.protocol_sent_at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}
-                      </span>
-                    )}
-                  </div>
-                )}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginBottom: 'var(--space-4)', flexWrap: 'wrap' }}>
+                  <button className="btn btn-primary" onClick={() => setShowSend(true)}>
+                    📧 Отправить участникам
+                  </button>
+                  {meeting.protocol_sent_at && (
+                    <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-text-muted)' }}>
+                      Отправлено {new Date(meeting.protocol_sent_at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}
+                    </span>
+                  )}
+                </div>
                 <div style={{
                   fontSize: 'var(--font-size-sm)',
                   lineHeight: 'var(--line-height-relaxed)',

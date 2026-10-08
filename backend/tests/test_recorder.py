@@ -13,6 +13,7 @@ from services.recorder import (
     _is_real_name,
     _effective_speaker_timeline,
     _speaker_for_segment,
+    _record_speaker_observation,
     _speaker_attribution_ratio,
     _build_transcript,
     _transcription_hints,
@@ -365,6 +366,24 @@ class TestSpeakerForSegment:
     def test_unknown_interval_can_win_majority_overlap(self):
         tl = [(0.0, "Alice"), (2.0, None), (9.0, "Bob")]
         assert _speaker_for_segment(1.0, 8.0, tl) == "Участник"
+
+
+class TestRecordSpeakerObservation:
+    def test_empty_probe_does_not_erase_last_reliable_speaker(self):
+        timeline = [(1.0, "Alice")]
+        _record_speaker_observation(timeline, [], 2.0)
+        assert timeline == [(1.0, "Alice")]
+
+    def test_ambiguous_probe_does_not_create_unknown_fragment(self):
+        timeline = [(1.0, "Alice")]
+        _record_speaker_observation(timeline, ["Alice", "Bob"], 2.0)
+        assert timeline == [(1.0, "Alice")]
+
+    def test_unambiguous_change_is_recorded_once(self):
+        timeline = [(1.0, "Alice")]
+        _record_speaker_observation(timeline, ["Bob"], 2.0)
+        _record_speaker_observation(timeline, ["Bob"], 3.0)
+        assert timeline == [(1.0, "Alice"), (2.0, "Bob")]
 
 
 class TestBuildTranscript:

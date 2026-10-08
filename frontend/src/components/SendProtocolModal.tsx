@@ -80,7 +80,7 @@ export default function SendProtocolModal({ meetingId, title, summary, onClose, 
 
   return (
     <div style={overlay} onClick={onClose}>
-      <div style={panel} onClick={e => e.stopPropagation()}>
+      <div className="modal-panel" style={panel} onClick={e => e.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h2 style={{ fontSize: 'var(--font-size-lg)', fontWeight: 700, margin: 0 }}>Отправить протокол</h2>
           <button className="btn btn-ghost" onClick={onClose} style={{ padding: 4, height: 'auto' }}>✕</button>

@@ -404,7 +404,7 @@ export default function MeetingsView({
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
                   {filteredUpcoming.map(m => (
                     <div key={m.id} className="card card-hover" onClick={() => navigate(`/meetings/${m.id}`)}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--space-3)' }}>
+                      <div className="meeting-upcoming-layout" style={{ gap: 'var(--space-3)' }}>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontWeight: 'var(--font-weight-semibold)', marginBottom: 'var(--space-1)' }}>
                             {m.title || m.topic || 'Без названия'}
@@ -413,7 +413,7 @@ export default function MeetingsView({
                             {fmtDateTime(m.start_time)}{m.end_time && <> — {fmtTime(m.end_time)}</>}
                           </div>
                         </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 10 }}>
+                        <div className="meeting-card-actions" style={{ gap: 10 }}>
                           <StatusBadge status={m.status} />
                           {admin && onSetAssistantEnabled && (
                             <div
@@ -502,7 +502,7 @@ function MeetingCard({ meeting: m, onClick, onReanalyze, onRetranscribe }: {
   const [busy, setBusy] = useState(false)
   return (
     <div className="card card-hover" onClick={onClick}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--space-4)' }}>
+      <div className="meeting-card-layout" style={{ gap: 'var(--space-4)' }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{
             fontWeight: 'var(--font-weight-semibold)', fontSize: 'var(--font-size-base)',
@@ -530,7 +530,7 @@ function MeetingCard({ meeting: m, onClick, onReanalyze, onRetranscribe }: {
             </div>
           )}
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 'var(--space-2)', flexShrink: 0 }}>
+        <div className="meeting-card-actions" style={{ gap: 'var(--space-2)', flexShrink: 0 }}>
           <StatusBadge status={m.status} />
           {onReanalyze && m.status === 'error' && m.audio_path && (
             <button
