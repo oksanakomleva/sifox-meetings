@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from tests.e2e.smoke import (
     _contains_expected_live_answer,
     _note_is_adapted_and_integrated,
+    _parse_transcription_diagnostics,
 )
 
 
@@ -33,3 +34,10 @@ def test_note_semantics_rejects_verbatim_or_unrelated_summary():
     note = "что нам удалось сократить задержку ответа"
     assert not _note_is_adapted_and_integrated(note, note)
     assert not _note_is_adapted_and_integrated("Обсудили название проекта.", note)
+
+
+def test_transcription_diagnostics_accepts_json_object_or_json_string():
+    diagnostics = {"stt": {"word_count": 123}}
+    assert _parse_transcription_diagnostics(diagnostics) == diagnostics
+    assert _parse_transcription_diagnostics('{"stt":{"word_count":123}}') == diagnostics
+    assert _parse_transcription_diagnostics('invalid') == {}

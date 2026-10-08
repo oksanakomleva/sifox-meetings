@@ -4,8 +4,7 @@ import re
 import logging
 import asyncio
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Response
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, StrictInt
 from uuid import UUID
 from typing import Annotated
@@ -348,7 +347,7 @@ async def get_transcript(meeting_id: str, user: CurrentUser):
 
 
 @router.get("/{meeting_id}/audio")
-async def get_audio(meeting_id: str, user: CurrentUser, download: int = 0):
+async def get_audio(meeting_id: str, request: Request, user: CurrentUser, download: int = 0):
     meeting = await _get_accessible_meeting(meeting_id, user)
     if not meeting.get("audio_path"):
         raise HTTPException(404, "Audio not available")
@@ -361,15 +360,14 @@ async def get_audio(meeting_id: str, user: CurrentUser, download: int = 0):
     ext = os.path.splitext(meeting["audio_path"])[1].lower() or ".mp3"
     media_type = "audio/mpeg" if ext == ".mp3" else "audio/wav"
     download_name = f"meeting-{meeting_id[:8]}{ext}"
-    # Serve inline by default so the <audio> player can seek (Starlette FileResponse
-    # honours HTTP Range → 206). Only force a download when ?download=1 is passed —
-    # an `attachment` disposition otherwise breaks scrubbing in the browser.
-    headers = (
-        {"Content-Disposition": f'attachment; filename="{download_name}"'}
-        if download
-        else None
+    from utils.audio_range import audio_response
+
+    return audio_response(
+        full_path,
+        media_type,
+        request.headers.get("range"),
+        download_name=download_name if download else None,
     )
-    return FileResponse(full_path, media_type=media_type, headers=headers)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

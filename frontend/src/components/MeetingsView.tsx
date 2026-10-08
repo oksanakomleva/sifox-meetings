@@ -154,6 +154,7 @@ export default function MeetingsView({
   const [upcomingMeetings, setUpcomingMeetings] = useState<Meeting[]>([])
   const [search, setSearch] = useState('')
   const [selectedTags, setSelectedTags] = useState<string[]>([])
+  const [tagFilterOpen, setTagFilterOpen] = useState(false)
   const [selectedDay, setSelectedDay] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -326,23 +327,37 @@ export default function MeetingsView({
             </div>
 
             {availableTags.length > 0 && (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)', marginBottom: 'var(--space-4)', alignItems: 'center' }}>
-                {availableTags.map(t => {
-                  const active = selectedTags.includes(t)
-                  return (
-                    <button key={t} type="button" onClick={() => toggleTag(t)} style={{
-                      fontSize: 'var(--font-size-xs)', padding: '2px 10px', borderRadius: 'var(--radius-full)',
-                      cursor: 'pointer', fontWeight: 500,
-                      border: active ? '1px solid var(--color-accent)' : '1px solid var(--color-border)',
-                      background: active ? 'var(--color-accent)' : 'transparent',
-                      color: active ? '#fff' : 'var(--color-text-secondary)',
-                    }}>#{t}</button>
-                  )
-                })}
-                {selectedTags.length > 0 && (
-                  <button type="button" onClick={() => setSelectedTags([])} style={{ fontSize: 'var(--font-size-xs)', background: 'none', border: 'none', color: 'var(--color-accent)', cursor: 'pointer' }}>сбросить</button>
-                )}
-              </div>
+              <>
+                <button
+                  type="button"
+                  className="mobile-tag-toggle btn btn-secondary"
+                  aria-expanded={tagFilterOpen}
+                  aria-controls="meeting-tag-filters"
+                  onClick={() => setTagFilterOpen(open => !open)}
+                >
+                  Теги{selectedTags.length > 0 ? ` (${selectedTags.length})` : ''} {tagFilterOpen ? '▴' : '▾'}
+                </button>
+                <div
+                  id="meeting-tag-filters"
+                  className={`meeting-tag-filters${tagFilterOpen ? ' is-open' : ''}`}
+                >
+                  {availableTags.map(t => {
+                    const active = selectedTags.includes(t)
+                    return (
+                      <button key={t} type="button" onClick={() => toggleTag(t)} style={{
+                        fontSize: 'var(--font-size-xs)', padding: '2px 10px', borderRadius: 'var(--radius-full)',
+                        cursor: 'pointer', fontWeight: 500,
+                        border: active ? '1px solid var(--color-accent)' : '1px solid var(--color-border)',
+                        background: active ? 'var(--color-accent)' : 'transparent',
+                        color: active ? '#fff' : 'var(--color-text-secondary)',
+                      }}>#{t}</button>
+                    )
+                  })}
+                  {selectedTags.length > 0 && (
+                    <button type="button" onClick={() => setSelectedTags([])} style={{ fontSize: 'var(--font-size-xs)', background: 'none', border: 'none', color: 'var(--color-accent)', cursor: 'pointer' }}>сбросить</button>
+                  )}
+                </div>
+              </>
             )}
 
             {filteredDone.length === 0 ? (
@@ -520,7 +535,7 @@ function MeetingCard({ meeting: m, onClick, onReanalyze, onRetranscribe }: {
             </div>
           )}
           {m.tags && m.tags.length > 0 && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-1)', marginTop: 'var(--space-2)' }}>
+            <div className="meeting-card-tags">
               {m.tags.map(tag => (
                 <span key={tag} style={{
                   fontSize: 'var(--font-size-xs)', background: 'var(--color-accent-6)', color: 'var(--color-accent)',

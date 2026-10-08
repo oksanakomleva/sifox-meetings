@@ -23,6 +23,7 @@ What it checks:
 6. --full-e2e: creates calendar event + launches Test Speaker, waits for done
 """
 import os
+import json
 import re
 import sys
 import time
@@ -62,6 +63,16 @@ MAX_VOICE_COMPLETE_MS = 25_000
 def _contains_expected_live_answer(text: str) -> bool:
     normalized = (text or "").lower()
     return any(word in normalized for word in EXPECTED_LIVE_ANSWER_WORDS)
+
+
+def _parse_transcription_diagnostics(value: dict | str | None) -> dict:
+    """The admin API may serialize the JSONB diagnostics as a JSON string."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _note_is_adapted_and_integrated(summary: str, dictated_note: str) -> bool:
@@ -569,7 +580,9 @@ class SmokeTest:
                         tlen > 50,
                         f"{tlen} chars",
                     )
-                    diagnostics = target.get("transcription_diagnostics") or {}
+                    diagnostics = _parse_transcription_diagnostics(
+                        target.get("transcription_diagnostics")
+                    )
                     stt = diagnostics.get("stt") or {}
                     tracking = diagnostics.get("speaker_tracking") or {}
                     word_count = stt.get("word_count")

@@ -13,7 +13,6 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from config import config
@@ -98,7 +97,7 @@ async def unlock_share(token: str, body: UnlockRequest, request: Request):
 
 
 @router.get("/{token}/audio")
-async def share_audio(token: str, t: str):
+async def share_audio(token: str, t: str, request: Request):
     """Stream the meeting mp3 for a public share. Gated by the signed token `t`
     handed out by /unlock (password already verified there)."""
     if not share_svc.verify_audio_token(token, t):
@@ -113,4 +112,6 @@ async def share_audio(token: str, t: str):
         raise HTTPException(404, "Аудиофайл не найден")
     ext = os.path.splitext(meeting["audio_path"])[1].lower() or ".mp3"
     media_type = "audio/mpeg" if ext == ".mp3" else "audio/wav"
-    return FileResponse(full_path, media_type=media_type)
+    from utils.audio_range import audio_response
+
+    return audio_response(full_path, media_type, request.headers.get("range"))

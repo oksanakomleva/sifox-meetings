@@ -18,16 +18,18 @@ export default function AudioPlayer({ src, title, downloadHref }: Props) {
     const audio = audioRef.current
     if (!audio) return
     const onTimeUpdate = () => setCurrentTime(audio.currentTime)
-    const onDuration = () => setDuration(audio.duration)
+    const onDuration = () => setDuration(Number.isFinite(audio.duration) ? audio.duration : 0)
     const onEnded = () => setPlaying(false)
     const onCanPlay = () => setLoading(false)
     audio.addEventListener('timeupdate', onTimeUpdate)
     audio.addEventListener('loadedmetadata', onDuration)
+    audio.addEventListener('durationchange', onDuration)
     audio.addEventListener('ended', onEnded)
     audio.addEventListener('canplay', onCanPlay)
     return () => {
       audio.removeEventListener('timeupdate', onTimeUpdate)
       audio.removeEventListener('loadedmetadata', onDuration)
+      audio.removeEventListener('durationchange', onDuration)
       audio.removeEventListener('ended', onEnded)
       audio.removeEventListener('canplay', onCanPlay)
     }
@@ -48,8 +50,10 @@ export default function AudioPlayer({ src, title, downloadHref }: Props) {
 
   const seek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const audio = audioRef.current
-    if (!audio) return
-    audio.currentTime = parseFloat(e.target.value)
+    const nextTime = Number(e.target.value)
+    if (!audio || !Number.isFinite(nextTime) || !duration) return
+    audio.currentTime = nextTime
+    setCurrentTime(nextTime)
   }
 
   const fmt = (s: number) => {
@@ -113,6 +117,8 @@ export default function AudioPlayer({ src, title, downloadHref }: Props) {
             max={duration || 100}
             value={currentTime}
             onChange={seek}
+            disabled={duration === 0}
+            aria-label="Перемотать аудиозапись"
             style={{ width: '100%', accentColor: 'var(--color-primary)', cursor: 'pointer' }}
           />
           <div style={{

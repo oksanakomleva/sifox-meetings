@@ -67,8 +67,8 @@ export default function AdminUsers() {
               <span className="spinner" style={{ width: 28, height: 28 }} />
             </div>
           ) : (
-            <div className="card table-scroll" style={{ padding: 0 }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <div className="card table-scroll mobile-table-container" style={{ padding: 0 }}>
+              <table className="mobile-card-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
                     {['Пользователь', 'Email', 'Последний вход', 'Роль'].map(h => (
@@ -93,7 +93,7 @@ export default function AdminUsers() {
                         borderBottom: i < users.length - 1 ? '1px solid var(--color-border)' : 'none',
                       }}
                     >
-                      <td style={{ padding: 'var(--space-4) var(--space-5)' }}>
+                      <td data-label="Пользователь" style={{ padding: 'var(--space-4) var(--space-5)' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
                           <div style={{
                             width: 32, height: 32, borderRadius: '50%',
@@ -113,13 +113,13 @@ export default function AdminUsers() {
                           )}
                         </div>
                       </td>
-                      <td style={{ padding: 'var(--space-4) var(--space-5)', fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>
+                      <td data-label="Email" style={{ padding: 'var(--space-4) var(--space-5)', fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>
                         {u.email}
                       </td>
-                      <td style={{ padding: 'var(--space-4) var(--space-5)', fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>
+                      <td data-label="Последний вход" style={{ padding: 'var(--space-4) var(--space-5)', fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>
                         —
                       </td>
-                      <td style={{ padding: 'var(--space-4) var(--space-5)' }}>
+                      <td data-label="Роль" style={{ padding: 'var(--space-4) var(--space-5)' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
                           <span style={{
                             fontSize: 'var(--font-size-xs)',
