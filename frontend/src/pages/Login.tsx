@@ -69,6 +69,11 @@ export default function Login() {
             {error === 'invite_used' && 'Это приглашение уже было использовано'}
             {error === 'oauth_failed' && 'Ошибка авторизации Google. Попробуйте ещё раз.'}
             {error === 'state_expired' && 'Сессия авторизации устарела. Попробуйте ещё раз.'}
+            {error === 'gitlab_failed' && 'Не удалось подтвердить вход через GitLab. Попробуйте ещё раз.'}
+            {error === 'gitlab_state_expired' && 'Время входа через GitLab истекло. Попробуйте ещё раз.'}
+            {error === 'gitlab_link_failed' && 'Не удалось связать аккаунты. Войдите через Google и повторите попытку.'}
+            {error === 'gitlab_link_conflict' && 'Этот аккаунт GitLab уже связан с другой учётной записью.'}
+            {error === 'gitlab_not_linked' && 'Сначала свяжите GitLab с вашей учётной записью Sifox после входа через Google.'}
           </div>
         )}
 

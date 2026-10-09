@@ -4,6 +4,8 @@ import type { Calendar } from '../../types'
 
 export default function AdminCalendars() {
   const [calendars, setCalendars] = useState<Calendar[]>([])
+  const [available, setAvailable] = useState<Calendar[]>([])
+  const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
   const [connected, setConnected] = useState(false)
@@ -14,9 +16,29 @@ export default function AdminCalendars() {
   }, [])
 
   const load = () => {
-    api.admin.calendars()
-      .then(r => setCalendars(r.calendars))
+    Promise.all([api.admin.calendars(), api.admin.availableCalendars()])
+      .then(([selected, discovered]) => {
+        setCalendars(selected.calendars)
+        setAvailable(discovered.calendars)
+        setError('')
+      })
+      .catch(e => setError(e.message || 'Не удалось загрузить календари'))
       .finally(() => setLoading(false))
+  }
+
+  const remove = async (cal: Calendar) => {
+    if (!window.confirm(`Убрать «${cal.name}» из списка Sifox? Новые встречи из него больше не будут записываться. Существующие записи сохранятся.`)) return
+    try {
+      await api.admin.removeCalendar(cal.id)
+      load()
+    } catch (e: any) { setError(e.message || 'Не удалось убрать календарь') }
+  }
+
+  const add = async (cal: Calendar) => {
+    try {
+      await api.admin.addCalendar(cal.id)
+      load()
+    } catch (e: any) { setError(e.message || 'Не удалось добавить календарь') }
   }
 
   const toggle = async (cal: Calendar) => {
@@ -61,6 +83,7 @@ export default function AdminCalendars() {
       </div>
 
       <div className="page-body">
+        {error && <div className="card" role="alert" style={{ color: 'var(--color-danger)', marginBottom: 'var(--space-4)' }}>{error}</div>}
         {/* Connect banner — only when the current admin hasn't connected a calendar */}
         {!connected && (
           <div className="card" style={{ background: 'var(--color-accent-6)', borderColor: 'var(--color-accent-4)', marginBottom: 'var(--space-6)' }}>
@@ -138,6 +161,7 @@ export default function AdminCalendars() {
                           />
                           <span className="toggle-slider" />
                         </label>
+                        <button className="btn btn-secondary" onClick={() => remove(cal)} aria-label={`Убрать календарь ${cal.name}`} title="Убрать из списка Sifox">Убрать</button>
                       </div>
                     </div>
                   ))}
@@ -145,6 +169,20 @@ export default function AdminCalendars() {
               </div>
             ))}
           </div>
+        )}
+        {available.length > 0 && (
+          <section style={{ marginTop: 'var(--space-8)' }}>
+            <h2 style={{ fontSize: 'var(--font-size-lg)', marginBottom: 'var(--space-2)' }}>Доступные календари</h2>
+            <p style={{ color: 'var(--color-text-secondary)', marginBottom: 'var(--space-4)' }}>Исключены из списка Sifox. Их встречи не записываются; добавление не включает запись автоматически.</p>
+            <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+              {available.map(cal => (
+                <div key={cal.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+                  <div><strong>{cal.name}</strong><div style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>{cal.owner_name} ({cal.owner_email})</div></div>
+                  <button className="btn btn-secondary" onClick={() => add(cal)}>Добавить в список</button>
+                </div>
+              ))}
+            </div>
+          </section>
         )}
       </div>
     </div>

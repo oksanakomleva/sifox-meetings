@@ -16,6 +16,15 @@ class Config(BaseSettings):
     GOOGLE_CLIENT_ID: str
     GOOGLE_CLIENT_SECRET: str
 
+    # GitLab sign-in pilot. Disabled until a GitLab OAuth application is
+    # registered and its credentials are configured on the server.
+    GITLAB_PILOT_ENABLED: bool = False
+    GITLAB_ISSUER: str = "https://gitlab.sifox.ru"
+    GITLAB_CLIENT_ID: str = ""
+    GITLAB_CLIENT_SECRET: str = ""
+    GITLAB_PILOT_EMAIL: str = "oksana.komleva@sifox.com"
+    GITLAB_PILOT_USERNAME: str = "oksana.komleva"
+
     @property
     def GOOGLE_REDIRECT_URI(self) -> str:
         return f"{self.BASE_URL}/api/auth/callback"
@@ -127,6 +136,15 @@ class Config(BaseSettings):
     GMAIL_BOOTSTRAP_DAYS: int = 30           # first-run window per user
     MM_SYNC_MINUTES: int = 15
     GMAIL_SYNC_MINUTES: int = 30
+    MM_RECORDER_COMMANDS_ENABLED: bool = False
+    MM_RECORDER_TOKEN: str | None = None  # defaults to MM_TOKEN
+    MM_RECORDER_BOT_USERNAME: str = ""  # shown when Mattermost /users/me is unavailable
+
+    # Optional incident alerts sent as a private Mattermost DM.
+    # Keep disabled until delivery has been tested outside production.
+    ALERTS_ENABLED: bool = False
+    ALERT_MM_USERNAME: str = ""
+    ALERT_MM_TOKEN: str | None = None  # bot token; falls back to MM_TOKEN
 
     # ── MegaFon call import (rec.megafon.ru → demo "Звонки") ──────────────
     # Off by default. Phone may be set here or entered per-import in the admin UI.

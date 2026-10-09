@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import re
 import sys
 import time
 import uuid
@@ -10,7 +11,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from typing import Annotated, Literal
 
-from auth.deps import get_test_or_admin_user
+from auth.deps import get_admin_user, get_test_or_admin_user
 from database import models
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,7 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 # Accepts both session cookie (browser) and X-Test-Api-Key header (automated E2E)
 AdminUser = Annotated[dict, Depends(get_test_or_admin_user)]
+RealAdminUser = Annotated[dict, Depends(get_admin_user)]
 TestOrAdminUser = AdminUser  # alias kept for clarity in test endpoints
 
 
@@ -47,6 +49,26 @@ async def set_admin(user_id: int, req: SetAdminRequest, admin: AdminUser):
 async def list_calendars(admin: AdminUser):
     cals = await models.get_calendars()
     return {"calendars": cals}
+
+
+@router.get("/calendars/available")
+async def list_available_calendars(admin: AdminUser):
+    """Discovered Google calendars excluded from the Sifox tracking list."""
+    return {"calendars": await models.get_calendars(managed=False)}
+
+
+@router.post("/calendars/{calendar_id}/add")
+async def add_calendar(calendar_id: int, admin: RealAdminUser):
+    if not await models.set_calendar_managed(calendar_id, True):
+        raise HTTPException(404, "Календарь не найден среди доступных")
+    return {"ok": True}
+
+
+@router.delete("/calendars/{calendar_id}")
+async def remove_calendar(calendar_id: int, admin: RealAdminUser):
+    if not await models.set_calendar_managed(calendar_id, False):
+        raise HTTPException(404, "Календарь не найден в списке")
+    return {"ok": True}
 
 
 class SetCalendarEnabledRequest(BaseModel):
@@ -377,13 +399,30 @@ async def list_invitations(admin: AdminUser):
 
 
 @router.post("/invitations")
-async def create_invitation(req: InviteRequest, admin: AdminUser):
+async def create_invitation(req: InviteRequest, admin: RealAdminUser):
     from config import config as app_config
+    from services import gmail_send
     email = req.email.strip().lower()
-    if not email or "@" not in email:
+    if len(email) > 254 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
         raise HTTPException(400, "Некорректный email")
-    invitation = await models.create_invitation(email, admin["user_id"])
+    if email.endswith("@sifox.ru"):
+        raise HTTPException(409, "Для sifox.ru пока не включён вход через GitLab. Приглашение не отправлено")
+    if await models.get_user_by_email(email):
+        raise HTTPException(409, "Пользователь с таким email уже есть в системе")
+    sender_token = await models.get_gmail_send_token(admin["user_id"])
+    if not sender_token:
+        raise HTTPException(409, "Сначала подключите Gmail для отправки приглашений")
+    invitation = await models.get_pending_invitation(email)
+    if not invitation:
+        invitation = await models.create_invitation(email, admin["user_id"])
     invite_url = f"{app_config.BASE_URL}/api/auth/invite/{invitation['token']}"
+    result = await gmail_send.send_invitation_email(
+        admin["user_id"], sender_token, admin["email"], email, invite_url,
+    )
+    if not result["ok"]:
+        await models.mark_invitation_delivery(invitation["id"], "Не удалось отправить письмо")
+        raise HTTPException(502, "Письмо не отправлено. Проверьте Gmail и повторите отправку")
+    await models.mark_invitation_delivery(invitation["id"])
     return {
         "ok": True,
         "invitation": {
@@ -398,7 +437,7 @@ async def create_invitation(req: InviteRequest, admin: AdminUser):
 
 
 @router.delete("/invitations/{invitation_id}")
-async def delete_invitation(invitation_id: int, admin: AdminUser):
+async def delete_invitation(invitation_id: int, admin: RealAdminUser):
     await models.delete_invitation(invitation_id)
     return {"ok": True}
 

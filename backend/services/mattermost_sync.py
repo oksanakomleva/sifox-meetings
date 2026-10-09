@@ -8,6 +8,7 @@ No-op if MM_TOKEN / MM_SERVER_URL are not configured.
 """
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 
 import httpx
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 _PER_PAGE = 200
 _BOOTSTRAP_MAX_PAGES = 5  # first run: cap history (~1000 newest posts/channel)
+_PAIRING_CODE_RE = re.compile(r"^(?:протоколлер[,!]?\s+)?привязать\s+[A-Za-z0-9_-]{12,64}$", re.I)
 
 
 def _ts_to_dt(ms: int) -> datetime:
@@ -88,7 +90,8 @@ async def _sync_channel(client: httpx.AsyncClient, channel: dict, uname_cache: d
 
     raw = await _fetch_posts(client, channel_id, since)
     # Keep regular user messages only (skip system join/leave/etc. and empty).
-    msgs = [p for p in raw if not p.get("type") and (p.get("message") or "").strip()]
+    msgs = [p for p in raw if not p.get("type") and (p.get("message") or "").strip()
+            and not _PAIRING_CODE_RE.fullmatch(p["message"].strip())]
     if not msgs:
         await models.upsert_sync_state(source, datetime.now(timezone.utc),
                                        str(since) if since else None)

@@ -21,6 +21,8 @@ export interface User {
   avatar_url: string | null
   is_admin: boolean
   is_preview?: boolean
+  is_active?: boolean
+  last_login?: string | null
 }
 
 // ── Communications (Mattermost / Gmail) ──────────────────────────────────────
@@ -142,9 +144,11 @@ export interface LiveNote {
 export interface Invitation {
   id: number
   email: string
-  token: string
+  token?: string
   expires_at: string
   accepted_at: string | null
+  sent_at: string | null
+  send_error: string | null
   created_at: string
   created_by_name: string | null
   url?: string

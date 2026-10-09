@@ -3,7 +3,10 @@ import os
 import re
 import logging
 import asyncio
+import hashlib
+import secrets
 from datetime import datetime
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, StrictInt
 from uuid import UUID
@@ -163,6 +166,65 @@ async def list_meetings(
         user["user_id"], limit=limit, offset=offset
     )
     return {"meetings": meetings, "limit": limit, "offset": offset}
+
+
+class ManualMeetingRequest(BaseModel):
+    meeting_url: str = Field(min_length=20, max_length=300)
+    title: str = Field(default="", max_length=120)
+
+
+@router.post("/manual", status_code=202)
+async def start_manual_meeting(body: ManualMeetingRequest, user: CurrentUser):
+    if user.get("is_preview"):
+        raise HTTPException(403, "В режиме просмотра нельзя запускать запись")
+    from services.manual_meetings import (
+        MeetingAlreadyInProgress, RecorderUnavailable, launch_manual_meeting,
+    )
+    try:
+        meeting, existing = await launch_manual_meeting(
+            body.meeting_url, body.title, user["user_id"],
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except MeetingAlreadyInProgress as exc:
+        raise HTTPException(409, "Протоколлер уже записывает эту встречу") from exc
+    except RecorderUnavailable as exc:
+        raise HTTPException(503, "Протоколлер перезапускается; попробуйте позже") from exc
+    return {"meeting_id": str(meeting["id"]), "status": meeting["status"], "existing": existing}
+
+
+@router.get("/mattermost-recorder")
+async def mattermost_recorder_status(user: CurrentUser):
+    enabled = bool(config.MM_RECORDER_COMMANDS_ENABLED and config.MM_SERVER_URL
+                   and (config.MM_RECORDER_TOKEN or config.MM_TOKEN))
+    linked = await models.get_mm_recorder_link_by_user(user["user_id"]) if enabled else None
+    bot_username = config.MM_RECORDER_BOT_USERNAME or None
+    if enabled and not bot_username:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(
+                    f"{config.MM_SERVER_URL.rstrip('/')}/api/v4/users/me",
+                    headers={"Authorization": f"Bearer {config.MM_RECORDER_TOKEN or config.MM_TOKEN}"},
+                )
+                response.raise_for_status()
+                bot_username = response.json().get("username")
+        except (httpx.HTTPError, ValueError, KeyError):
+            logger.warning("Mattermost recorder account lookup failed")
+    return {"enabled": enabled, "linked": bool(linked), "bot_username": bot_username}
+
+
+@router.post("/mattermost-recorder/link-code")
+async def create_mattermost_recorder_link_code(user: CurrentUser):
+    if user.get("is_preview"):
+        raise HTTPException(403, "В режиме просмотра нельзя привязать Mattermost")
+    if not (config.MM_RECORDER_COMMANDS_ENABLED and config.MM_SERVER_URL
+            and (config.MM_RECORDER_TOKEN or config.MM_TOKEN)):
+        raise HTTPException(503, "Команды Mattermost пока не включены")
+    if await models.get_mm_recorder_link_by_user(user["user_id"]):
+        raise HTTPException(409, "Mattermost уже привязан к вашей учётной записи")
+    code = secrets.token_urlsafe(12)
+    await models.save_mm_link_code(user["user_id"], hashlib.sha256(code.encode()).hexdigest())
+    return {"code": code, "expires_minutes": 15}
 
 
 @router.get("/{meeting_id}")

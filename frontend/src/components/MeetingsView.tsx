@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import StatusBadge from './StatusBadge'
+import ManualRecordingModal from './ManualRecordingModal'
 import type { Meeting } from '../types'
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -155,6 +156,7 @@ export default function MeetingsView({
   const [search, setSearch] = useState('')
   const [selectedTags, setSelectedTags] = useState<string[]>([])
   const [tagFilterOpen, setTagFilterOpen] = useState(false)
+  const [manualOpen, setManualOpen] = useState(false)
   const [selectedDay, setSelectedDay] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -273,9 +275,20 @@ export default function MeetingsView({
             <h1 className="page-title">{title}</h1>
             <p className="page-subtitle">{subtitle}</p>
           </div>
-          {headerAction}
+          <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+            <button type="button" className="btn btn-primary" onClick={() => setManualOpen(true)}>
+              + По ссылке
+            </button>
+            {headerAction}
+          </div>
         </div>
       </div>
+      {manualOpen && (
+        <ManualRecordingModal
+          onClose={() => setManualOpen(false)}
+          onStarted={() => { setTab('upcoming'); load() }}
+        />
+      )}
 
       <div className="page-body">
         {/* Tabs */}
@@ -330,7 +343,7 @@ export default function MeetingsView({
               <>
                 <button
                   type="button"
-                  className="mobile-tag-toggle btn btn-secondary"
+                  className="tag-filter-toggle btn btn-secondary"
                   aria-expanded={tagFilterOpen}
                   aria-controls="meeting-tag-filters"
                   onClick={() => setTagFilterOpen(open => !open)}

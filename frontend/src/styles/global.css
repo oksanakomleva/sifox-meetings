@@ -266,13 +266,21 @@ input, textarea, select {
   align-items: flex-end;
 }
 
-.mobile-tag-toggle {
+.tag-filter-toggle {
+  display: inline-flex;
+  margin-bottom: var(--space-4);
+}
+
+.meeting-tag-filters {
   display: none;
+}
+
+.meeting-tag-filters.is-open {
+  display: flex;
 }
 
 .meeting-tag-filters,
 .meeting-card-tags {
-  display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
   margin-bottom: var(--space-4);
@@ -280,6 +288,7 @@ input, textarea, select {
 }
 
 .meeting-card-tags {
+  display: flex;
   gap: var(--space-1);
   margin-top: var(--space-2);
   margin-bottom: 0;
@@ -349,19 +358,6 @@ input, textarea, select {
 
   .mobile-card-table td > span {
     flex-wrap: wrap;
-  }
-
-  .mobile-tag-toggle {
-    display: inline-flex;
-    margin-bottom: var(--space-4);
-  }
-
-  .meeting-tag-filters {
-    display: none;
-  }
-
-  .meeting-tag-filters.is-open {
-    display: flex;
   }
 
   .meeting-card-tags {

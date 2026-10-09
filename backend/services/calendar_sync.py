@@ -282,6 +282,14 @@ async def sync_user_events(user_id: int) -> None:
         None, _fetch_events_sync, token_row, enabled_cal_ids
     )
 
+    # An admin may remove/disable a calendar while the Google request is in
+    # flight. Do not recreate pending meetings from that stale response.
+    current_cals = await models.get_calendars(owner_user_id=user_id)
+    current_enabled_ids = {c["google_calendar_id"] for c in current_cals if c["record_enabled"]}
+    if current_enabled_ids != set(enabled_cal_ids):
+        logger.info("Calendar selection changed during sync for user %d; skip stale events", user_id)
+        return
+
     # Refresh token if needed
     if token_row.get("_refreshed"):
         r = token_row["_refreshed"]
@@ -341,4 +349,7 @@ async def run_sync_loop() -> None:
             await sync_all_users()
         except Exception as e:
             logger.error("Sync loop error: %s", e)
+        else:
+            from services.monitor_state import completed
+            completed("calendar_sync")
         await asyncio.sleep(300)  # 5 minutes

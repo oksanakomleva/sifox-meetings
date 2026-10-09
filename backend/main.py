@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from starlette.middleware.sessions import SessionMiddleware
 
 from auth.deps import get_admin_user
 from config import config
@@ -49,11 +50,15 @@ async def lifespan(app: FastAPI):
     from services.calendar_sync import run_sync_loop
     from services.mattermost_sync import run_mm_sync_loop
     from services.gmail_sync import run_gmail_sync_loop
+    from services.alerts import run_alert_loop
+    from services.mattermost_recorder import run_mm_recorder_loop
 
     sync_task = asyncio.create_task(run_sync_loop(), name="calendar-sync")
     scheduler_task = asyncio.create_task(run_recording_scheduler(), name="rec-scheduler")
     mm_task = asyncio.create_task(run_mm_sync_loop(), name="mm-sync")
     gmail_task = asyncio.create_task(run_gmail_sync_loop(), name="gmail-sync")
+    alert_task = asyncio.create_task(run_alert_loop(), name="incident-alerts")
+    mm_recorder_task = asyncio.create_task(run_mm_recorder_loop(), name="mm-recorder")
     app.state.background_tasks = {
         task.get_name(): task
         for task in (sync_task, scheduler_task, mm_task, gmail_task)
@@ -74,6 +79,8 @@ async def lifespan(app: FastAPI):
     scheduler_task.cancel()
     mm_task.cancel()
     gmail_task.cancel()
+    alert_task.cancel()
+    mm_recorder_task.cancel()
 
     # 2. Wait for any in-progress recordings to finish gracefully.
     #    railway.toml stopSec must be >= this timeout + a small buffer.
@@ -87,6 +94,18 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Sifox Meetings", lifespan=lifespan)
+
+# Authlib keeps the short-lived GitLab OAuth state in a signed, HTTP-only
+# browser cookie. Keep this middleware absent until the one-user pilot is on.
+if config.GITLAB_PILOT_ENABLED:
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=config.SECRET_KEY,
+        session_cookie="gitlab_oauth_state",
+        same_site="lax",
+        https_only=config.BASE_URL.startswith("https"),
+        max_age=600,
+    )
 
 
 # Reject obviously oversized legacy multipart uploads before Starlette parses
@@ -121,6 +140,7 @@ app.add_middleware(
 
 # ── API routes ────────────────────────────────────────────────────────────────
 from api.auth import router as auth_router
+from api.gitlab_auth import router as gitlab_auth_router
 from api.meetings import router as meetings_router
 from api.chat import router as chat_router
 from api.admin import router as admin_router
@@ -129,6 +149,7 @@ from api.communications import router as communications_router
 from api.share import router as share_router
 
 app.include_router(auth_router)
+app.include_router(gitlab_auth_router)
 app.include_router(meetings_router)
 app.include_router(chat_router)
 app.include_router(admin_router)

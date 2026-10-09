@@ -346,13 +346,13 @@ async def upsert_calendar(
         )
 
 
-async def get_calendars(owner_user_id: int | None = None) -> list[dict]:
+async def get_calendars(owner_user_id: int | None = None, *, managed: bool = True) -> list[dict]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         if owner_user_id:
             rows = await conn.fetch(
-                "SELECT * FROM calendars WHERE owner_user_id = $1 ORDER BY is_primary DESC, name",
-                owner_user_id,
+                "SELECT * FROM calendars WHERE owner_user_id = $1 AND is_managed = $2 ORDER BY is_primary DESC, name",
+                owner_user_id, managed,
             )
         else:
             rows = await conn.fetch(
@@ -360,9 +360,9 @@ async def get_calendars(owner_user_id: int | None = None) -> list[dict]:
                 SELECT c.*, u.email AS owner_email, u.name AS owner_name
                 FROM calendars c
                 JOIN users u ON u.id = c.owner_user_id
-                WHERE u.google_id IS DISTINCT FROM '__preview__'
+                WHERE u.google_id IS DISTINCT FROM '__preview__' AND c.is_managed = $1
                 ORDER BY u.email, c.is_primary DESC, c.name
-                """
+                """, managed
             )
     return [dict(r) for r in rows]
 
@@ -375,10 +375,10 @@ async def get_calendar_status(user_id: int) -> dict:
             "SELECT 1 FROM google_tokens WHERE user_id = $1", user_id
         )
         has_enabled = await conn.fetchval(
-            "SELECT 1 FROM calendars WHERE owner_user_id = $1 AND record_enabled = TRUE", user_id
+            "SELECT 1 FROM calendars WHERE owner_user_id = $1 AND is_managed = TRUE AND record_enabled = TRUE", user_id
         )
         cal_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM calendars WHERE owner_user_id = $1", user_id
+            "SELECT COUNT(*) FROM calendars WHERE owner_user_id = $1 AND is_managed = TRUE", user_id
         ) or 0
     return {
         "connected": bool(has_token),
@@ -399,7 +399,7 @@ async def auto_enable_primary_calendar(user_id: int) -> bool:
         row = await conn.fetchrow(
             """
             UPDATE calendars
-               SET record_enabled = TRUE
+               SET record_enabled = TRUE, is_managed = TRUE
              WHERE owner_user_id = $1
                AND id = (
                    SELECT id FROM calendars
@@ -418,9 +418,23 @@ async def set_calendar_record_enabled(calendar_id: int, enabled: bool) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE calendars SET record_enabled = $1 WHERE id = $2",
+            "UPDATE calendars SET record_enabled = $1 WHERE id = $2 AND is_managed = TRUE",
             enabled, calendar_id,
         )
+
+
+async def set_calendar_managed(calendar_id: int, managed: bool) -> bool:
+    """Only change Sifox tracking; never delete Google calendars or recordings."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """UPDATE calendars
+               SET is_managed = $1, record_enabled = FALSE
+               WHERE id = $2 AND is_managed IS DISTINCT FROM $1
+               RETURNING id""",
+            managed, calendar_id,
+        )
+    return row is not None
 
 
 async def get_enabled_calendars() -> list[dict]:
@@ -432,7 +446,7 @@ async def get_enabled_calendars() -> list[dict]:
             SELECT c.*, u.id AS user_id
             FROM calendars c
             JOIN users u ON u.id = c.owner_user_id
-            WHERE c.record_enabled = TRUE AND u.is_active = TRUE
+            WHERE c.is_managed = TRUE AND c.record_enabled = TRUE AND u.is_active = TRUE
             """
         )
     return [dict(r) for r in rows]
@@ -559,6 +573,47 @@ async def upsert_meeting(
             return dict(row)
 
 
+async def create_manual_telemost_meeting(
+    meeting_url: str, title: str, recorder_user_id: int,
+) -> tuple[dict[str, Any] | None, bool]:
+    """Create one immediate recording per room, atomically across API workers.
+
+    Returns (meeting, already_exists). Another user's active or recent recording
+    is never exposed to the requester.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", meeting_url)
+            sibling = await conn.fetchrow(
+                """SELECT id, recorder_user_id FROM meetings
+                   WHERE rtrim(split_part(meeting_url, '?', 1), '/') = $1 AND (
+                       status IN ('joining', 'recording')
+                       OR (status = 'pending' AND start_time BETWEEN NOW() - INTERVAL '30 minutes'
+                                                           AND NOW() + INTERVAL '15 minutes')
+                       OR (status IN ('transcribing', 'analyzing', 'done')
+                           AND start_time > NOW() - INTERVAL '15 minutes')
+                   )
+                   ORDER BY CASE
+                              WHEN status IN ('joining', 'recording') THEN 0
+                              WHEN status = 'pending' THEN 1
+                              ELSE 2
+                            END, created_at DESC LIMIT 1""",
+                meeting_url,
+            )
+            if sibling:
+                if sibling["recorder_user_id"] == recorder_user_id:
+                    row = await conn.fetchrow("SELECT * FROM meetings WHERE id = $1", sibling["id"])
+                    return dict(row), True
+                return None, True
+            row = await conn.fetchrow(
+                """INSERT INTO meetings (meeting_url, title, start_time, recorder_user_id)
+                   VALUES ($1, $2, NOW(), $3) RETURNING *""",
+                meeting_url, title, recorder_user_id,
+            )
+            return dict(row), False
+
+
 async def get_meeting_by_url(meeting_url: str) -> dict[str, Any] | None:
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -595,9 +650,21 @@ async def claim_meeting_for_recording(meeting_id: str) -> bool:
             """
             UPDATE meetings SET status = 'joining', updated_at = NOW()
             WHERE id = $1 AND status = 'pending'
+              AND (
+                  (meetings.google_event_id IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM calendar_meeting_links l WHERE l.meeting_id = meetings.id))
+                  OR EXISTS (
+                      SELECT 1 FROM calendar_meeting_links l
+                      JOIN calendars c ON c.owner_user_id = l.user_id
+                                      AND c.google_calendar_id = l.calendar_id
+                      WHERE l.meeting_id = meetings.id
+                        AND c.is_managed = TRUE AND c.record_enabled = TRUE
+                  )
+              )
               AND NOT EXISTS (
                   SELECT 1 FROM meetings o
-                  WHERE o.meeting_url = meetings.meeting_url
+                  WHERE rtrim(split_part(o.meeting_url, '?', 1), '/') =
+                        rtrim(split_part(meetings.meeting_url, '?', 1), '/')
                     AND o.id <> meetings.id
                     AND (
                         -- another bot is actively recording the SAME room right
@@ -639,7 +706,8 @@ async def mark_duplicate_if_sibling_active(meeting_id: str) -> bool:
             WHERE m.id = $1 AND m.status = 'pending'
               AND EXISTS (
                   SELECT 1 FROM meetings o
-                  WHERE o.meeting_url = m.meeting_url
+                  WHERE rtrim(split_part(o.meeting_url, '?', 1), '/') =
+                        rtrim(split_part(m.meeting_url, '?', 1), '/')
                     AND o.id <> m.id
                     AND (
                         o.status IN ('joining', 'recording')
@@ -693,6 +761,87 @@ async def save_transcript(meeting_id: str, transcript: str) -> None:
         await conn.execute(
             "UPDATE meetings SET transcript = $1, updated_at = NOW() WHERE id = $2",
             transcript, meeting_id,
+        )
+
+
+async def save_recording_end_diagnostic(
+    meeting_id: str, reason: str, had_participants: bool,
+) -> None:
+    """Record why Telemost capture stopped, even if analysis later succeeds."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE meetings
+               SET recording_end_reason = $2,
+                   recording_ended_at = NOW(),
+                   recording_had_participants = $3
+               WHERE id = $1""",
+            meeting_id, reason, had_participants,
+        )
+
+
+async def get_monitor_meetings(limit: int = 250) -> list[dict]:
+    """Small read-only snapshot of recent calendar-triggered Telemost meetings."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT m.id, m.title, m.start_time, m.end_time, m.status,
+                      m.updated_at, m.recording_end_reason,
+                      m.recording_ended_at, m.recording_had_participants,
+                      (
+                        (m.recorder_user_id IS NOT NULL AND m.google_event_id IS NULL
+                         AND m.meeting_url LIKE 'https://telemost.yandex.ru/j/%')
+                        OR EXISTS (
+                          SELECT 1 FROM calendar_meeting_links l
+                          JOIN calendars c ON c.owner_user_id = l.user_id
+                                          AND c.google_calendar_id = l.calendar_id
+                          JOIN users u ON u.id = c.owner_user_id
+                          WHERE l.meeting_id = m.id
+                            AND c.is_managed = TRUE AND c.record_enabled = TRUE
+                            AND u.is_active = TRUE
+                        )
+                      ) AS record_eligible
+               FROM meetings m
+               WHERE (m.google_event_id IS NOT NULL
+                      OR (m.recorder_user_id IS NOT NULL
+                          AND m.meeting_url LIKE 'https://telemost.yandex.ru/j/%'))
+                 AND m.start_time >= NOW() - INTERVAL '8 hours'
+                 AND m.start_time <= NOW() + INTERVAL '1 hour'
+               ORDER BY m.start_time DESC
+               LIMIT $1""",
+            limit,
+        )
+    return [dict(row) for row in rows]
+
+
+async def enqueue_monitor_alert(alert_key: str, message: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO monitor_alerts (alert_key, message)
+               VALUES ($1, $2) ON CONFLICT (alert_key) DO NOTHING""",
+            alert_key, message,
+        )
+
+
+async def get_unsent_monitor_alerts(limit: int = 20) -> list[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT alert_key, message FROM monitor_alerts
+               WHERE sent_at IS NULL AND created_at > NOW() - INTERVAL '6 hours'
+               ORDER BY created_at ASC LIMIT $1""",
+            limit,
+        )
+    return [dict(row) for row in rows]
+
+
+async def mark_monitor_alert_sent(alert_key: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE monitor_alerts SET sent_at = NOW() WHERE alert_key = $1 AND sent_at IS NULL",
+            alert_key,
         )
 
 
@@ -1130,7 +1279,7 @@ async def get_meetings_for_user(
 
 
 async def user_can_access_meeting(user_id: int, email: str, meeting_id: str) -> bool:
-    """Constant-size access check for one completed meeting."""
+    """Owners can view an active recording; other grants require completion."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         return bool(await conn.fetchval(
@@ -1139,8 +1288,8 @@ async def user_can_access_meeting(user_id: int, email: str, meeting_id: str) -> 
                 SELECT 1
                 FROM meetings m
                 WHERE m.id = $3
-                  AND m.status = 'done'
-                  AND (
+                  AND (m.recorder_user_id = $1 OR (
+                    m.status = 'done' AND (
                     EXISTS (
                         SELECT 1 FROM meeting_participants mp
                         WHERE mp.meeting_id = m.id AND mp.user_id = $1
@@ -1153,9 +1302,9 @@ async def user_can_access_meeting(user_id: int, email: str, meeting_id: str) -> 
                         SELECT 1 FROM meeting_access_grants g
                         WHERE g.meeting_id = m.id AND g.user_id = $1
                     )
-                    OR m.recorder_user_id = $1
                     OR m.visible_to_all = TRUE
-                  )
+                    )
+                  ))
             )
             """,
             user_id, email, meeting_id,
@@ -1369,11 +1518,22 @@ async def get_pending_meetings_to_start(within_minutes: int = 2) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT * FROM meetings
-            WHERE status = 'pending'
-              AND start_time <= NOW() + ($1 * interval '1 minute')
-              AND start_time >= NOW() - interval '30 minutes'
-            ORDER BY start_time
+            SELECT m.* FROM meetings m
+            WHERE m.status = 'pending'
+              AND m.start_time <= NOW() + ($1 * interval '1 minute')
+              AND m.start_time >= NOW() - interval '30 minutes'
+              AND (
+                  (m.google_event_id IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM calendar_meeting_links l WHERE l.meeting_id = m.id))
+                  OR EXISTS (
+                      SELECT 1 FROM calendar_meeting_links l
+                      JOIN calendars c ON c.owner_user_id = l.user_id
+                                      AND c.google_calendar_id = l.calendar_id
+                      WHERE l.meeting_id = m.id
+                        AND c.is_managed = TRUE AND c.record_enabled = TRUE
+                  )
+              )
+            ORDER BY m.start_time
             """,
             within_minutes,
         )
@@ -1487,6 +1647,47 @@ async def get_calendar_link_for_meeting(meeting_id: str) -> dict[str, Any] | Non
             LIMIT 1
             """,
             meeting_id,
+        )
+    return dict(row) if row else None
+
+
+async def link_auth_identity(user_id: int, provider: str, subject: str) -> bool:
+    """Link an external identity once, never reassigning it to another user.
+
+    The two unique constraints also prevent a user from silently replacing an
+    already-linked identity. Both checks remain safe under concurrent callbacks.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO auth_identities (provider, subject, user_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT DO NOTHING
+                """,
+                provider, subject, user_id,
+            )
+            row = await conn.fetchrow(
+                """
+                SELECT subject, user_id FROM auth_identities
+                WHERE provider = $1 AND (subject = $2 OR user_id = $3)
+                """,
+                provider, subject, user_id,
+            )
+    return bool(row and row["subject"] == subject and row["user_id"] == user_id)
+
+
+async def get_user_by_auth_identity(provider: str, subject: str) -> dict[str, Any] | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT u.* FROM auth_identities i
+            JOIN users u ON u.id = i.user_id
+            WHERE i.provider = $1 AND i.subject = $2
+            """,
+            provider, subject,
         )
     return dict(row) if row else None
 
@@ -1635,6 +1836,30 @@ async def create_invitation(email: str, created_by: int, ttl_days: int = 7) -> d
     return dict(row)
 
 
+async def get_pending_invitation(email: str) -> dict[str, Any] | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT * FROM invitations
+               WHERE lower(email) = $1 AND accepted_at IS NULL AND expires_at > NOW()
+               ORDER BY created_at DESC LIMIT 1""",
+            email.lower(),
+        )
+    return dict(row) if row else None
+
+
+async def mark_invitation_delivery(invitation_id: int, error: str | None = None) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE invitations
+               SET sent_at = CASE WHEN $2::text IS NULL THEN NOW() ELSE sent_at END,
+                   send_error = $2
+               WHERE id = $1""",
+            invitation_id, error,
+        )
+
+
 async def get_invitation_by_token(token: str) -> dict[str, Any] | None:
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1659,7 +1884,8 @@ async def list_invitations(limit: int = 100) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT i.id, i.token, i.email, i.expires_at, i.accepted_at, i.created_at,
+            SELECT i.id, i.email, i.expires_at, i.accepted_at, i.created_at,
+                   i.sent_at, i.send_error,
                    u.name AS created_by_name
             FROM invitations i
             LEFT JOIN users u ON u.id = i.created_by
@@ -1690,8 +1916,8 @@ async def get_upcoming_meetings_for_user(user_id: int, is_admin: bool) -> list[d
                        meeting_url, assistant_enabled,
                        assistant_public_info_enabled
                 FROM meetings
-                WHERE status IN ('pending', 'joining', 'recording', 'transcribing', 'analyzing')
-                  AND start_time > NOW() - interval '2 hours'
+                WHERE (status IN ('joining', 'recording', 'transcribing', 'analyzing')
+                   OR (status = 'pending' AND start_time > NOW() - interval '2 hours'))
                 ORDER BY start_time ASC
                 LIMIT 100
                 """,
@@ -1706,8 +1932,8 @@ async def get_upcoming_meetings_for_user(user_id: int, is_admin: bool) -> list[d
                 SELECT DISTINCT m.id, m.title, m.topic, m.start_time, m.end_time,
                        m.status, m.meeting_type
                 FROM meetings m
-                WHERE m.status IN ('pending', 'joining', 'recording', 'transcribing', 'analyzing')
-                  AND m.start_time > NOW() - interval '2 hours'
+                WHERE (m.status IN ('joining', 'recording', 'transcribing', 'analyzing')
+                   OR (m.status = 'pending' AND m.start_time > NOW() - interval '2 hours'))
                   AND (
                     -- the user is an actual attendee of the event...
                     EXISTS (SELECT 1 FROM calendar_meeting_links cml
@@ -1841,6 +2067,89 @@ async def get_sync_state(source: str) -> dict | None:
             source,
         )
     return dict(row) if row else None
+
+
+async def get_mm_recorder_link_by_user(user_id: int) -> dict | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT mm_user_id, linked_at FROM mm_recorder_links WHERE user_id = $1",
+            user_id,
+        )
+    return dict(row) if row else None
+
+
+async def get_mm_recorder_user(mm_user_id: str) -> dict | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT u.id, u.email, u.is_active FROM mm_recorder_links l
+               JOIN users u ON u.id = l.user_id WHERE l.mm_user_id = $1""",
+            mm_user_id,
+        )
+    return dict(row) if row else None
+
+
+async def save_mm_link_code(user_id: int, code_hash: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO mm_recorder_link_codes (user_id, code_hash, expires_at)
+               VALUES ($1, $2, NOW() + INTERVAL '15 minutes')
+               ON CONFLICT (user_id) DO UPDATE
+               SET code_hash = EXCLUDED.code_hash,
+                   expires_at = EXCLUDED.expires_at, used_at = NULL""",
+            user_id, code_hash,
+        )
+
+
+async def claim_mm_link_code(code_hash: str, mm_user_id: str) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            code = await conn.fetchrow(
+                """SELECT user_id FROM mm_recorder_link_codes
+                   WHERE code_hash = $1 AND used_at IS NULL AND expires_at > NOW()
+                   FOR UPDATE""",
+                code_hash,
+            )
+            if not code:
+                return False
+            user_id = code["user_id"]
+            existing = await conn.fetchrow(
+                """SELECT mm_user_id, user_id FROM mm_recorder_links
+                   WHERE mm_user_id = $1 OR user_id = $2 FOR UPDATE""",
+                mm_user_id, user_id,
+            )
+            if existing and (existing["mm_user_id"] != mm_user_id or existing["user_id"] != user_id):
+                return False
+            if not existing:
+                await conn.execute(
+                    "INSERT INTO mm_recorder_links (mm_user_id, user_id) VALUES ($1, $2)",
+                    mm_user_id, user_id,
+                )
+            await conn.execute(
+                "UPDATE mm_recorder_link_codes SET used_at = NOW() WHERE code_hash = $1",
+                code_hash,
+            )
+            return True
+
+
+async def is_mm_recorder_post_processed(post_id: str) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return bool(await conn.fetchval(
+            "SELECT 1 FROM mm_recorder_processed_posts WHERE post_id = $1", post_id,
+        ))
+
+
+async def mark_mm_recorder_post_processed(post_id: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO mm_recorder_processed_posts (post_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            post_id,
+        )
 
 
 async def upsert_sync_state(source: str, last_synced_at, last_cursor: str | None) -> None:

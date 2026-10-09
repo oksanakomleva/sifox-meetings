@@ -141,14 +141,48 @@ async def send_protocol_email(
 ) -> dict:
     """Send the protocol e-mail. Persists a refreshed access token if Google
     rotated it. Returns {ok: True, message_id} or {ok: False, error}."""
-    html_body = markdown_to_html(body_markdown)
+    return await _send_email(
+        user_id, token_row, sender, recipients, subject,
+        markdown_to_html(body_markdown), body_markdown,
+    )
+
+
+async def send_invitation_email(
+    user_id: int, token_row: dict, sender: str, recipient: str, invite_url: str,
+) -> dict:
+    """Send a clickable invitation with both HTML and plain-text alternatives."""
+    safe_url = _html.escape(invite_url, quote=True)
+    html_body = (
+        '<div style="font-family:Arial,sans-serif;font-size:15px;line-height:1.5">'
+        '<p>Вас пригласили в Sifox — сервис протоколов встреч.</p>'
+        f'<p><a href="{safe_url}">Принять приглашение</a></p>'
+        '<p>Войдите через Google с той же почтой, на которую пришло письмо. '
+        'Ссылка действует 7 дней. Если вы не ожидали приглашения, игнорируйте письмо.</p>'
+        '</div>'
+    )
+    text_body = (
+        "Вас пригласили в Sifox — сервис протоколов встреч.\n\n"
+        f"Чтобы войти, откройте ссылку: {invite_url}\n\n"
+        "Войдите через Google с той же почтой, на которую пришло письмо. "
+        "Ссылка действует 7 дней. Если вы не ожидали приглашения, игнорируйте письмо."
+    )
+    return await _send_email(
+        user_id, token_row, sender, [recipient], "Приглашение в Sifox",
+        html_body, text_body,
+    )
+
+
+async def _send_email(
+    user_id: int, token_row: dict, sender: str, recipients: list[str],
+    subject: str, html_body: str, text_body: str,
+) -> dict:
     loop = asyncio.get_running_loop()
     try:
         message_id, refreshed = await loop.run_in_executor(
-            None, _send_sync, token_row, sender, recipients, subject, html_body, body_markdown
+            None, _send_sync, token_row, sender, recipients, subject, html_body, text_body
         )
     except Exception as e:  # googleapiclient HttpError or auth failure
-        logger.error("Protocol send failed for user %s: %s", user_id, e)
+        logger.error("Email send failed for user %s: %s", user_id, e)
         return {"ok": False, "error": str(e)}
 
     if refreshed:
@@ -159,5 +193,5 @@ async def send_protocol_email(
         except Exception as e:
             logger.warning("Could not persist refreshed gmail-send token: %s", e)
 
-    logger.info("Protocol e-mailed (msg %s) to %d recipient(s)", message_id, len(recipients))
+    logger.info("Email sent (msg %s) to %d recipient(s)", message_id, len(recipients))
     return {"ok": True, "message_id": message_id}

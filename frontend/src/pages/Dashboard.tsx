@@ -15,10 +15,24 @@ export default function Dashboard() {
   const [loadingChat, setLoadingChat] = useState(true)
   const [calStatus, setCalStatus] = useState<{ connected: boolean; has_enabled_calendar: boolean } | null>(null)
   const [calendarJustConnected, setCalendarJustConnected] = useState(false)
+  const [gitlabNotice, setGitlabNotice] = useState<{ ok: boolean; text: string } | null>(null)
   useEffect(() => {
     // Check if redirected back after connecting calendar
     if (searchParams.get('calendar_connected') === '1') {
       setCalendarJustConnected(true)
+      setSearchParams({}, { replace: true })
+    }
+    if (searchParams.get('gitlab_linked') === '1') {
+      setGitlabNotice({ ok: true, text: 'GitLab подключён к вашей учётной записи Sifox. Теперь можно проверить вход через GitLab в отдельном окне браузера.' })
+      setSearchParams({}, { replace: true })
+    } else if (searchParams.has('gitlab_error')) {
+      const conflict = searchParams.get('gitlab_error') === 'gitlab_link_conflict'
+      setGitlabNotice({
+        ok: false,
+        text: conflict
+          ? 'Этот аккаунт GitLab уже привязан к другой учётной записи Sifox.'
+          : 'Не удалось связать аккаунты. Вы остаётесь в Sifox через Google; попробуйте ещё раз или обратитесь к администратору.',
+      })
       setSearchParams({}, { replace: true })
     }
 
@@ -44,6 +58,16 @@ export default function Dashboard() {
       </div>
 
       <div className="page-body" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+
+        {gitlabNotice && (
+          <div role="status" style={{
+            borderRadius: 'var(--radius-lg)', padding: 'var(--space-5)',
+            background: gitlabNotice.ok ? 'var(--color-success-bg)' : 'var(--color-error-bg)',
+            color: gitlabNotice.ok ? 'var(--color-success)' : 'var(--color-error)',
+          }}>
+            {gitlabNotice.text}
+          </div>
+        )}
 
         {/* ── Success: calendar just connected ── */}
         {calendarJustConnected && (

@@ -87,12 +87,15 @@ async def _process_callback(result: dict, invite_token: str | None):
         # ── Login flow ────────────────────────────────────────────────────
         allowed = domain == config.ALLOWED_DOMAIN
 
-        # Check invitation bypass for users outside the allowed domain
+        # Always resolve the invitation: even sifox.com users need the invite
+        # marked accepted after their first login, not left "pending" forever.
         invitation = None
-        if not allowed and invite_token:
+        if invite_token:
             invitation = await models.get_invitation_by_token(invite_token)
             if invitation and invitation["email"] == email and not invitation.get("accepted_at"):
                 allowed = True
+            else:
+                invitation = None
 
         if not allowed:
             return RedirectResponse(
@@ -136,6 +139,7 @@ async def _process_callback(result: dict, invite_token: str | None):
         # ── Calendar connect flow (read-only) ─────────────────────────────
         user_id = result["existing_user_id"]
         tokens = result["tokens"]
+        was_connected = await models.get_google_token(user_id)
         await models.save_google_token(
             user_id,
             tokens["token"],
@@ -147,7 +151,8 @@ async def _process_callback(result: dict, invite_token: str | None):
         try:
             await sync_user_calendars(user_id)
             # Auto-enable primary calendar so recording starts right away
-            await models.auto_enable_primary_calendar(user_id)
+            if not was_connected:
+                await models.auto_enable_primary_calendar(user_id)
             # Kick off first events sync in background
             import asyncio
             asyncio.create_task(sync_user_events(user_id))

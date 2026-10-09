@@ -77,6 +77,16 @@ export const api = {
 
   // ── Meetings ──────────────────────────────────────────────────────────────────
   meetings: {
+    startManual: (meetingUrl: string, title: string) =>
+      request<{ meeting_id: string; status: string; existing: boolean }>('/meetings/manual', {
+        method: 'POST', body: JSON.stringify({ meeting_url: meetingUrl, title }),
+      }),
+    mattermostRecorder: () =>
+      request<{ enabled: boolean; linked: boolean; bot_username: string | null }>('/meetings/mattermost-recorder'),
+    mattermostLinkCode: () =>
+      request<{ code: string; expires_minutes: number }>('/meetings/mattermost-recorder/link-code', {
+        method: 'POST',
+      }),
     list: (limit = 20, offset = 0) =>
       request<{ meetings: import('../types').Meeting[] }>(`/meetings?limit=${limit}&offset=${offset}`),
     get: (id: string) => request<import('../types').Meeting>(`/meetings/${id}`),
@@ -133,6 +143,9 @@ export const api = {
         body: JSON.stringify({ is_admin: isAdmin }),
       }),
     calendars: () => request<{ calendars: import('../types').Calendar[] }>('/admin/calendars'),
+    availableCalendars: () => request<{ calendars: import('../types').Calendar[] }>('/admin/calendars/available'),
+    addCalendar: (calId: number) => request<void>(`/admin/calendars/${calId}/add`, { method: 'POST' }),
+    removeCalendar: (calId: number) => request<void>(`/admin/calendars/${calId}`, { method: 'DELETE' }),
     setCalendarEnabled: (calId: number, enabled: boolean) =>
       request<void>(`/admin/calendars/${calId}`, {
         method: 'PATCH',

@@ -862,12 +862,25 @@ async def _record_pipeline(meeting_id: str) -> None:
             )
 
         # 6. Wait for meeting end
+        end_diagnostic = None
+
+        def note_end(reason: str, participants_present: bool) -> None:
+            nonlocal end_diagnostic
+            end_diagnostic = (reason, participants_present)
+
         had_participants = await _wait_for_meeting_end(
             page,
             participants,
             meeting.get("start_time"),
             meeting_id=meeting_id,
+            on_end=note_end,
         )
+        if end_diagnostic:
+            try:
+                await models.save_recording_end_diagnostic(meeting_id, *end_diagnostic)
+            except Exception as exc:
+                # Monitoring must never prevent audio from being processed.
+                logger.warning("Could not save recording end reason for %s: %s", meeting_id[:8], exc)
         tracker.cancel()
         if live_task:
             live_task.cancel()
@@ -1895,6 +1908,7 @@ async def _wait_for_meeting_end(
     scheduled_start=None,
     *,
     meeting_id: str | None = None,
+    on_end=None,
 ) -> bool:
     """Block until the meeting ends. Returns whether any real participant (besides
     Protocaller) was ever present — False means nobody showed up (no_show)."""
@@ -1907,26 +1921,35 @@ async def _wait_for_meeting_end(
     # before giving up on a meeting that never started
     GRACE_MINUTES = 10
 
+    def finish(reason: str, present: bool | None = None) -> bool:
+        result = meeting_started if present is None else present
+        if on_end:
+            on_end(reason, result)
+        return result
+
     while True:
         if meeting_id and meeting_id in _e2e_finish_requested:
             _e2e_finish_requested.discard(meeting_id)
             logger.info("E2E finish requested for %s after verified speaker exit", meeting_id[:8])
-            return True
+            return finish("e2e_finish", True)
         await asyncio.sleep(config.PARTICIPANT_POLL_INTERVAL)
 
         # Hard deadline
         if time.monotonic() > deadline:
             logger.info("Max recording time reached — stopping")
-            return meeting_started
+            return finish("max_duration")
 
         try:
+            if getattr(page, "is_closed", lambda: False)():
+                logger.info("Page closed unexpectedly — meeting ended")
+                return finish("page_crashed")
             current_url = page.url
             if "telemost" not in current_url.lower() or not urlsplit(current_url).path.strip("/"):
                 logger.info("URL changed — meeting ended")
-                return meeting_started
+                return finish("url_changed")
         except Exception:
             logger.info("Page crashed — meeting ended")
-            return meeting_started
+            return finish("page_crashed")
 
         snapshot = await _participant_snapshot(page)
         initial_participants.update(snapshot["names"])
@@ -2002,7 +2025,7 @@ async def _wait_for_meeting_end(
         logger.info("Empty poll %d/%d (started=%s)", empty_polls, config.EMPTY_POLLS_TO_END, meeting_started)
         if empty_polls >= config.EMPTY_POLLS_TO_END:
             logger.info("Meeting ended (no participants)")
-            return meeting_started
+            return finish("participants_left")
 
 
 # ── Audio capture ─────────────────────────────────────────────────────────────
@@ -2666,4 +2689,7 @@ async def run_recording_scheduler() -> None:
                         await start_recording(mid)
             except Exception as e:
                 logger.error("Scheduler error: %s", e)
+            else:
+                from services.monitor_state import completed
+                completed("recording_scheduler")
         await asyncio.sleep(30)

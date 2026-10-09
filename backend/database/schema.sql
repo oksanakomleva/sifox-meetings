@@ -11,6 +11,17 @@ CREATE TABLE IF NOT EXISTS users (
     last_login  TIMESTAMP
 );
 
+-- Additional sign-in identities point to the existing Sifox user. In
+-- particular, linking GitLab must not create a second user or move meetings.
+CREATE TABLE IF NOT EXISTS auth_identities (
+    provider   TEXT NOT NULL,
+    subject    TEXT NOT NULL,
+    user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    linked_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (provider, subject),
+    UNIQUE (user_id, provider)
+);
+
 -- ── Web sessions ─────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS sessions (
     id         TEXT PRIMARY KEY,         -- random token
@@ -57,9 +68,14 @@ CREATE TABLE IF NOT EXISTS calendars (
     name                TEXT,
     is_primary          BOOLEAN DEFAULT FALSE,
     record_enabled      BOOLEAN DEFAULT FALSE,  -- admin toggles this
+    is_managed          BOOLEAN NOT NULL DEFAULT FALSE, -- admin-selected in Sifox; not removed in Google
     created_at          TIMESTAMP DEFAULT NOW(),
     UNIQUE (owner_user_id, google_calendar_id)
 );
+-- Existing calendars stay selected; a removed calendar remains discoverable
+-- on the next Google sync but cannot silently reappear in the active list.
+ALTER TABLE calendars ADD COLUMN IF NOT EXISTS is_managed BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE calendars ALTER COLUMN is_managed SET DEFAULT FALSE;
 
 -- ── Meetings (deduplicated by telemost URL) ───────────────────────────────────
 CREATE TABLE IF NOT EXISTS meetings (
@@ -79,9 +95,43 @@ CREATE TABLE IF NOT EXISTS meetings (
     audio_path    TEXT,                  -- relative to AUDIO_DIR
     audio_size    BIGINT,                -- bytes
     error_message TEXT,
+    recording_end_reason TEXT,
+    recording_ended_at TIMESTAMPTZ,
+    recording_had_participants BOOLEAN,
     recorder_user_id BIGINT REFERENCES users(id),  -- who triggered recording
     created_at    TIMESTAMP DEFAULT NOW(),
     updated_at    TIMESTAMP DEFAULT NOW()
+);
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS recording_end_reason TEXT;
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS recording_ended_at TIMESTAMPTZ;
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS recording_had_participants BOOLEAN;
+
+-- Durable deduplication and retry queue for non-blocking incident notifications.
+CREATE TABLE IF NOT EXISTS monitor_alerts (
+    alert_key TEXT PRIMARY KEY,
+    message TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    sent_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_monitor_alerts_pending
+    ON monitor_alerts(created_at) WHERE sent_at IS NULL;
+
+-- A Mattermost sender can control only their own Sifox recordings. Pairing is
+-- confirmed from an authenticated Sifox session with a short-lived code.
+CREATE TABLE IF NOT EXISTS mm_recorder_links (
+    mm_user_id TEXT PRIMARY KEY,
+    user_id BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    linked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS mm_recorder_link_codes (
+    user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    code_hash TEXT NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS mm_recorder_processed_posts (
+    post_id TEXT PRIMARY KEY,
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 -- Migration: timestamp of when the protocol was last e-mailed to participants
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS protocol_sent_at TIMESTAMPTZ;
@@ -147,6 +197,8 @@ CREATE INDEX IF NOT EXISTS idx_live_notes_meeting
 CREATE INDEX IF NOT EXISTS idx_meetings_status    ON meetings(status);
 CREATE INDEX IF NOT EXISTS idx_meetings_start     ON meetings(start_time);
 CREATE INDEX IF NOT EXISTS idx_meetings_url       ON meetings(meeting_url);
+CREATE INDEX IF NOT EXISTS idx_meetings_room_key
+    ON meetings ((rtrim(split_part(meeting_url, '?', 1), '/')));
 
 -- ── Meeting participants ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS meeting_participants (
@@ -211,8 +263,12 @@ CREATE TABLE IF NOT EXISTS invitations (
     created_by  BIGINT REFERENCES users(id) ON DELETE SET NULL,
     expires_at  TIMESTAMPTZ NOT NULL,
     accepted_at TIMESTAMPTZ,
+    sent_at     TIMESTAMPTZ,
+    send_error  TEXT,
     created_at  TIMESTAMPTZ DEFAULT NOW()
 );
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS send_error TEXT;
 CREATE INDEX IF NOT EXISTS idx_invitations_token ON invitations(token);
 CREATE INDEX IF NOT EXISTS idx_invitations_email ON invitations(email);
 
