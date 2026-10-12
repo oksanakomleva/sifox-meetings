@@ -1154,6 +1154,73 @@ async def _zoom_click_visible(page, selectors: tuple[str, ...]) -> bool:
     return False
 
 
+async def _zoom_dismiss_prejoin_prompts(page) -> int:
+    """Skip Zoom's own camera/microphone prompts before guest admission.
+
+    Zoom can display two successive in-page dialogs over the name form.  They
+    are not Chromium permission prompts, and a visible input behind them does
+    not mean the Join button can be used.  Recording does not need to transmit
+    the bot's microphone or camera (the live assistant is Telemost-only).
+    """
+    skipped = 0
+    for _ in range(3):
+        clicked = await _zoom_click_visible(page, (
+            "button:has-text('Продолжить без микрофона и камеры')",
+            "button:has-text('Continue without microphone and camera')",
+            "button:has-text('Continue without microphone or camera')",
+            "button:has-text('Continue without audio and video')",
+        ))
+        if not clicked:
+            break
+        skipped += 1
+        await page.wait_for_timeout(300)
+    if skipped:
+        logger.info("Skipped %d Zoom pre-join media prompt(s)", skipped)
+    return skipped
+
+
+async def _zoom_join_failure_detail(page, name_field) -> str:
+    """Describe the last visible Zoom state without leaking the join URL."""
+    try:
+        body = (await page.locator("body").inner_text(timeout=2_000)).lower()
+    except Exception:
+        body = ""
+    if any(marker in body for marker in (
+        "only authenticated users", "sign in to join", "please sign in to join",
+        "только авторизованные пользователи", "войдите в систему, чтобы присоединиться",
+    )):
+        return "Zoom требует авторизации участника для входа через браузер"
+    if any(marker in body for marker in (
+        "incorrect passcode", "wrong passcode", "неверный код доступа", "неверный пароль",
+    )):
+        return "Zoom отклонил код доступа к конференции"
+    if any(marker in body for marker in (
+        "waiting room", "host will let you in", "зал ожидания", "ожидайте допуска",
+    )):
+        return "Zoom оставил гостя в зале ожидания"
+    if any(marker in body for marker in (
+        "waiting for the host to start", "host has not started", "ожидание организатора",
+    )):
+        return "Zoom ожидает запуска конференции организатором"
+    if any(marker in body for marker in (
+        "verify you are human", "complete the captcha", "подтвердите, что вы человек",
+    )):
+        return "Zoom запросил проверку, что участник не робот"
+    try:
+        if await name_field.is_visible(timeout=1_000):
+            return "форма ввода имени осталась открытой после нажатия «Войти»"
+    except Exception:
+        pass
+    try:
+        current = urlsplit(page.url)
+        path = current.path or "/"
+        # No query string or fragment: Zoom places temporary admission tokens there.
+        location = f"{current.hostname or 'unknown'}{path}"
+    except Exception:
+        location = "неизвестна"
+    return f"вход не подтверждён; последняя страница: {location}"
+
+
 async def _zoom_participant_count(page) -> int | None:
     """Read only a participant-labelled Zoom counter; unknown is not empty."""
     selectors = (
@@ -1192,6 +1259,7 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
         "a:has-text('Join from Your Browser')",
         "a:has-text('Присоединиться из браузера')",
     ))
+    await _zoom_dismiss_prejoin_prompts(page)
     name_selectors = (
         "#input-for-name", "input[placeholder*='name' i]",
         "input[placeholder*='имя' i]",
@@ -1199,6 +1267,7 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
     deadline = time.monotonic() + 45
     name_field = None
     while time.monotonic() < deadline:
+        await _zoom_dismiss_prejoin_prompts(page)
         for selector in name_selectors:
             try:
                 field = page.locator(selector).first
@@ -1212,7 +1281,9 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
         await page.wait_for_timeout(1_000)
     if name_field is None:
         raise RuntimeError("Zoom: экран гостевого входа не появился; проверьте ссылку и разрешение на вход из браузера")
+    await _zoom_dismiss_prejoin_prompts(page)
     await name_field.fill("Protocaller")
+    await _zoom_dismiss_prejoin_prompts(page)
     if not await _zoom_click_visible(page, (
         "#joinBtn", "button:has-text('Join')", "button:has-text('Присоединиться')",
     )):
@@ -1220,6 +1291,7 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
 
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
+        await _zoom_dismiss_prejoin_prompts(page)
         joined = False
         for selector in ("button[aria-label*='leave' i]", "button[aria-label*='покинуть' i]",
                          "button:has-text('Leave')", "button:has-text('Выйти')"):
@@ -1239,7 +1311,9 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
             logger.info("Zoom guest admission confirmed")
             return set()
         await page.wait_for_timeout(2_000)
-    raise RuntimeError("Zoom: вход не подтверждён за 120 секунд; возможно, организатор должен впустить гостя")
+    detail = await _zoom_join_failure_detail(page, name_field)
+    logger.warning("Zoom guest admission not confirmed after 120s: %s", detail)
+    raise RuntimeError(f"Zoom: {detail}")
 
 _JOIN_BUTTON_SELECTORS = (
     "button[data-testid='enter-conference-button']",

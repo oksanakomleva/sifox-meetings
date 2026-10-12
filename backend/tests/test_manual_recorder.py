@@ -170,6 +170,7 @@ def test_zoom_guest_flow_preserves_passcode_and_confirms_admission(monkeypatch):
     click = AsyncMock(side_effect=[False, False, True, True])
     monkeypatch.setattr(recorder, "_navigate_to_meeting", navigate)
     monkeypatch.setattr(recorder, "_zoom_click_visible", click)
+    monkeypatch.setattr(recorder, "_zoom_dismiss_prejoin_prompts", AsyncMock(return_value=0))
     page = MagicMock()
     page.locator.return_value.first.is_visible = AsyncMock(return_value=True)
     page.locator.return_value.first.fill = AsyncMock()
@@ -178,6 +179,42 @@ def test_zoom_guest_flow_preserves_passcode_and_confirms_admission(monkeypatch):
         page, "https://us06web.zoom.us/wc/join/12345678901?pwd=abc123"
     )
     page.locator.return_value.first.fill.assert_awaited_once_with("Protocaller")
+
+
+def test_zoom_skips_both_media_prompts_before_join(monkeypatch):
+    from services import recorder
+    click = AsyncMock(side_effect=[True, True, False])
+    monkeypatch.setattr(recorder, "_zoom_click_visible", click)
+    page = MagicMock()
+    page.wait_for_timeout = AsyncMock()
+    assert asyncio.run(recorder._zoom_dismiss_prejoin_prompts(page)) == 2
+    assert click.await_count == 3
+    assert "без микрофона и камеры" in click.await_args_list[0].args[1][0]
+
+
+def test_zoom_timeout_reports_open_name_form_not_unproven_waiting_room():
+    from services import recorder
+    page = MagicMock()
+    page.locator.return_value.inner_text = AsyncMock(return_value="Введите информацию о встрече")
+    name_field = MagicMock()
+    name_field.is_visible = AsyncMock(return_value=True)
+    assert asyncio.run(recorder._zoom_join_failure_detail(page, name_field)) == (
+        "форма ввода имени осталась открытой после нажатия «Войти»"
+    )
+
+
+def test_zoom_timeout_explains_authentication_without_leaking_join_query():
+    from services import recorder
+    page = MagicMock()
+    page.url = ZOOM_URL
+    page.locator.return_value.inner_text = AsyncMock(
+        return_value="Only authenticated users can join this meeting"
+    )
+    name_field = MagicMock()
+    name_field.is_visible = AsyncMock(return_value=False)
+    detail = asyncio.run(recorder._zoom_join_failure_detail(page, name_field))
+    assert "авторизации" in detail
+    assert "pwd" not in detail and "abc123" not in detail
 
 
 def test_zoom_count_is_unknown_without_a_labelled_counter():
