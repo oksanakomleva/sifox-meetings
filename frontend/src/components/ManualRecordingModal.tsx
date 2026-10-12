@@ -24,6 +24,7 @@ export default function ManualRecordingModal({ onClose, onStarted }: Props) {
   const [error, setError] = useState('')
   const [meetingId, setMeetingId] = useState<string | null>(null)
   const [startedStatus, setStartedStatus] = useState('')
+  const [startFailed, setStartFailed] = useState(false)
   const [mm, setMm] = useState<{ enabled: boolean; linked: boolean; bot_username: string | null } | null>(null)
   const [code, setCode] = useState('')
   const [codeBusy, setCodeBusy] = useState(false)
@@ -32,12 +33,43 @@ export default function ManualRecordingModal({ onClose, onStarted }: Props) {
     api.meetings.mattermostRecorder().then(setMm).catch(() => setMm(null))
   }, [])
 
+  useEffect(() => {
+    if (!meetingId) return
+    let stopped = false
+    const check = async () => {
+      try {
+        const meeting = await api.meetings.get(meetingId)
+        if (stopped) return
+        if (meeting.status === 'recording') setStartedStatus('Протоколлер вошёл во встречу, запись идёт.')
+        if (meeting.status === 'joining') setStartedStatus('Протоколлер открывает встречу. Это может занять до двух минут.')
+        if (meeting.status === 'error') {
+          setStartFailed(true)
+          setStartedStatus(`Не удалось подключиться: ${meeting.error_message || 'неизвестная ошибка'}`)
+        }
+        if (meeting.status === 'no_show') {
+          setStartFailed(true)
+          setStartedStatus('Запись завершена: других участников во встрече не было.')
+        }
+        if (['transcribing', 'analyzing', 'done'].includes(meeting.status)) {
+          setStartedStatus('Запись завершена, встреча обрабатывается или уже готова.')
+        }
+      } catch {
+        // A temporary read failure must not turn a successfully queued request
+        // into a false connection error. The next poll retries.
+      }
+    }
+    void check()
+    const timer = window.setInterval(() => { void check() }, 4_000)
+    return () => { stopped = true; window.clearInterval(timer) }
+  }, [meetingId])
+
   const start = async (event: React.FormEvent) => {
     event.preventDefault()
     setBusy(true); setError('')
     try {
       const result = await api.meetings.startManual(url, title)
       setMeetingId(result.meeting_id)
+      setStartFailed(false)
       setStartedStatus(result.existing && ['done', 'transcribing', 'analyzing'].includes(result.status)
         ? 'Эта встреча недавно уже записывалась — повторно не подключаемся.'
         : 'Протоколлер подключается.')
@@ -65,26 +97,26 @@ export default function ManualRecordingModal({ onClose, onStarted }: Props) {
     <div style={overlay} onClick={onClose}>
       <div className="modal-panel" style={panel} onClick={event => event.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
-          <h2 style={{ margin: 0, fontSize: 'var(--font-size-lg)' }}>Отправить протоколлера на встречу</h2>
+          <h2 style={{ margin: 0, fontSize: 'var(--font-size-lg)' }}>Отправить Протоколлер на встречу</h2>
           <button type="button" className="btn btn-ghost" onClick={onClose} aria-label="Закрыть" style={{ padding: 4 }}>✕</button>
         </div>
 
         {meetingId ? (
-          <div role="status" style={{ color: 'var(--color-success)' }}>
+          <div role={startFailed ? 'alert' : 'status'} style={{ color: startFailed ? 'var(--color-error)' : 'var(--color-success)' }}>
             {startedStatus} <a href={`/meetings/${meetingId}`}>Открыть встречу</a>
           </div>
         ) : (
           <form onSubmit={start} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-            <label htmlFor="manual-telemost-url">Ссылка Телемоста</label>
+            <label htmlFor="manual-telemost-url">Ссылка Телемоста или Zoom</label>
             <input id="manual-telemost-url" className="input" type="url" required
-              placeholder="https://telemost.yandex.ru/j/..." value={url}
+              placeholder="https://telemost.yandex.ru/j/... или https://zoom.us/j/..." value={url}
               onChange={event => setUrl(event.target.value)} />
             <label htmlFor="manual-meeting-title">Название встречи (необязательно)</label>
             <input id="manual-meeting-title" className="input" maxLength={120}
               placeholder="Встреча по ссылке" value={title}
               onChange={event => setTitle(event.target.value)} />
             <button className="btn btn-primary" type="submit" disabled={busy || !url.trim()}>
-              {busy ? 'Подключаем…' : 'Подключить протоколлера'}
+              {busy ? 'Отправляем…' : 'Отправить Протоколлер'}
             </button>
           </form>
         )}
@@ -93,12 +125,12 @@ export default function ManualRecordingModal({ onClose, onStarted }: Props) {
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Через личное сообщение в Mattermost</div>
           {!mm?.enabled ? (
             <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>
-              Этот способ пока не включён. Запуск по ссылке выше уже доступен в Sifox.
+              Этот способ пока не включён. Отправить Протоколлер по ссылке можно выше.
             </p>
           ) : mm.linked ? (
             <p style={{ margin: 0, fontSize: 'var(--font-size-sm)' }}>
               Аккаунт привязан. Пришлите {mm.bot_username ? <>@{mm.bot_username}</> : 'протоколлеру'}
-              {' '}ссылку Телемоста отдельным личным сообщением.
+              {' '}ссылку Телемоста или Zoom отдельным личным сообщением.
             </p>
           ) : (
             <div style={{ fontSize: 'var(--font-size-sm)', display: 'flex', flexDirection: 'column', gap: 8 }}>

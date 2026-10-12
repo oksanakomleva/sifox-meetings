@@ -573,7 +573,7 @@ async def upsert_meeting(
             return dict(row)
 
 
-async def create_manual_telemost_meeting(
+async def create_manual_meeting(
     meeting_url: str, title: str, recorder_user_id: int,
 ) -> tuple[dict[str, Any] | None, bool]:
     """Create one immediate recording per room, atomically across API workers.

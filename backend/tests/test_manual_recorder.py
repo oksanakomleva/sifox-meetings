@@ -13,6 +13,7 @@ from services import manual_meetings, mattermost_recorder
 
 USER = {"user_id": 7, "email": "user@sifox.com", "is_active": True, "is_preview": False}
 URL = "https://telemost.yandex.ru/j/123456789"
+ZOOM_URL = "https://us06web.zoom.us/j/12345678901?pwd=abc123"
 MID = "11111111-1111-4111-8111-111111111111"
 
 
@@ -27,11 +28,29 @@ MID = "11111111-1111-4111-8111-111111111111"
 ])
 def test_rejects_non_room_urls(bad):
     with pytest.raises(ValueError):
-        manual_meetings.normalize_telemost_url(bad)
+        manual_meetings.normalize_meeting_url(bad)
 
 
 def test_normalizes_room_url_without_query_or_fragment():
-    assert manual_meetings.normalize_telemost_url(URL + "/?utm=1#foo") == URL
+    assert manual_meetings.normalize_meeting_url(URL + "/?utm=1#foo") == URL
+
+
+def test_zoom_link_keeps_passcode_but_drops_tracking():
+    assert manual_meetings.normalize_meeting_url(
+        "https://us06web.zoom.us/wc/join/12345678901?utm=1&pwd=abc123#section"
+    ) == ZOOM_URL
+
+
+@pytest.mark.parametrize("bad", [
+    "https://zoom.us.evil.example/j/12345678901",
+    "https://zoom.us@evil.example/j/12345678901",
+    "http://zoom.us/j/12345678901",
+    "https://zoom.us:444/j/12345678901",
+    "https://zoom.us/meeting/12345678901",
+])
+def test_rejects_unsafe_zoom_urls(bad):
+    with pytest.raises(ValueError):
+        manual_meetings.normalize_meeting_url(bad)
 
 
 def test_mm_only_recognizes_plain_link_or_explicit_command():
@@ -62,6 +81,13 @@ def test_authenticated_user_can_launch_from_interface(client):
     launch.assert_awaited_once_with(URL, "Обсуждение", 7)
 
 
+def test_authenticated_user_can_send_zoom_link(client):
+    http, _, launch = client
+    response = http.post("/api/meetings/manual", json={"meeting_url": ZOOM_URL})
+    assert response.status_code == 202
+    launch.assert_awaited_once_with(ZOOM_URL, "", 7)
+
+
 def test_preview_user_cannot_launch(client):
     http, state, launch = client
     state["is_preview"] = True
@@ -72,9 +98,9 @@ def test_preview_user_cannot_launch(client):
 def test_manual_service_starts_only_pending_row(monkeypatch):
     row = {"id": MID, "status": "pending"}
     create = AsyncMock(return_value=(row, False))
-    start = AsyncMock()
-    monkeypatch.setattr(manual_meetings.models, "create_manual_telemost_meeting", create, raising=False)
-    monkeypatch.setattr(manual_meetings, "normalize_telemost_url", lambda url: URL)
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(manual_meetings.models, "create_manual_meeting", create, raising=False)
+    monkeypatch.setattr(manual_meetings, "normalize_meeting_url", lambda url: URL)
     from services import recorder
     monkeypatch.setattr(recorder, "_shutdown_requested", False)
     monkeypatch.setattr(recorder, "start_recording", start)
@@ -82,6 +108,102 @@ def test_manual_service_starts_only_pending_row(monkeypatch):
     assert result == row and not existing
     create.assert_awaited_once_with(URL, "Встреча по ссылке", 7)
     start.assert_awaited_once_with(MID)
+
+
+def test_manual_service_reports_failed_claim(monkeypatch):
+    from services import recorder
+    monkeypatch.setattr(recorder, "_shutdown_requested", False)
+    monkeypatch.setattr(manual_meetings.models, "create_manual_meeting",
+                        AsyncMock(return_value=({"id": MID, "status": "pending"}, False)), raising=False)
+    monkeypatch.setattr(manual_meetings.models, "get_meeting", AsyncMock(return_value=None), raising=False)
+    monkeypatch.setattr(recorder, "start_recording", AsyncMock(return_value=False))
+    with pytest.raises(manual_meetings.MeetingAlreadyInProgress):
+        asyncio.run(manual_meetings.launch_manual_meeting(URL, None, 7))
+
+
+def test_manual_service_accepts_a_claim_by_another_worker(monkeypatch):
+    from services import recorder
+    monkeypatch.setattr(recorder, "_shutdown_requested", False)
+    monkeypatch.setattr(manual_meetings.models, "create_manual_meeting",
+                        AsyncMock(return_value=({"id": MID, "status": "pending"}, False)), raising=False)
+    monkeypatch.setattr(manual_meetings.models, "get_meeting",
+                        AsyncMock(return_value={"id": MID, "status": "joining"}), raising=False)
+    monkeypatch.setattr(recorder, "start_recording", AsyncMock(return_value=False))
+    row, existing = asyncio.run(manual_meetings.launch_manual_meeting(URL, None, 7))
+    assert row["status"] == "joining" and existing
+
+
+def test_navigation_retries_only_when_page_did_not_render():
+    from services import recorder
+    page = MagicMock()
+    page.url = "about:blank"
+    page.goto = AsyncMock(side_effect=[TimeoutError("slow"), None])
+    page.locator.return_value.count = AsyncMock(return_value=0)
+    asyncio.run(recorder._navigate_to_meeting(page, URL))
+    assert page.goto.await_count == 2
+    assert page.goto.await_args_list[0].kwargs["wait_until"] == "domcontentloaded"
+    assert page.goto.await_args_list[1].kwargs["wait_until"] == "commit"
+
+
+def test_navigation_accepts_rendered_page_after_load_timeout():
+    from services import recorder
+    page = MagicMock()
+    page.url = URL
+    page.goto = AsyncMock(side_effect=TimeoutError("slow asset"))
+    page.locator.return_value.count = AsyncMock(return_value=1)
+    asyncio.run(recorder._navigate_to_meeting(page, URL))
+    page.goto.assert_awaited_once()
+
+
+def test_zoom_uses_its_own_join_flow(monkeypatch):
+    from services import recorder
+    join = AsyncMock(return_value=set())
+    monkeypatch.setattr(recorder, "_join_zoom_meeting", join)
+    page = MagicMock()
+    assert asyncio.run(recorder._join_meeting(page, ZOOM_URL)) == set()
+    join.assert_awaited_once_with(page, ZOOM_URL)
+
+
+def test_zoom_guest_flow_preserves_passcode_and_confirms_admission(monkeypatch):
+    from services import recorder
+    navigate = AsyncMock()
+    click = AsyncMock(side_effect=[False, False, True, True])
+    monkeypatch.setattr(recorder, "_navigate_to_meeting", navigate)
+    monkeypatch.setattr(recorder, "_zoom_click_visible", click)
+    page = MagicMock()
+    page.locator.return_value.first.is_visible = AsyncMock(return_value=True)
+    page.locator.return_value.first.fill = AsyncMock()
+    assert asyncio.run(recorder._join_zoom_meeting(page, ZOOM_URL)) == set()
+    navigate.assert_awaited_once_with(
+        page, "https://us06web.zoom.us/wc/join/12345678901?pwd=abc123"
+    )
+    page.locator.return_value.first.fill.assert_awaited_once_with("Protocaller")
+
+
+def test_zoom_count_is_unknown_without_a_labelled_counter():
+    from services import recorder
+    page = MagicMock()
+    page.locator.return_value.all = AsyncMock(return_value=[])
+    assert asyncio.run(recorder._zoom_participant_count(page)) is None
+
+
+def test_zoom_recording_stops_after_participants_leave(monkeypatch):
+    from services import recorder
+    page = MagicMock()
+    page.url = ZOOM_URL.replace("/j/", "/wc/join/")
+    page.is_closed.return_value = False
+    page.locator.return_value.inner_text = AsyncMock(return_value="Meeting")
+    counts = iter([2, 1, 1, 1])
+    monkeypatch.setattr(recorder, "_zoom_participant_count",
+                        AsyncMock(side_effect=lambda _page: next(counts)))
+    monkeypatch.setattr(recorder.asyncio, "sleep", AsyncMock())
+    ended = []
+    result = asyncio.run(recorder._wait_for_meeting_end(
+        page, set(), meeting_id=MID, on_end=lambda reason, present: ended.append((reason, present)),
+        service="zoom",
+    ))
+    assert result is True
+    assert ended == [("participants_left", True)]
 
 
 def test_mm_unlinked_sender_cannot_start_recording(monkeypatch):

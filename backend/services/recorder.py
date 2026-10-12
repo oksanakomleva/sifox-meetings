@@ -12,7 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from config import config
 from database import models
@@ -495,11 +495,11 @@ async def _recover_analyze(meeting_id: str, transcript_text: str) -> None:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-async def start_recording(meeting_id: str) -> None:
-    """Claim and record a meeting. No-op if already taken."""
+async def start_recording(meeting_id: str) -> bool:
+    """Claim and record a meeting. Return whether a recorder owns the row."""
     if meeting_id in _active:
         logger.info("Meeting %s already recording", meeting_id)
-        return
+        return True
 
     claimed = await models.claim_meeting_for_recording(meeting_id)
     if not claimed:
@@ -513,7 +513,7 @@ async def start_recording(meeting_id: str) -> None:
             )
         else:
             logger.info("Meeting %s already claimed by another worker", meeting_id)
-        return
+        return False
 
     task = asyncio.create_task(
         _record_pipeline(meeting_id),
@@ -521,6 +521,7 @@ async def start_recording(meeting_id: str) -> None:
     )
     _active[meeting_id] = task
     task.add_done_callback(lambda _: _active.pop(meeting_id, None))
+    return True
 
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -531,6 +532,7 @@ async def _record_pipeline(meeting_id: str) -> None:
         return
 
     url = meeting["meeting_url"]
+    service = _meeting_service(url)
     audio_filename = f"{meeting_id}.wav"
     audio_path = Path(config.AUDIO_DIR) / audio_filename
     await fsio.mkdir_p(audio_path.parent)
@@ -548,7 +550,7 @@ async def _record_pipeline(meeting_id: str) -> None:
     browser = None
     pw = None
     live_task: "asyncio.Task | None" = None
-    assistant_enabled = config.LIVE_ASSISTANT_ENABLED and (
+    assistant_enabled = service == "telemost" and config.LIVE_ASSISTANT_ENABLED and (
         config.LIVE_ASSISTANT_ALL_MEETINGS
         or bool(meeting.get("assistant_enabled"))
     )
@@ -679,6 +681,13 @@ async def _record_pipeline(meeting_id: str) -> None:
             f"--use-file-for-fake-audio-capture={fake_audio_file}",
             "--use-fake-ui-for-media-stream",
         ]
+        if service == "zoom":
+            # The sibling Recording Pro project uses a headed Xvfb browser for
+            # Zoom's web client. Keep Telemost's proven headless flow unchanged.
+            chromium_args.extend([
+                "--disable-blink-features=AutomationControlled",
+                "--lang=ru-RU,ru",
+            ])
         if config.CHROMIUM_DISABLE_SANDBOX:
             logger.warning("Chromium sandbox explicitly disabled by configuration")
             chromium_args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
@@ -701,7 +710,7 @@ async def _record_pipeline(meeting_id: str) -> None:
                 # after an actionable Join click.  Playwright normally adds
                 # --mute-audio in headless mode, so remove that default: the
                 # recorder must still receive the meeting's audio via Pulse.
-                headless=True,
+                headless=service != "zoom",
                 args=chromium_args,
                 env=browser_env,
                 ignore_default_args=["--mute-audio"],
@@ -715,6 +724,15 @@ async def _record_pipeline(meeting_id: str) -> None:
             "создание профиля браузера",
             20,
         )
+        if service == "zoom":
+            await startup_step(
+                lambda: context.add_init_script(
+                    script="Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+                    "Object.defineProperty(navigator, 'languages', {get: () => ['ru-RU','ru','en-US']});"
+                ),
+                "подготовка браузера Zoom",
+                10,
+            )
         await startup_step(
             lambda: context.add_init_script(script=_SYNTHETIC_CAMERA_INIT_SCRIPT),
             "подготовка виртуальной камеры",
@@ -816,7 +834,11 @@ async def _record_pipeline(meeting_id: str) -> None:
                     if speaker_diagnostics["failed_polls"] <= 3 or speaker_diagnostics["failed_polls"] % 30 == 0:
                         logger.warning("Speaker tracking failed (%s): %s", meeting_id[:8], exc)
 
-        tracker = asyncio.create_task(track_speakers())
+        # The speaker selectors above belong to Telemost. Zoom audio is still
+        # recorded and transcribed, but unknown speakers must not be attributed
+        # using unrelated DOM elements.
+        if service == "telemost":
+            tracker = asyncio.create_task(track_speakers())
 
         # 5b. Live in-meeting assistant (isolated, opt-in via flag). Failures here
         # never affect the recording — run_live_assistant swallows its own errors.
@@ -874,6 +896,7 @@ async def _record_pipeline(meeting_id: str) -> None:
             meeting.get("start_time"),
             meeting_id=meeting_id,
             on_end=note_end,
+            service=service,
         )
         if end_diagnostic:
             try:
@@ -881,7 +904,8 @@ async def _record_pipeline(meeting_id: str) -> None:
             except Exception as exc:
                 # Monitoring must never prevent audio from being processed.
                 logger.warning("Could not save recording end reason for %s: %s", meeting_id[:8], exc)
-        tracker.cancel()
+        if tracker:
+            tracker.cancel()
         if live_task:
             live_task.cancel()
             await asyncio.gather(live_task, return_exceptions=True)
@@ -1087,6 +1111,135 @@ async def transcribe_and_analyze(
 
 
 # ── Meeting join ──────────────────────────────────────────────────────────────
+
+def _meeting_service(url: str) -> str:
+    host = (urlsplit(url).hostname or "").lower()
+    return "zoom" if host == "zoom.us" or host.endswith(".zoom.us") else "telemost"
+
+
+async def _navigate_to_meeting(page, url: str) -> None:
+    """A slow third-party asset must not turn a loaded meeting page into an error."""
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+    except Exception as exc:
+        if not isinstance(exc, TimeoutError) and type(exc).__name__ != "TimeoutError":
+            raise
+        # A timeout can happen after Chromium has committed and rendered the
+        # page. Check the actual page before retrying navigation.
+        try:
+            same_host = urlsplit(page.url).hostname == urlsplit(url).hostname
+            body_ready = await asyncio.wait_for(page.locator("body").count(), timeout=3) > 0
+        except Exception:
+            same_host = body_ready = False
+        if not (same_host and body_ready):
+            try:
+                await page.goto(url, wait_until="commit", timeout=30_000)
+            except Exception as retry_exc:
+                if isinstance(retry_exc, TimeoutError) or type(retry_exc).__name__ == "TimeoutError":
+                    raise RuntimeError("Не удалось открыть страницу встречи: сайт не ответил после повторной попытки") from retry_exc
+                raise
+        else:
+            logger.warning("Navigation timed out after page rendered; continuing: %s", urlsplit(url).hostname)
+
+
+async def _zoom_click_visible(page, selectors: tuple[str, ...]) -> bool:
+    for selector in selectors:
+        try:
+            candidate = page.locator(selector).first
+            if await candidate.is_visible(timeout=1_500):
+                await candidate.click(timeout=3_000)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _zoom_participant_count(page) -> int | None:
+    """Read only a participant-labelled Zoom counter; unknown is not empty."""
+    selectors = (
+        "button[aria-label*='participant' i]",
+        "button[aria-label*='участник' i]",
+        "[data-testid='participants-count']",
+    )
+    for selector in selectors:
+        try:
+            for element in (await page.locator(selector).all())[:5]:
+                if not await element.is_visible():
+                    continue
+                label = (await element.get_attribute("aria-label") or
+                         await element.text_content() or "").strip()
+                match = re.search(r"\b([1-9][0-9]{0,2})\b", label)
+                if match:
+                    return int(match.group(1))
+        except Exception:
+            continue
+    return None
+
+
+async def _join_zoom_meeting(page, url: str) -> set[str]:
+    """Join Zoom's browser client as a guest; never claim recording in its lobby."""
+    parts = urlsplit(url)
+    web_url = urlunsplit((parts.scheme, parts.netloc,
+                         parts.path.replace("/j/", "/wc/join/", 1),
+                         parts.query, ""))
+    await _navigate_to_meeting(page, web_url)
+    await _zoom_click_visible(page, (
+        "#onetrust-accept-btn-handler", "button:has-text('Accept Cookies')",
+        "button:has-text('Принять')",
+    ))
+    await _zoom_click_visible(page, (
+        "a:has-text('Join from your browser')",
+        "a:has-text('Join from Your Browser')",
+        "a:has-text('Присоединиться из браузера')",
+    ))
+    name_selectors = (
+        "#input-for-name", "input[placeholder*='name' i]",
+        "input[placeholder*='имя' i]",
+    )
+    deadline = time.monotonic() + 45
+    name_field = None
+    while time.monotonic() < deadline:
+        for selector in name_selectors:
+            try:
+                field = page.locator(selector).first
+                if await field.is_visible(timeout=1_000):
+                    name_field = field
+                    break
+            except Exception:
+                continue
+        if name_field:
+            break
+        await page.wait_for_timeout(1_000)
+    if name_field is None:
+        raise RuntimeError("Zoom: экран гостевого входа не появился; проверьте ссылку и разрешение на вход из браузера")
+    await name_field.fill("Protocaller")
+    if not await _zoom_click_visible(page, (
+        "#joinBtn", "button:has-text('Join')", "button:has-text('Присоединиться')",
+    )):
+        raise RuntimeError("Zoom: не найдена кнопка входа")
+
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        joined = False
+        for selector in ("button[aria-label*='leave' i]", "button[aria-label*='покинуть' i]",
+                         "button:has-text('Leave')", "button:has-text('Выйти')"):
+            try:
+                if await page.locator(selector).first.is_visible(timeout=1_000):
+                    joined = True
+                    break
+            except Exception:
+                continue
+        if joined:
+            await _zoom_click_visible(page, (
+                "button:has-text('Join Audio by Computer')",
+                "button:has-text('Join with Computer Audio')",
+                "button:has-text('Join Audio')",
+                "button:has-text('Подключить звук компьютера')",
+            ))
+            logger.info("Zoom guest admission confirmed")
+            return set()
+        await page.wait_for_timeout(2_000)
+    raise RuntimeError("Zoom: вход не подтверждён за 120 секунд; возможно, организатор должен впустить гостя")
 
 _JOIN_BUTTON_SELECTORS = (
     "button[data-testid='enter-conference-button']",
@@ -1442,6 +1595,9 @@ async def _join_meeting(
     *,
     scheduled_start: datetime | None = None,
 ) -> set[str]:
+    if _meeting_service(url) == "zoom":
+        return await _join_zoom_meeting(page, url)
+
     debug_dir = Path("/tmp/recorder-debug")
     debug_dir.mkdir(exist_ok=True)
 
@@ -1463,7 +1619,7 @@ async def _join_meeting(
         except Exception as e:
             logger.warning("Screenshot %s failed: %s", name, e)
 
-    await page.goto(url, timeout=30_000)
+    await _navigate_to_meeting(page, url)
     await page.wait_for_timeout(3000)
     await snap("1-loaded")
     logger.info("Page URL after load: %s", page.url)
@@ -1902,6 +2058,60 @@ async def _set_bot_mic(page, *, enabled: bool) -> bool:
     return False
 
 
+async def _wait_for_zoom_end(
+    page, initial_participants: set[str], scheduled_start,
+    *, meeting_id: str | None, on_end,
+) -> bool:
+    """Stop only on a confirmed Zoom exit/end or repeated alone evidence."""
+    present = bool(initial_participants)
+    alone_polls = 0
+    deadline = time.monotonic() + config.MAX_RECORDING_HOURS * 3600
+    start = scheduled_start or datetime.now(timezone.utc)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+
+    def finish(reason: str) -> bool:
+        if on_end:
+            on_end(reason, present)
+        return present
+
+    while True:
+        if meeting_id and meeting_id in _e2e_finish_requested:
+            _e2e_finish_requested.discard(meeting_id)
+            return finish("e2e_finish")
+        await asyncio.sleep(config.PARTICIPANT_POLL_INTERVAL)
+        if time.monotonic() >= deadline:
+            return finish("max_duration")
+        try:
+            if page.is_closed():
+                return finish("page_crashed")
+            current = urlsplit(page.url)
+            if _meeting_service(page.url) != "zoom" or "/wc/leave" in current.path:
+                return finish("url_changed")
+            body = (await page.locator("body").inner_text(timeout=2_000)).lower()
+            if any(marker in body for marker in (
+                "meeting has been ended", "meeting is ended by host",
+                "this meeting has been ended", "конференция завершена",
+            )):
+                return finish("meeting_ended")
+        except Exception:
+            logger.warning("Zoom end-state probe unavailable for %s; keeping recording", meeting_id)
+            continue
+
+        count = await _zoom_participant_count(page)
+        if count is None:
+            alone_polls = 0  # Unknown is never evidence of an empty room.
+            continue
+        if count > 1:
+            present = True
+            alone_polls = 0
+        else:
+            alone_polls += 1
+            grace_elapsed = datetime.now(timezone.utc) >= start + timedelta(minutes=10)
+            if alone_polls >= config.EMPTY_POLLS_TO_END and (present or grace_elapsed):
+                return finish("participants_left")
+
+
 async def _wait_for_meeting_end(
     page,
     initial_participants: set[str],
@@ -1909,9 +2119,15 @@ async def _wait_for_meeting_end(
     *,
     meeting_id: str | None = None,
     on_end=None,
+    service: str = "telemost",
 ) -> bool:
     """Block until the meeting ends. Returns whether any real participant (besides
     Protocaller) was ever present — False means nobody showed up (no_show)."""
+    if service == "zoom":
+        return await _wait_for_zoom_end(
+            page, initial_participants, scheduled_start,
+            meeting_id=meeting_id, on_end=on_end,
+        )
     meeting_started = len(initial_participants) > 0
     empty_polls = 0
     unknown_polls = 0

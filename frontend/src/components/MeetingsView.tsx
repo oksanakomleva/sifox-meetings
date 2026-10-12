@@ -277,7 +277,7 @@ export default function MeetingsView({
           </div>
           <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
             <button type="button" className="btn btn-primary" onClick={() => setManualOpen(true)}>
-              + По ссылке
+              Отправить Протоколлер на встречу
             </button>
             {headerAction}
           </div>

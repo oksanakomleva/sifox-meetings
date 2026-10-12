@@ -12,7 +12,7 @@ from config import config
 from database import models
 from services.manual_meetings import (
     MeetingAlreadyInProgress, RecorderUnavailable, launch_manual_meeting,
-    normalize_telemost_url,
+    normalize_meeting_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ def parse_command(text: str) -> tuple[str, str, str | None] | None:
         return None
     url = request.group(1).rstrip(".,;!")
     try:
-        url = normalize_telemost_url(url)
+        url = normalize_meeting_url(url)
     except ValueError:
         return "invalid_url", url, None
     return "record", url, request.group(2)
@@ -59,7 +59,7 @@ async def _handle_command(
         ))
         return
     if action == "invalid_url":
-        await _reply(client, channel_id, "Нужна ссылка вида https://telemost.yandex.ru/j/...")
+        await _reply(client, channel_id, "Нужна ссылка на встречу Телемоста или Zoom")
         return
     user = await models.get_mm_recorder_user(sender_id)
     if not user:
