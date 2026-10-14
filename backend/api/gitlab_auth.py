@@ -59,6 +59,33 @@ def _error(code: str, *, linking: bool = False) -> RedirectResponse:
     return RedirectResponse(f"{config.BASE_URL}/login?error={code}")
 
 
+@router.get("/status")
+async def gitlab_status(
+    session_token: Annotated[str | None, Cookie(alias="session")] = None,
+):
+    """Expose pilot availability without sending users to a disabled OAuth route."""
+    enabled = bool(
+        config.GITLAB_PILOT_ENABLED
+        and config.GITLAB_CLIENT_ID
+        and config.GITLAB_CLIENT_SECRET
+    )
+    if not enabled or not session_token:
+        return {"enabled": enabled, "can_link": False, "linked": False}
+    session = await models.get_session(session_token)
+    can_link = bool(
+        session
+        and session.get("is_active", True)
+        and not session.get("is_preview")
+        and session.get("google_id")
+        and session["email"].lower() == config.GITLAB_PILOT_EMAIL.lower()
+    )
+    linked = bool(
+        can_link
+        and await models.has_auth_identity(session["user_id"], "gitlab")
+    )
+    return {"enabled": enabled, "can_link": can_link and not linked, "linked": linked}
+
+
 @router.get("/link")
 async def link_gitlab(
     request: Request,

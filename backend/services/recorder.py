@@ -1185,11 +1185,11 @@ async def _zoom_join_failure_detail(page, name_field) -> str:
         body = (await page.locator("body").inner_text(timeout=2_000)).lower()
     except Exception:
         body = ""
-    if any(marker in body for marker in (
-        "only authenticated users", "sign in to join", "please sign in to join",
-        "только авторизованные пользователи", "войдите в систему, чтобы присоединиться",
-    )):
-        return "Zoom требует авторизации участника для входа через браузер"
+    if _zoom_requires_authentication(body):
+        return (
+            "Zoom показал экран авторизации после попытки гостевого входа; "
+            "причина не подтверждена (настройки встречи или проверка браузера)"
+        )
     if any(marker in body for marker in (
         "incorrect passcode", "wrong passcode", "неверный код доступа", "неверный пароль",
     )):
@@ -1219,6 +1219,13 @@ async def _zoom_join_failure_detail(page, name_field) -> str:
     except Exception:
         location = "неизвестна"
     return f"вход не подтверждён; последняя страница: {location}"
+
+
+def _zoom_requires_authentication(body: str) -> bool:
+    return any(marker in body for marker in (
+        "only authenticated users", "please sign in to join",
+        "только авторизованные пользователи", "войдите в систему, чтобы присоединиться",
+    ))
 
 
 async def _zoom_participant_count(page) -> int | None:
@@ -1285,13 +1292,37 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
     await name_field.fill("Protocaller")
     await _zoom_dismiss_prejoin_prompts(page)
     if not await _zoom_click_visible(page, (
-        "#joinBtn", "button:has-text('Join')", "button:has-text('Присоединиться')",
+        "#joinBtn", "button:has-text('Войти')", "button:has-text('Join')",
+        "button:has-text('Присоединиться')",
     )):
         raise RuntimeError("Zoom: не найдена кнопка входа")
 
-    deadline = time.monotonic() + 120
+    # Give the organizer time to admit the named guest from the waiting room.
+    # A Zoom sign-in banner alone is not proof that the host disabled guest
+    # access: the same link can expose a guest form in an incognito browser.
+    deadline = time.monotonic() + 240
+    probes = 0
     while time.monotonic() < deadline:
         await _zoom_dismiss_prejoin_prompts(page)
+        probes += 1
+        if probes == 1 or probes % 10 == 0:
+            try:
+                body = (await page.locator("body").inner_text(timeout=2_000)).lower()
+                join_form_visible = await name_field.is_visible(timeout=1_000)
+                logger.info(
+                    "Zoom guest state: name_form=%s waiting_room=%s auth_prompt=%s captcha=%s path=%s",
+                    join_form_visible,
+                    any(marker in body for marker in (
+                        "waiting room", "host will let you in", "зал ожидания", "ожидайте допуска",
+                    )),
+                    _zoom_requires_authentication(body),
+                    any(marker in body for marker in (
+                        "verify you are human", "complete the captcha", "подтвердите, что вы человек",
+                    )),
+                    urlsplit(page.url).path,
+                )
+            except Exception as exc:
+                logger.info("Zoom guest state unavailable: %s", type(exc).__name__)
         joined = False
         for selector in ("button[aria-label*='leave' i]", "button[aria-label*='покинуть' i]",
                          "button:has-text('Leave')", "button:has-text('Выйти')"):
@@ -1312,7 +1343,7 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
             return set()
         await page.wait_for_timeout(2_000)
     detail = await _zoom_join_failure_detail(page, name_field)
-    logger.warning("Zoom guest admission not confirmed after 120s: %s", detail)
+    logger.warning("Zoom guest admission not confirmed after 240s: %s", detail)
     raise RuntimeError(f"Zoom: {detail}")
 
 _JOIN_BUTTON_SELECTORS = (

@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import { api } from '../api/client'
@@ -6,10 +6,15 @@ import { api } from '../api/client'
 export default function Login() {
   const { user, loading } = useAuth()
   const navigate = useNavigate()
+  const [gitlabEnabled, setGitlabEnabled] = useState(false)
 
   useEffect(() => {
     if (!loading && user) navigate('/', { replace: true })
   }, [user, loading, navigate])
+
+  useEffect(() => {
+    api.auth.gitlabStatus().then(status => setGitlabEnabled(status.enabled)).catch(() => {})
+  }, [])
 
   const error = new URLSearchParams(window.location.search).get('error')
 
@@ -87,12 +92,22 @@ export default function Login() {
           </button>
         </a>
 
+        <a
+          href={gitlabEnabled ? api.auth.gitlabLoginUrl() : undefined}
+          style={{ textDecoration: 'none', display: 'block', marginTop: 'var(--space-3)' }}
+        >
+          <button className="btn btn-secondary btn-lg" style={{ width: '100%' }} disabled={!gitlabEnabled}>
+            Войти через GitLab
+          </button>
+        </a>
+
         <p style={{
           marginTop: 'var(--space-6)',
           fontSize: 'var(--font-size-xs)',
           color: 'var(--color-text-muted)',
         }}>
-          Только для сотрудников sifox.com
+          Google — для сотрудников sifox.com. GitLab пока доступен только в пилоте для привязанной учётной записи.
+          {!gitlabEnabled && ' Вход через GitLab ещё не настроен на сервере.'}
         </p>
       </div>
     </div>

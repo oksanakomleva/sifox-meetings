@@ -179,6 +179,7 @@ def test_zoom_guest_flow_preserves_passcode_and_confirms_admission(monkeypatch):
         page, "https://us06web.zoom.us/wc/join/12345678901?pwd=abc123"
     )
     page.locator.return_value.first.fill.assert_awaited_once_with("Protocaller")
+    assert "button:has-text('Войти')" in click.await_args_list[2].args[1]
 
 
 def test_zoom_skips_both_media_prompts_before_join(monkeypatch):
@@ -215,6 +216,17 @@ def test_zoom_timeout_explains_authentication_without_leaking_join_query():
     detail = asyncio.run(recorder._zoom_join_failure_detail(page, name_field))
     assert "авторизации" in detail
     assert "pwd" not in detail and "abc123" not in detail
+
+
+def test_zoom_authentication_requirement_is_not_a_waiting_room():
+    from services import recorder
+    assert recorder._zoom_requires_authentication(
+        "only authenticated users can join this meeting"
+    )
+    assert not recorder._zoom_requires_authentication(
+        "please wait for the host to let you in from the waiting room"
+    )
+    assert not recorder._zoom_requires_authentication("Sign in to join, or enter your name as a guest")
 
 
 def test_zoom_count_is_unknown_without_a_labelled_counter():

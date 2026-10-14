@@ -1692,6 +1692,15 @@ async def get_user_by_auth_identity(provider: str, subject: str) -> dict[str, An
     return dict(row) if row else None
 
 
+async def has_auth_identity(user_id: int, provider: str) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return bool(await conn.fetchval(
+            "SELECT 1 FROM auth_identities WHERE user_id = $1 AND provider = $2",
+            user_id, provider,
+        ))
+
+
 # ── Chat ──────────────────────────────────────────────────────────────────────
 
 async def save_chat_message(

@@ -164,3 +164,28 @@ def test_pilot_is_off_without_flag_and_credentials(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         gitlab_auth._require_pilot()
     assert exc.value.status_code == 404
+
+
+def test_status_only_offers_linking_to_unlinked_pilot(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_PILOT_ENABLED", True)
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_CLIENT_ID", "test-client")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_CLIENT_SECRET", "test-secret")
+    get_session = AsyncMock(return_value=_existing_user())
+    has_identity = AsyncMock(return_value=False)
+    monkeypatch.setattr(gitlab_auth.models, "get_session", get_session, raising=False)
+    monkeypatch.setattr(gitlab_auth.models, "has_auth_identity", has_identity, raising=False)
+
+    assert asyncio.run(gitlab_auth.gitlab_status()) == {
+        "enabled": True, "can_link": False, "linked": False,
+    }
+    assert asyncio.run(gitlab_auth.gitlab_status("pilot-session")) == {
+        "enabled": True, "can_link": True, "linked": False,
+    }
+    has_identity.return_value = True
+    assert asyncio.run(gitlab_auth.gitlab_status("pilot-session")) == {
+        "enabled": True, "can_link": False, "linked": True,
+    }
+    get_session.return_value = {**_existing_user(), "email": "other@sifox.com"}
+    assert asyncio.run(gitlab_auth.gitlab_status("other-session")) == {
+        "enabled": True, "can_link": False, "linked": False,
+    }
