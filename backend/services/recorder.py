@@ -1179,6 +1179,39 @@ async def _zoom_dismiss_prejoin_prompts(page) -> int:
     return skipped
 
 
+_ZOOM_GUEST_JOIN_SELECTORS = (
+    "#joinBtn", "button:has-text('Войти')", "button:has-text('Join')",
+    "button:has-text('Присоединиться')",
+)
+
+
+async def _zoom_retry_guest_form(page, name_field, attempt: int) -> bool:
+    """Retry a guest form stalled by Zoom's asynchronous pre-join dialogs.
+
+    Never retry after the form disappears: that can mean the guest is already
+    awaiting host admission.  A second, keyboard-based path covers forms whose
+    button click was accepted by Playwright but ignored by the page.
+    """
+    if not await name_field.is_visible(timeout=1_000):
+        return False
+    await _zoom_dismiss_prejoin_prompts(page)
+    if not await name_field.is_visible(timeout=1_000):
+        return False
+    try:
+        if not (await name_field.input_value(timeout=1_000)).strip():
+            await name_field.fill("Protocaller")
+    except Exception:
+        # The form may have been replaced during the asynchronous transition.
+        return False
+    if attempt == 1:
+        return await _zoom_click_visible(page, _ZOOM_GUEST_JOIN_SELECTORS)
+    try:
+        await name_field.press("Enter", timeout=3_000)
+        return True
+    except Exception:
+        return False
+
+
 async def _zoom_join_failure_detail(page, name_field) -> str:
     """Describe the last visible Zoom state without leaking the join URL."""
     try:
@@ -1291,16 +1324,16 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
     await _zoom_dismiss_prejoin_prompts(page)
     await name_field.fill("Protocaller")
     await _zoom_dismiss_prejoin_prompts(page)
-    if not await _zoom_click_visible(page, (
-        "#joinBtn", "button:has-text('Войти')", "button:has-text('Join')",
-        "button:has-text('Присоединиться')",
-    )):
+    if not await _zoom_click_visible(page, _ZOOM_GUEST_JOIN_SELECTORS):
         raise RuntimeError("Zoom: не найдена кнопка входа")
 
     # Give the organizer time to admit the named guest from the waiting room.
     # A Zoom sign-in banner alone is not proof that the host disabled guest
     # access: the same link can expose a guest form in an incognito browser.
     deadline = time.monotonic() + 240
+    form_deadline = time.monotonic() + 45
+    next_form_retry = time.monotonic() + 8
+    form_retries = 0
     probes = 0
     while time.monotonic() < deadline:
         await _zoom_dismiss_prejoin_prompts(page)
@@ -1341,6 +1374,24 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
             ))
             logger.info("Zoom guest admission confirmed")
             return set()
+        try:
+            form_visible = await name_field.is_visible(timeout=1_000)
+        except Exception:
+            form_visible = False
+        if form_visible:
+            now = time.monotonic()
+            if now >= form_deadline:
+                detail = await _zoom_join_failure_detail(page, name_field)
+                raise RuntimeError(f"Zoom: {detail}")
+            if form_retries < 2 and now >= next_form_retry:
+                # An authentication/challenge screen or waiting room must not
+                # receive another guest-form submission.
+                detail = await _zoom_join_failure_detail(page, name_field)
+                if detail == "форма ввода имени осталась открытой после нажатия «Войти»":
+                    form_retries += 1
+                    submitted = await _zoom_retry_guest_form(page, name_field, form_retries)
+                    logger.info("Zoom guest form retry %d submitted=%s", form_retries, submitted)
+                    next_form_retry = now + 10
         await page.wait_for_timeout(2_000)
     detail = await _zoom_join_failure_detail(page, name_field)
     logger.warning("Zoom guest admission not confirmed after 240s: %s", detail)

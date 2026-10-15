@@ -193,6 +193,48 @@ def test_zoom_skips_both_media_prompts_before_join(monkeypatch):
     assert "без микрофона и камеры" in click.await_args_list[0].args[1][0]
 
 
+def test_zoom_retries_stalled_guest_form_after_dismissing_prompt(monkeypatch):
+    from services import recorder
+    dismiss = AsyncMock(return_value=1)
+    click = AsyncMock(return_value=True)
+    monkeypatch.setattr(recorder, "_zoom_dismiss_prejoin_prompts", dismiss)
+    monkeypatch.setattr(recorder, "_zoom_click_visible", click)
+    field = MagicMock()
+    field.is_visible = AsyncMock(return_value=True)
+    field.input_value = AsyncMock(return_value="")
+    field.fill = AsyncMock()
+    assert asyncio.run(recorder._zoom_retry_guest_form(MagicMock(), field, 1)) is True
+    field.fill.assert_awaited_once_with("Protocaller")
+    click.assert_awaited_once()
+    assert click.await_args.args[1] == recorder._ZOOM_GUEST_JOIN_SELECTORS
+
+
+def test_zoom_retry_uses_enter_only_on_still_visible_named_form(monkeypatch):
+    from services import recorder
+    monkeypatch.setattr(recorder, "_zoom_dismiss_prejoin_prompts", AsyncMock(return_value=0))
+    field = MagicMock()
+    field.is_visible = AsyncMock(return_value=True)
+    field.input_value = AsyncMock(return_value="Protocaller")
+    field.fill = AsyncMock()
+    field.press = AsyncMock()
+    assert asyncio.run(recorder._zoom_retry_guest_form(MagicMock(), field, 2)) is True
+    field.fill.assert_not_awaited()
+    field.press.assert_awaited_once_with("Enter", timeout=3_000)
+
+
+def test_zoom_never_resubmits_after_guest_form_disappears(monkeypatch):
+    from services import recorder
+    dismiss = AsyncMock()
+    click = AsyncMock()
+    monkeypatch.setattr(recorder, "_zoom_dismiss_prejoin_prompts", dismiss)
+    monkeypatch.setattr(recorder, "_zoom_click_visible", click)
+    field = MagicMock()
+    field.is_visible = AsyncMock(return_value=False)
+    assert asyncio.run(recorder._zoom_retry_guest_form(MagicMock(), field, 1)) is False
+    dismiss.assert_not_awaited()
+    click.assert_not_awaited()
+
+
 def test_zoom_timeout_reports_open_name_form_not_unproven_waiting_room():
     from services import recorder
     page = MagicMock()
