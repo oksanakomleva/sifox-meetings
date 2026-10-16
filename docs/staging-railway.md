@@ -106,14 +106,14 @@ Production callback в это приложение не добавляйте.
 | `GITLAB_CLIENT_ID` | Application ID этого GitLab OAuth-приложения |
 | `GITLAB_CLIENT_SECRET` | Secret этого же приложения; только в Railway, не в чате и не в Git |
 | `GITLAB_PILOT_EMAIL` | адрес Oksana в staging (`oksana.komleva@sifox.com`), разрешённый в `ADMIN_EMAILS`/`STAGING_ALLOWED_EMAILS` |
-| `GITLAB_PILOT_USERNAME` | точный username из профиля Oksana в `gitlab.sifox.ru`, не отображаемое имя |
+| `GITLAB_PILOT_USERNAME` | username из профиля Oksana; при заданном `GITLAB_PILOT_SUB` для допуска не используется |
 | `GITLAB_PILOT_SUB` | постоянный числовой GitLab User ID Oksana (`220`); нужен для прямого входа с закрытым публичным email |
 | `GITLAB_PILOT_ENABLED` | `true`, только после заполнения всех переменных выше |
 
 После применения переменных откройте страницу входа staging и сразу выберите
 **Войти через GitLab** — Google и ручная привязка не требуются. Приложение
-сверит подтверждённый OIDC `sub` с `GITLAB_PILOT_SUB` и username с
-`GITLAB_PILOT_USERNAME`. Если пользователь с адресом `GITLAB_PILOT_EMAIL`
+сверит подтверждённый OIDC `sub` с `GITLAB_PILOT_SUB`; username при
+закреплённом User ID не сравнивается, поскольку может меняться. Если пользователь с адресом `GITLAB_PILOT_EMAIL`
 уже существует, вход сохранит его встречи и права; иначе создаст только эту
 одну разрешённую учётную запись в пустом staging. Публичный email GitLab
 может оставаться скрытым. Другие GitLab-аккаунты будут отклонены. В production

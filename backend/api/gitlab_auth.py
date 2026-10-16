@@ -143,10 +143,14 @@ async def _finish_login(request: Request, user: dict) -> RedirectResponse:
 
 async def _staging_direct_login(request: Request, userinfo: dict, subject: str) -> RedirectResponse:
     """Admit only the configured GitLab person, with no Google prerequisite."""
-    if userinfo.get("preferred_username") != config.GITLAB_PILOT_USERNAME:
-        return _error("gitlab_pilot_mismatch")
     pinned_sub = config.GITLAB_PILOT_SUB.strip()
-    if pinned_sub and subject != pinned_sub:
+    if pinned_sub:
+        # The verified OIDC subject is stable; usernames can be renamed. Once
+        # an operator pins the exact user ID, do not reject the same person
+        # merely because their displayed username differs.
+        if subject != pinned_sub:
+            return _error("gitlab_pilot_id_mismatch")
+    elif userinfo.get("preferred_username") != config.GITLAB_PILOT_USERNAME:
         return _error("gitlab_pilot_mismatch")
 
     email = config.GITLAB_PILOT_EMAIL.strip().lower()

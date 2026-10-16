@@ -217,6 +217,27 @@ def test_staging_direct_login_enrolls_pinned_gitlab_user_without_google(monkeypa
     assert enroll.await_args.kwargs["email"] == gitlab_auth.config.GITLAB_PILOT_EMAIL
 
 
+def test_staging_pinned_user_id_survives_username_change(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "staging")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_PILOT_SUB", "220")
+    monkeypatch.setattr(gitlab_auth, "_client", lambda: FakeClient({
+        "sub": "220", "preferred_username": "renamed.profile",
+    }))
+    monkeypatch.setattr(gitlab_auth.models, "get_user_by_auth_identity",
+                        AsyncMock(return_value=None), raising=False)
+    enroll = AsyncMock(return_value={"id": 42, "email": gitlab_auth.config.GITLAB_PILOT_EMAIL})
+    monkeypatch.setattr(gitlab_auth.models, "get_or_create_gitlab_pilot_user", enroll,
+                        raising=False)
+    monkeypatch.setattr(gitlab_auth.models, "create_session",
+                        AsyncMock(return_value="new-session"), raising=False)
+
+    result = asyncio.run(gitlab_auth.gitlab_callback(
+        _request(session={"gitlab_pilot": {"purpose": "login"}})
+    ))
+    assert result.headers["location"].endswith("/")
+    enroll.assert_awaited_once()
+
+
 def test_staging_direct_login_rejects_wrong_subject_without_enrollment(monkeypatch):
     monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "staging")
     monkeypatch.setattr(gitlab_auth.config, "GITLAB_PILOT_SUB", "220")
@@ -229,7 +250,7 @@ def test_staging_direct_login_rejects_wrong_subject_without_enrollment(monkeypat
     result = asyncio.run(gitlab_auth.gitlab_callback(
         _request(session={"gitlab_pilot": {"purpose": "login"}})
     ))
-    assert "gitlab_pilot_mismatch" in result.headers["location"]
+    assert "gitlab_pilot_id_mismatch" in result.headers["location"]
     enroll.assert_not_awaited()
 
 

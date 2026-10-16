@@ -84,6 +84,7 @@ export default function Login() {
             {error === 'gitlab_link_conflict' && 'Этот аккаунт GitLab уже связан с другой учётной записью.'}
             {error === 'gitlab_not_linked' && 'Сначала свяжите GitLab с вашей учётной записью Sifox после входа через Google.'}
             {error === 'gitlab_pilot_mismatch' && 'Эта учётная запись GitLab не входит в пилот. Проверьте выбранный аккаунт.'}
+            {error === 'gitlab_pilot_id_mismatch' && 'GitLab вернул другой User ID. Проверьте выбранный аккаунт и значение GITLAB_PILOT_SUB в staging.'}
             {error === 'gitlab_identity_unverified' && 'GitLab не передал подтверждённый email. Для закрытого профиля администратор тестовой среды должен указать ваш GitLab User ID.'}
             {error === 'gitlab_pilot_access_denied' && 'Не удалось подтвердить доступ пилотной учётной записи GitLab. Обратитесь к администратору тестовой среды.'}
           </div>
