@@ -167,16 +167,19 @@ def test_zoom_uses_its_own_join_flow(monkeypatch):
 def test_zoom_guest_flow_preserves_passcode_and_confirms_admission(monkeypatch):
     from services import recorder
     navigate = AsyncMock()
-    click = AsyncMock(side_effect=[False, False, True, True])
+    click = AsyncMock(side_effect=[False, True, True, False])
     monkeypatch.setattr(recorder, "_navigate_to_meeting", navigate)
     monkeypatch.setattr(recorder, "_zoom_click_visible", click)
     monkeypatch.setattr(recorder, "_zoom_dismiss_prejoin_prompts", AsyncMock(return_value=0))
     page = MagicMock()
+    page.url = ZOOM_URL
+    page.frames = []
     page.locator.return_value.first.is_visible = AsyncMock(return_value=True)
     page.locator.return_value.first.fill = AsyncMock()
     assert asyncio.run(recorder._join_zoom_meeting(page, ZOOM_URL)) == set()
     navigate.assert_awaited_once_with(page, ZOOM_URL)
     page.locator.return_value.first.fill.assert_awaited_once_with("Protocaller")
+    assert click.await_args_list[1].args[1] == recorder._ZOOM_BROWSER_JOIN_SELECTORS
     assert "button.preview-join-button" in click.await_args_list[2].args[1]
 
 
@@ -192,7 +195,7 @@ def test_zoom_finds_guest_form_inside_webclient_frame():
 def test_zoom_submits_guest_form_inside_webclient_frame(monkeypatch):
     from services import recorder
     monkeypatch.setattr(recorder, "_navigate_to_meeting", AsyncMock())
-    click = AsyncMock(side_effect=[False, True, True, True])
+    click = AsyncMock(side_effect=[False, True, False])
     monkeypatch.setattr(recorder, "_zoom_click_visible", click)
     monkeypatch.setattr(recorder, "_zoom_dismiss_prejoin_prompts", AsyncMock(return_value=0))
     page = MagicMock()
@@ -204,8 +207,50 @@ def test_zoom_submits_guest_form_inside_webclient_frame(monkeypatch):
     frame.locator.return_value.first.fill = AsyncMock()
     assert asyncio.run(recorder._join_zoom_meeting(page, ZOOM_URL)) == set()
     frame.locator.return_value.first.fill.assert_awaited_once_with("Protocaller")
-    assert click.await_args_list[2].args[0] is frame
-    assert "button.preview-join-button" in click.await_args_list[2].args[1]
+    assert click.await_args_list[1].args[0] is frame
+    assert "button.preview-join-button" in click.await_args_list[1].args[1]
+
+
+def test_zoom_retries_browser_entry_when_launcher_button_renders_late(monkeypatch):
+    from services import recorder
+    monkeypatch.setattr(recorder, "_navigate_to_meeting", AsyncMock())
+    monkeypatch.setattr(recorder, "_zoom_dismiss_prejoin_prompts", AsyncMock(return_value=0))
+    browser_attempts = 0
+
+    async def click(_surface, selectors):
+        nonlocal browser_attempts
+        if selectors == recorder._ZOOM_BROWSER_JOIN_SELECTORS:
+            browser_attempts += 1
+            return browser_attempts >= 2
+        return selectors == recorder._ZOOM_GUEST_JOIN_SELECTORS
+
+    monkeypatch.setattr(recorder, "_zoom_click_visible", click)
+    page = MagicMock()
+    page.url = ZOOM_URL
+    page.frames = []
+    page.wait_for_timeout = AsyncMock()
+    name_field = page.locator.return_value.first
+    name_field.is_visible = AsyncMock(side_effect=lambda **_kwargs: browser_attempts >= 2)
+    name_field.fill = AsyncMock()
+
+    assert asyncio.run(recorder._join_zoom_meeting(page, ZOOM_URL)) == set()
+    assert browser_attempts == 2
+    name_field.fill.assert_awaited_once_with("Protocaller")
+
+
+def test_zoom_missing_form_reports_webclient_without_leaking_passcode():
+    from services import recorder
+    page = MagicMock()
+    page.url = ZOOM_URL
+    frame = MagicMock()
+    frame.url = "https://app.zoom.us/wc/12345678901/join?pwd=secret"
+    page.frames = [frame]
+    frame.locator.return_value.inner_text = AsyncMock(return_value="Continue without audio and video")
+    page.locator.return_value.inner_text = AsyncMock(return_value="Zoom")
+
+    detail = asyncio.run(recorder._zoom_missing_guest_form_detail(page))
+    assert "веб-клиент Zoom открылся" in detail
+    assert "pwd" not in detail and "secret" not in detail
 
 
 def test_zoom_guest_submit_cannot_match_account_signin_button():

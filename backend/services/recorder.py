@@ -1185,6 +1185,17 @@ _ZOOM_GUEST_JOIN_SELECTORS = (
     "button:text-is('Присоединиться')",
 )
 
+_ZOOM_BROWSER_JOIN_SELECTORS = (
+    "button:text-is('Присоединиться в браузере')",
+    "button:text-is('Присоединиться из браузера')",
+    "button:text-is('Join from browser')",
+    "button:text-is('Join from your browser')",
+    "button:text-is('Join from Your Browser')",
+    "a:text-is('Присоединиться из браузера')",
+    "a:text-is('Join from your browser')",
+    "a:text-is('Join from Your Browser')",
+)
+
 
 def _is_zoom_host(hostname: str | None) -> bool:
     return hostname == "zoom.us" or bool(hostname and hostname.endswith(".zoom.us"))
@@ -1210,6 +1221,42 @@ def _zoom_on_signin_page(page) -> bool:
         return _is_zoom_host(parts.hostname) and parts.path.startswith("/signin")
     except Exception:
         return False
+
+
+def _zoom_route_kind(page) -> str:
+    """Log only a route category, never Zoom's passcode or launch tokens."""
+    try:
+        path = urlsplit(page.url).path
+    except Exception:
+        return "unknown"
+    if path.startswith("/signin"):
+        return "signin"
+    if "/wc/" in path:
+        return "webclient"
+    if path.startswith("/j/"):
+        return "launcher"
+    return "other"
+
+
+async def _zoom_missing_guest_form_detail(page) -> str:
+    """Distinguish a stalled launcher from a web-client or auth challenge."""
+    surfaces = _zoom_join_surfaces(page)
+    for surface in surfaces:
+        if _zoom_on_signin_page(surface):
+            return "Zoom перенаправил гостя на страницу входа в аккаунт"
+        try:
+            body = (await surface.locator("body").inner_text(timeout=2_000)).lower()
+        except Exception:
+            continue
+        if _zoom_requires_authentication(body):
+            return "Zoom показал требование авторизации вместо гостевой формы"
+        if any(marker in body for marker in (
+            "verify you are human", "complete the captcha", "подтвердите, что вы человек",
+        )):
+            return "Zoom запросил проверку, что участник не робот, до появления гостевой формы"
+    if any(_zoom_route_kind(surface) == "webclient" for surface in surfaces):
+        return "веб-клиент Zoom открылся, но поле имени гостя не появилось"
+    return "Zoom не открыл гостевой веб-клиент из страницы приглашения"
 
 
 async def _zoom_retry_guest_form(page, name_field, attempt: int) -> bool:
@@ -1319,25 +1366,33 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
         "#onetrust-accept-btn-handler", "button:has-text('Accept Cookies')",
         "button:has-text('Принять')",
     ))
-    await _zoom_click_visible(page, (
-        "button:text-is('Присоединиться в браузере')",
-        "button:text-is('Присоединиться из браузера')",
-        "button:text-is('Join from browser')",
-        "button:text-is('Join from your browser')",
-        "button:text-is('Join from Your Browser')",
-        "a:text-is('Присоединиться из браузера')",
-        "a:text-is('Join from your browser')",
-        "a:text-is('Join from Your Browser')",
-    ))
     name_selectors = (
         "#input-for-name", "input[placeholder*='name' i]",
         "input[placeholder*='имя' i]",
     )
-    deadline = time.monotonic() + 45
+    # Leave room for navigation and the 240-second admission wait within the
+    # recorder's overall 360-second join timeout.
+    deadline = time.monotonic() + 65
     name_field = None
     join_surface = None
+    browser_clicks = 0
+    last_browser_click = 0.0
+    last_entry_log = 0.0
     while time.monotonic() < deadline:
-        for surface in _zoom_join_surfaces(page):
+        now = time.monotonic()
+        surfaces = _zoom_join_surfaces(page)
+        # The launcher often renders after domcontentloaded. Keep looking for
+        # the browser button instead of clicking once before it exists. Once
+        # the web client iframe exists, do not click the launcher again.
+        if (browser_clicks < 3 and _zoom_route_kind(page) == "launcher"
+                and not any(_zoom_route_kind(surface) == "webclient" for surface in surfaces)
+                and now - last_browser_click >= 5):
+            if await _zoom_click_visible(page, _ZOOM_BROWSER_JOIN_SELECTORS):
+                browser_clicks += 1
+                last_browser_click = time.monotonic()
+                logger.info("Zoom browser entry clicked (attempt %d)", browser_clicks)
+                surfaces = _zoom_join_surfaces(page)
+        for surface in surfaces:
             await _zoom_dismiss_prejoin_prompts(surface)
             for selector in name_selectors:
                 try:
@@ -1352,9 +1407,22 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
                 break
         if name_field:
             break
+        if now - last_entry_log >= 10:
+            logger.info(
+                "Zoom prejoin waiting: route=%s webclient_frames=%d browser_clicks=%d",
+                _zoom_route_kind(page),
+                sum(_zoom_route_kind(surface) == "webclient" for surface in surfaces),
+                browser_clicks,
+            )
+            last_entry_log = now
         await page.wait_for_timeout(1_000)
     if name_field is None:
-        raise RuntimeError("Zoom: экран гостевого входа не появился; проверьте ссылку и разрешение на вход из браузера")
+        detail = await _zoom_missing_guest_form_detail(page)
+        logger.warning(
+            "Zoom guest form missing: route=%s browser_clicks=%d detail=%s",
+            _zoom_route_kind(page), browser_clicks, detail,
+        )
+        raise RuntimeError(f"Zoom: {detail}")
     await _zoom_dismiss_prejoin_prompts(join_surface)
     await name_field.fill("Protocaller")
     await _zoom_dismiss_prejoin_prompts(join_surface)

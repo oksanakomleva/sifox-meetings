@@ -37,8 +37,8 @@ Sync для переноса настроек из staging в production: пер
 | `ADMIN_EMAILS` | только тестирующие администраторы, сначала Oksana |
 | `ALLOWED_DOMAIN` | `sifox.com` (см. ограничение доступа ниже) |
 | `STAGING_ALLOWED_EMAILS` | оставить пустым: доступ получат только адреса из `ADMIN_EMAILS`; для других тестировщиков задать явный список |
-| `TEST_API_KEY` | отдельный staging-ключ, если нужны автоматические проверки |
-| `GITLAB_PILOT_ENABLED` | `false` до отдельной настройки OAuth |
+| `TEST_API_KEY` | отдельный staging-ключ для чтения состояния встреч; значение хранится локально в `.env.test.staging` |
+| `GITLAB_PILOT_ENABLED` | `false` до настройки отдельного OAuth-приложения, затем `true` только для Oksana |
 | `LIVE_ASSISTANT_ENABLED` | `false` на первом этапе; включать только для целевых тестов |
 | `ALERTS_ENABLED`, `MM_RECORDER_COMMANDS_ENABLED`, `MEGAFON_ENABLED` | `false` |
 
@@ -88,3 +88,42 @@ Sync для переноса настроек из staging в production: пер
 Развёртывание staging не требует свободного окна production и не должно
 перезапускать его приложение или менять его базу. За отдельные приложение,
 PostgreSQL и том Railway будет начислять отдельное потребление ресурсов.
+
+## Включить GitLab-пилот только для Oksana
+
+Можно использовать OAuth-приложение, созданное в личной учётной записи GitLab:
+администратор не обязателен, если GitLab разрешил сохранить такое приложение.
+В нём должен быть **Confidential** client, redirect URI
+`https://scintillating-rebirth-staging.up.railway.app/api/auth/gitlab/callback`
+и только scopes `openid`, `profile`, `email`. Scope `api` не нужен.
+Production callback в это приложение не добавляйте.
+
+В Railway откройте **staging → сервис приложения → Variables** и задайте:
+
+| Переменная | Значение |
+| --- | --- |
+| `GITLAB_ISSUER` | `https://gitlab.sifox.ru` |
+| `GITLAB_CLIENT_ID` | Application ID этого GitLab OAuth-приложения |
+| `GITLAB_CLIENT_SECRET` | Secret этого же приложения; только в Railway, не в чате и не в Git |
+| `GITLAB_PILOT_EMAIL` | Google-адрес Oksana, которым она входит в staging и который разрешён в `ADMIN_EMAILS`/`STAGING_ALLOWED_EMAILS` |
+| `GITLAB_PILOT_USERNAME` | точный username из профиля Oksana в `gitlab.sifox.ru`, не отображаемое имя |
+| `GITLAB_PILOT_ENABLED` | `true`, только после заполнения всех переменных выше |
+
+Сначала войдите в staging через Google, на главной странице свяжите аккаунт
+GitLab, затем выйдите и проверьте кнопку входа через GitLab. Уже существующая
+учётная запись приложения будет использоваться повторно: GitLab-пилот не
+создаёт нового пользователя и не открывает вход другим сотрудникам. Если
+username или Google-адрес неверен, связывание будет отклонено. В staging
+проверка конфигурации не даст запустить пилот без Client ID/Secret и с
+неразрешённым тестировщиком.
+
+## Дать Codex доступ к состоянию staging
+
+В корне локального проекта создан игнорируемый Git-файл `.env.test.staging` с
+отдельным случайным `TEST_API_KEY`. Откройте его **локально**, скопируйте
+только значение ключа и добавьте в **staging → сервис приложения → Variables →
+TEST_API_KEY**. В production ничего не меняйте. Не присылайте ключ в чат и не
+включайте этот файл в коммит. После применения переменной Codex сможет читать
+`/health` и все страницы `/api/admin/meetings?limit=500&offset=...` в staging,
+не используя production-ключ. Этот API-ключ технически допускает и записи:
+Codex использует его только для чтения, но его следует хранить как секрет.

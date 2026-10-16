@@ -10,7 +10,6 @@ _EXTERNAL_CREDENTIALS = (
 )
 _EXTERNAL_FEATURES = (
     "ALERTS_ENABLED", "MM_RECORDER_COMMANDS_ENABLED", "MEGAFON_ENABLED",
-    "GITLAB_PILOT_ENABLED",
 )
 
 
@@ -47,3 +46,16 @@ def validate_runtime(settings, *, railway_environment: str | None = None,
                if getattr(settings, name, None)]
     if enabled:
         raise RuntimeError(f"Staging external integrations must be disabled: {', '.join(enabled)}")
+    if settings.GITLAB_PILOT_ENABLED:
+        allowed = {
+            address.strip().lower()
+            for name in ("ADMIN_EMAILS", "STAGING_ALLOWED_EMAILS")
+            for address in (getattr(settings, name, "") or "").split(",")
+            if address.strip()
+        }
+        if not settings.GITLAB_CLIENT_ID or not settings.GITLAB_CLIENT_SECRET:
+            raise RuntimeError("Staging GitLab pilot needs its own OAuth client credentials")
+        if settings.GITLAB_ISSUER.rstrip("/") != "https://gitlab.sifox.ru":
+            raise RuntimeError("Staging GitLab pilot must use the Sifox GitLab issuer")
+        if not settings.GITLAB_PILOT_USERNAME or settings.GITLAB_PILOT_EMAIL.lower() not in allowed:
+            raise RuntimeError("Staging GitLab pilot must be limited to an allowed tester")

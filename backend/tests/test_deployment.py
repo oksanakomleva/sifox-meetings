@@ -22,6 +22,13 @@ def _settings(**overrides):
         "MM_RECORDER_COMMANDS_ENABLED": False,
         "MEGAFON_ENABLED": False,
         "GITLAB_PILOT_ENABLED": False,
+        "GITLAB_CLIENT_ID": "",
+        "GITLAB_CLIENT_SECRET": "",
+        "GITLAB_ISSUER": "https://gitlab.sifox.ru",
+        "GITLAB_PILOT_EMAIL": "oksana.komleva@sifox.com",
+        "GITLAB_PILOT_USERNAME": "oksana.komleva",
+        "ADMIN_EMAILS": "oksana.komleva@sifox.com",
+        "STAGING_ALLOWED_EMAILS": "",
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -56,6 +63,31 @@ def test_staging_flag_cannot_run_in_production_environment():
 
 def test_production_configuration_keeps_existing_behavior():
     validate_runtime(_settings(APP_ENV="production"), railway_environment="production")
+
+
+def test_staging_allows_gitlab_pilot_for_named_tester_with_credentials():
+    validate_runtime(_settings(
+        GITLAB_PILOT_ENABLED=True,
+        GITLAB_CLIENT_ID="staging-client",
+        GITLAB_CLIENT_SECRET="staging-secret",
+    ), railway_environment="staging", volume_mount="/audio")
+
+
+@pytest.mark.parametrize("changes, reason", [
+    ({"GITLAB_CLIENT_SECRET": ""}, "OAuth client credentials"),
+    ({"GITLAB_ISSUER": "https://other.example"}, "Sifox GitLab issuer"),
+    ({"GITLAB_PILOT_EMAIL": "other@sifox.com"}, "allowed tester"),
+    ({"GITLAB_PILOT_USERNAME": ""}, "allowed tester"),
+])
+def test_staging_gitlab_pilot_rejects_broad_or_incomplete_configuration(changes, reason):
+    settings = _settings(**{
+        "GITLAB_PILOT_ENABLED": True,
+        "GITLAB_CLIENT_ID": "staging-client",
+        "GITLAB_CLIENT_SECRET": "staging-secret",
+        **changes,
+    })
+    with pytest.raises(RuntimeError, match=reason):
+        validate_runtime(settings, railway_environment="staging", volume_mount="/audio")
 
 
 def test_staging_google_login_rejects_other_domain_user(monkeypatch):
