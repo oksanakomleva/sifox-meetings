@@ -14,6 +14,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
+def _require_external_connections_enabled() -> None:
+    if config.APP_ENV == "staging":
+        raise HTTPException(403, "В тестовой среде внешние подключения отключены")
+
+
 @router.get("/login")
 async def login():
     """Redirect to Google OAuth."""
@@ -79,6 +84,8 @@ async def callback(
 
 async def _process_callback(result: dict, invite_token: str | None):
     """Inner callback logic, separated for clean error handling."""
+    if result["purpose"] != "login":
+        _require_external_connections_enabled()
     user_info = result["user_info"]
     email: str = user_info.get("email", "").lower()
     domain = email.split("@")[-1] if "@" in email else ""
@@ -98,6 +105,10 @@ async def _process_callback(result: dict, invite_token: str | None):
                 invitation = None
 
         if not allowed:
+            return RedirectResponse(
+                f"{config.BASE_URL}/login?error=domain_not_allowed"
+            )
+        if config.APP_ENV == "staging" and email not in config.staging_allowed_email_list:
             return RedirectResponse(
                 f"{config.BASE_URL}/login?error=domain_not_allowed"
             )
@@ -274,6 +285,7 @@ async def connect_calendar(
     session_token: Annotated[str | None, Cookie(alias="session")] = None,
 ):
     """Start Google Calendar OAuth for current user (read-only)."""
+    _require_external_connections_enabled()
     if not session_token:
         raise HTTPException(401, "Not authenticated")
     session = await models.get_session(session_token)
@@ -295,6 +307,7 @@ async def connect_gmail_send(
 ):
     """Start personal OAuth consent for gmail.send (to e-mail meeting protocols).
     `next` is the relative path to return to after consent (e.g. /meetings/{id})."""
+    _require_external_connections_enabled()
     if not session_token:
         raise HTTPException(401, "Not authenticated")
     session = await models.get_session(session_token)
@@ -323,6 +336,7 @@ async def connect_calendar_write(
     session_token: Annotated[str | None, Cookie(alias="session")] = None,
 ):
     """Start Google Calendar OAuth with write scope (admin only, for E2E tests)."""
+    _require_external_connections_enabled()
     if not session_token:
         raise HTTPException(401, "Not authenticated")
     session = await models.get_session(session_token)

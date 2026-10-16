@@ -1,4 +1,5 @@
 import os
+from typing import Literal
 from pydantic_settings import BaseSettings
 
 
@@ -6,8 +7,12 @@ class Config(BaseSettings):
     # ── App ───────────────────────────────────────────────────────────────
     SECRET_KEY: str                          # random 32-byte hex
     BASE_URL: str = "http://localhost:8000"
+    APP_ENV: Literal["production", "staging"] = "production"
     ALLOWED_DOMAIN: str = "sifox.com"
     ADMIN_EMAILS: str = "oksana.komleva@sifox.com"
+    # In staging, domain membership alone does not grant access. Empty means
+    # only ADMIN_EMAILS may sign in; add more testers explicitly if needed.
+    STAGING_ALLOWED_EMAILS: str = ""
 
     # ── Database ──────────────────────────────────────────────────────────
     DATABASE_URL: str                        # postgresql://...
@@ -166,6 +171,11 @@ class Config(BaseSettings):
     @property
     def admin_email_list(self) -> list[str]:
         return [e.strip().lower() for e in self.ADMIN_EMAILS.split(",")]
+
+    @property
+    def staging_allowed_email_list(self) -> list[str]:
+        addresses = self.STAGING_ALLOWED_EMAILS or self.ADMIN_EMAILS
+        return [e.strip().lower() for e in addresses.split(",") if e.strip()]
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

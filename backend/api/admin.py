@@ -92,6 +92,9 @@ async def trigger_sync(admin: AdminUser):
     Refreshes the LIST of available calendars from Google right now (so newly
     shared/added calendars show up), then kicks off event sync in the background.
     """
+    from config import config
+    if config.APP_ENV == "staging":
+        raise HTTPException(403, "В тестовой среде синхронизация календарей отключена")
     from services.calendar_sync import sync_user_calendars, sync_all_users
     import asyncio
 

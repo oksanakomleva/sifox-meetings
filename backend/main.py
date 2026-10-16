@@ -18,6 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from auth.deps import get_admin_user
 from config import config
 from database.connection import init_db, close_db
+from deployment import validate_runtime
 from utils.http import RequestBodyLimitMiddleware
 from utils.paths import confined_file
 
@@ -31,6 +32,8 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────
+    # Validate before opening the database or starting any external sync.
+    validate_runtime(config)
     await init_db(config.DATABASE_URL)
 
     # Ensure the network-backed audio dir exists without blocking the event loop.
@@ -53,15 +56,22 @@ async def lifespan(app: FastAPI):
     from services.alerts import run_alert_loop
     from services.mattermost_recorder import run_mm_recorder_loop
 
-    sync_task = asyncio.create_task(run_sync_loop(), name="calendar-sync")
+    # Staging keeps the real recorder and processing pipeline, but cannot poll
+    # employee calendars/mail/chats or send production alerts and commands.
     scheduler_task = asyncio.create_task(run_recording_scheduler(), name="rec-scheduler")
-    mm_task = asyncio.create_task(run_mm_sync_loop(), name="mm-sync")
-    gmail_task = asyncio.create_task(run_gmail_sync_loop(), name="gmail-sync")
-    alert_task = asyncio.create_task(run_alert_loop(), name="incident-alerts")
-    mm_recorder_task = asyncio.create_task(run_mm_recorder_loop(), name="mm-recorder")
+    external_tasks = []
+    if config.APP_ENV != "staging":
+        external_tasks = [
+            asyncio.create_task(run_sync_loop(), name="calendar-sync"),
+            asyncio.create_task(run_mm_sync_loop(), name="mm-sync"),
+            asyncio.create_task(run_gmail_sync_loop(), name="gmail-sync"),
+            asyncio.create_task(run_alert_loop(), name="incident-alerts"),
+            asyncio.create_task(run_mm_recorder_loop(), name="mm-recorder"),
+        ]
+    all_tasks = [scheduler_task, *external_tasks]
     app.state.background_tasks = {
-        task.get_name(): task
-        for task in (sync_task, scheduler_task, mm_task, gmail_task)
+        task.get_name(): task for task in all_tasks
+        if task.get_name() in {"rec-scheduler", "calendar-sync", "mm-sync", "gmail-sync"}
     }
 
     # Force a clean restart if the event loop ever wedges (instead of hanging
@@ -75,12 +85,8 @@ async def lifespan(app: FastAPI):
     # ── Shutdown ─────────────────────────────────────────────────────────
     # 1. Tell the scheduler to stop launching new recordings
     request_shutdown()
-    sync_task.cancel()
-    scheduler_task.cancel()
-    mm_task.cancel()
-    gmail_task.cancel()
-    alert_task.cancel()
-    mm_recorder_task.cancel()
+    for task in all_tasks:
+        task.cancel()
 
     # 2. Wait for any in-progress recordings to finish gracefully.
     #    railway.toml stopSec must be >= this timeout + a small buffer.
@@ -203,6 +209,7 @@ async def health():
             or os.getenv("GIT_COMMIT_SHA")
             or "unknown"
         )[:8],
+        "environment": config.APP_ENV,
     }
 
 
