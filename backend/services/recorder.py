@@ -12,7 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from config import config
 from database import models
@@ -1180,9 +1180,36 @@ async def _zoom_dismiss_prejoin_prompts(page) -> int:
 
 
 _ZOOM_GUEST_JOIN_SELECTORS = (
-    "#joinBtn", "button:has-text('Войти')", "button:has-text('Join')",
-    "button:has-text('Присоединиться')",
+    "button.preview-join-button", "#joinBtn",
+    "button:text-is('Войти')", "button:text-is('Join')",
+    "button:text-is('Присоединиться')",
 )
+
+
+def _is_zoom_host(hostname: str | None) -> bool:
+    return hostname == "zoom.us" or bool(hostname and hostname.endswith(".zoom.us"))
+
+
+def _zoom_join_surfaces(page) -> list:
+    """Zoom may mount its guest UI in a webclient iframe or at top level."""
+    surfaces = []
+    try:
+        for frame in page.frames:
+            parts = urlsplit(frame.url)
+            if _is_zoom_host(parts.hostname) and "/wc/" in parts.path:
+                surfaces.append(frame)
+    except Exception:
+        pass
+    surfaces.append(page)
+    return surfaces
+
+
+def _zoom_on_signin_page(page) -> bool:
+    try:
+        parts = urlsplit(page.url)
+        return _is_zoom_host(parts.hostname) and parts.path.startswith("/signin")
+    except Exception:
+        return False
 
 
 async def _zoom_retry_guest_form(page, name_field, attempt: int) -> bool:
@@ -1285,46 +1312,53 @@ async def _zoom_participant_count(page) -> int | None:
 
 async def _join_zoom_meeting(page, url: str) -> set[str]:
     """Join Zoom's browser client as a guest; never claim recording in its lobby."""
-    parts = urlsplit(url)
-    web_url = urlunsplit((parts.scheme, parts.netloc,
-                         parts.path.replace("/j/", "/wc/join/", 1),
-                         parts.query, ""))
-    await _navigate_to_meeting(page, web_url)
+    # Follow Zoom's documented guest route from the invitation.  The launch
+    # page supplies current web-client tokens and may wrap the form in an iframe.
+    await _navigate_to_meeting(page, url)
     await _zoom_click_visible(page, (
         "#onetrust-accept-btn-handler", "button:has-text('Accept Cookies')",
         "button:has-text('Принять')",
     ))
     await _zoom_click_visible(page, (
-        "a:has-text('Join from your browser')",
-        "a:has-text('Join from Your Browser')",
-        "a:has-text('Присоединиться из браузера')",
+        "button:text-is('Присоединиться в браузере')",
+        "button:text-is('Присоединиться из браузера')",
+        "button:text-is('Join from browser')",
+        "button:text-is('Join from your browser')",
+        "button:text-is('Join from Your Browser')",
+        "a:text-is('Присоединиться из браузера')",
+        "a:text-is('Join from your browser')",
+        "a:text-is('Join from Your Browser')",
     ))
-    await _zoom_dismiss_prejoin_prompts(page)
     name_selectors = (
         "#input-for-name", "input[placeholder*='name' i]",
         "input[placeholder*='имя' i]",
     )
     deadline = time.monotonic() + 45
     name_field = None
+    join_surface = None
     while time.monotonic() < deadline:
-        await _zoom_dismiss_prejoin_prompts(page)
-        for selector in name_selectors:
-            try:
-                field = page.locator(selector).first
-                if await field.is_visible(timeout=1_000):
-                    name_field = field
-                    break
-            except Exception:
-                continue
+        for surface in _zoom_join_surfaces(page):
+            await _zoom_dismiss_prejoin_prompts(surface)
+            for selector in name_selectors:
+                try:
+                    field = surface.locator(selector).first
+                    if await field.is_visible(timeout=1_000):
+                        name_field = field
+                        join_surface = surface
+                        break
+                except Exception:
+                    continue
+            if name_field:
+                break
         if name_field:
             break
         await page.wait_for_timeout(1_000)
     if name_field is None:
         raise RuntimeError("Zoom: экран гостевого входа не появился; проверьте ссылку и разрешение на вход из браузера")
-    await _zoom_dismiss_prejoin_prompts(page)
+    await _zoom_dismiss_prejoin_prompts(join_surface)
     await name_field.fill("Protocaller")
-    await _zoom_dismiss_prejoin_prompts(page)
-    if not await _zoom_click_visible(page, _ZOOM_GUEST_JOIN_SELECTORS):
+    await _zoom_dismiss_prejoin_prompts(join_surface)
+    if not await _zoom_click_visible(join_surface, _ZOOM_GUEST_JOIN_SELECTORS):
         raise RuntimeError("Zoom: не найдена кнопка входа")
 
     # Give the organizer time to admit the named guest from the waiting room.
@@ -1336,11 +1370,14 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
     form_retries = 0
     probes = 0
     while time.monotonic() < deadline:
-        await _zoom_dismiss_prejoin_prompts(page)
+        for surface in _zoom_join_surfaces(page):
+            await _zoom_dismiss_prejoin_prompts(surface)
+        if _zoom_on_signin_page(page) or _zoom_on_signin_page(join_surface):
+            raise RuntimeError("Zoom: после гостевой формы браузер перенаправлен на страницу входа в аккаунт")
         probes += 1
         if probes == 1 or probes % 10 == 0:
             try:
-                body = (await page.locator("body").inner_text(timeout=2_000)).lower()
+                body = (await join_surface.locator("body").inner_text(timeout=2_000)).lower()
                 join_form_visible = await name_field.is_visible(timeout=1_000)
                 logger.info(
                     "Zoom guest state: name_form=%s waiting_room=%s auth_prompt=%s captcha=%s path=%s",
@@ -1352,21 +1389,25 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
                     any(marker in body for marker in (
                         "verify you are human", "complete the captcha", "подтвердите, что вы человек",
                     )),
-                    urlsplit(page.url).path,
+                    urlsplit(join_surface.url).path,
                 )
             except Exception as exc:
                 logger.info("Zoom guest state unavailable: %s", type(exc).__name__)
         joined = False
-        for selector in ("button[aria-label*='leave' i]", "button[aria-label*='покинуть' i]",
-                         "button:has-text('Leave')", "button:has-text('Выйти')"):
-            try:
-                if await page.locator(selector).first.is_visible(timeout=1_000):
-                    joined = True
-                    break
-            except Exception:
-                continue
+        for surface in _zoom_join_surfaces(page):
+            for selector in ("button[aria-label*='leave' i]", "button[aria-label*='покинуть' i]",
+                             "button:has-text('Leave')", "button:has-text('Выйти')"):
+                try:
+                    if await surface.locator(selector).first.is_visible(timeout=1_000):
+                        joined = True
+                        join_surface = surface
+                        break
+                except Exception:
+                    continue
+            if joined:
+                break
         if joined:
-            await _zoom_click_visible(page, (
+            await _zoom_click_visible(join_surface, (
                 "button:has-text('Join Audio by Computer')",
                 "button:has-text('Join with Computer Audio')",
                 "button:has-text('Join Audio')",
@@ -1381,19 +1422,19 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
         if form_visible:
             now = time.monotonic()
             if now >= form_deadline:
-                detail = await _zoom_join_failure_detail(page, name_field)
+                detail = await _zoom_join_failure_detail(join_surface, name_field)
                 raise RuntimeError(f"Zoom: {detail}")
             if form_retries < 2 and now >= next_form_retry:
                 # An authentication/challenge screen or waiting room must not
                 # receive another guest-form submission.
-                detail = await _zoom_join_failure_detail(page, name_field)
+                detail = await _zoom_join_failure_detail(join_surface, name_field)
                 if detail == "форма ввода имени осталась открытой после нажатия «Войти»":
                     form_retries += 1
-                    submitted = await _zoom_retry_guest_form(page, name_field, form_retries)
+                    submitted = await _zoom_retry_guest_form(join_surface, name_field, form_retries)
                     logger.info("Zoom guest form retry %d submitted=%s", form_retries, submitted)
                     next_form_retry = now + 10
         await page.wait_for_timeout(2_000)
-    detail = await _zoom_join_failure_detail(page, name_field)
+    detail = await _zoom_join_failure_detail(join_surface, name_field)
     logger.warning("Zoom guest admission not confirmed after 240s: %s", detail)
     raise RuntimeError(f"Zoom: {detail}")
 

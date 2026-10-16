@@ -175,11 +175,56 @@ def test_zoom_guest_flow_preserves_passcode_and_confirms_admission(monkeypatch):
     page.locator.return_value.first.is_visible = AsyncMock(return_value=True)
     page.locator.return_value.first.fill = AsyncMock()
     assert asyncio.run(recorder._join_zoom_meeting(page, ZOOM_URL)) == set()
-    navigate.assert_awaited_once_with(
-        page, "https://us06web.zoom.us/wc/join/12345678901?pwd=abc123"
-    )
+    navigate.assert_awaited_once_with(page, ZOOM_URL)
     page.locator.return_value.first.fill.assert_awaited_once_with("Protocaller")
-    assert "button:has-text('Войти')" in click.await_args_list[2].args[1]
+    assert "button.preview-join-button" in click.await_args_list[2].args[1]
+
+
+def test_zoom_finds_guest_form_inside_webclient_frame():
+    from services import recorder
+    page = MagicMock()
+    frame = MagicMock()
+    frame.url = "https://app.zoom.us/wc/12345678901/join"
+    page.frames = [frame]
+    assert recorder._zoom_join_surfaces(page) == [frame, page]
+
+
+def test_zoom_submits_guest_form_inside_webclient_frame(monkeypatch):
+    from services import recorder
+    monkeypatch.setattr(recorder, "_navigate_to_meeting", AsyncMock())
+    click = AsyncMock(side_effect=[False, True, True, True])
+    monkeypatch.setattr(recorder, "_zoom_click_visible", click)
+    monkeypatch.setattr(recorder, "_zoom_dismiss_prejoin_prompts", AsyncMock(return_value=0))
+    page = MagicMock()
+    page.url = ZOOM_URL
+    frame = MagicMock()
+    frame.url = "https://app.zoom.us/wc/12345678901/join"
+    page.frames = [frame]
+    frame.locator.return_value.first.is_visible = AsyncMock(return_value=True)
+    frame.locator.return_value.first.fill = AsyncMock()
+    assert asyncio.run(recorder._join_zoom_meeting(page, ZOOM_URL)) == set()
+    frame.locator.return_value.first.fill.assert_awaited_once_with("Protocaller")
+    assert click.await_args_list[2].args[0] is frame
+    assert "button.preview-join-button" in click.await_args_list[2].args[1]
+
+
+def test_zoom_guest_submit_cannot_match_account_signin_button():
+    from services import recorder
+    selectors = recorder._ZOOM_GUEST_JOIN_SELECTORS
+    assert "button.preview-join-button" in selectors
+    assert "button:text-is('Войти')" in selectors
+    assert not any(":has-text('Войти')" in selector for selector in selectors)
+
+
+def test_zoom_detects_account_signin_redirect_without_query():
+    from services import recorder
+    page = MagicMock()
+    page.url = "https://app.zoom.us/signin?pwd=secret"
+    assert recorder._zoom_on_signin_page(page)
+    page.url = "https://app.zoom.us/wc/12345678901/join?pwd=secret"
+    assert not recorder._zoom_on_signin_page(page)
+    page.url = "https://evilzoom.us/signin"
+    assert not recorder._zoom_on_signin_page(page)
 
 
 def test_zoom_skips_both_media_prompts_before_join(monkeypatch):
