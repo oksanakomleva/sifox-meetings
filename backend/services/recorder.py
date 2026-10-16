@@ -12,7 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from config import config
 from database import models
@@ -1194,11 +1194,32 @@ _ZOOM_BROWSER_JOIN_SELECTORS = (
     "a:text-is('Присоединиться из браузера')",
     "a:text-is('Join from your browser')",
     "a:text-is('Join from Your Browser')",
+    "a[href*='/wc/']",
+    "a:has-text('из браузера')", "a:has-text('в браузере')",
+    "button:has-text('из браузера')", "button:has-text('в браузере')",
+    "a:has-text('from browser')", "a:has-text('from your browser')",
+    "button:has-text('from browser')", "button:has-text('from your browser')",
 )
 
 
 def _is_zoom_host(hostname: str | None) -> bool:
     return hostname == "zoom.us" or bool(hostname and hostname.endswith(".zoom.us"))
+
+
+def _zoom_direct_webclient_url(invitation_url: str) -> str | None:
+    """Preserve the invitation passcode in Zoom's guest-web path.
+
+    Zoom's launcher can fail to expose its browser button in automation even
+    when the guest web page works. Only transform a validated Zoom /j/ URL;
+    never log or reconstruct the passcode itself.
+    """
+    parts = urlsplit(invitation_url)
+    meeting_id = parts.path.removeprefix("/j/")
+    if (parts.scheme != "https" or not _is_zoom_host(parts.hostname)
+            or not parts.path.startswith("/j/") or not meeting_id.isdecimal()
+            or not 9 <= len(meeting_id) <= 11):
+        return None
+    return urlunsplit((parts.scheme, parts.netloc, f"/wc/{meeting_id}/join", parts.query, ""))
 
 
 def _zoom_join_surfaces(page) -> list:
@@ -1372,12 +1393,14 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
     )
     # Leave room for navigation and the 240-second admission wait within the
     # recorder's overall 360-second join timeout.
-    deadline = time.monotonic() + 65
+    started = time.monotonic()
+    deadline = started + 65
     name_field = None
     join_surface = None
     browser_clicks = 0
     last_browser_click = 0.0
     last_entry_log = 0.0
+    direct_attempted = False
     while time.monotonic() < deadline:
         now = time.monotonic()
         surfaces = _zoom_join_surfaces(page)
@@ -1407,20 +1430,32 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
                 break
         if name_field:
             break
+        # The launcher is a moving target (and some Zoom deployments omit its
+        # browser CTA). After giving it time, try Zoom's own /wc/ guest route
+        # with the original meeting ID and passcode, on the same browser page.
+        if (not direct_attempted and now - started >= 20
+                and not any(_zoom_route_kind(surface) == "webclient" for surface in surfaces)):
+            direct_url = _zoom_direct_webclient_url(url)
+            if direct_url:
+                direct_attempted = True
+                logger.info("Zoom guest web-client fallback from launcher")
+                await _navigate_to_meeting(page, direct_url)
+                continue
         if now - last_entry_log >= 10:
             logger.info(
-                "Zoom prejoin waiting: route=%s webclient_frames=%d browser_clicks=%d",
+                "Zoom prejoin waiting: route=%s webclient_frames=%d browser_clicks=%d direct_fallback=%s",
                 _zoom_route_kind(page),
                 sum(_zoom_route_kind(surface) == "webclient" for surface in surfaces),
                 browser_clicks,
+                direct_attempted,
             )
             last_entry_log = now
         await page.wait_for_timeout(1_000)
     if name_field is None:
         detail = await _zoom_missing_guest_form_detail(page)
         logger.warning(
-            "Zoom guest form missing: route=%s browser_clicks=%d detail=%s",
-            _zoom_route_kind(page), browser_clicks, detail,
+            "Zoom guest form missing: route=%s browser_clicks=%d direct_fallback=%s detail=%s",
+            _zoom_route_kind(page), browser_clicks, direct_attempted, detail,
         )
         raise RuntimeError(f"Zoom: {detail}")
     await _zoom_dismiss_prejoin_prompts(join_surface)

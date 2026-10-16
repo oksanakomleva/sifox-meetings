@@ -26,16 +26,20 @@ async def upsert_user(
             """
             INSERT INTO users (google_id, email, name, avatar_url, is_admin, last_login)
             VALUES ($1, $2, $3, $4, $5, NOW())
-            ON CONFLICT (google_id) DO UPDATE
-              SET email = EXCLUDED.email,
+            ON CONFLICT (email) DO UPDATE
+              SET google_id = EXCLUDED.google_id,
                   name = EXCLUDED.name,
                   avatar_url = EXCLUDED.avatar_url,
                   last_login = NOW()
+            WHERE users.is_active = TRUE
+              AND (users.google_id IS NULL OR users.google_id = EXCLUDED.google_id)
             RETURNING *
             """,
             google_id, email, name, avatar_url, is_admin_default,
         )
-    return dict(row)
+    # A different Google subject must never take over an existing email.
+    # The same exact verified email may attach Google to a GitLab-first user.
+    return dict(row) if row else None
 
 
 async def get_user_by_id(user_id: int) -> dict[str, Any] | None:
@@ -155,24 +159,32 @@ async def save_google_token(
     access_token: str,
     refresh_token: str | None,
     token_expiry: datetime | None,
+    *,
+    account_id: str | None = None,
+    account_email: str | None = None,
 ) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO google_tokens
-              (user_id, access_token, refresh_token, token_expiry, updated_at)
-            VALUES ($1, $2, $3, $4, NOW())
+              (user_id, access_token, refresh_token, token_expiry,
+               google_account_id, google_account_email, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW())
             ON CONFLICT (user_id) DO UPDATE
               SET access_token = EXCLUDED.access_token,
                   refresh_token = COALESCE(EXCLUDED.refresh_token, google_tokens.refresh_token),
                   token_expiry = EXCLUDED.token_expiry,
+                  google_account_id = COALESCE(EXCLUDED.google_account_id, google_tokens.google_account_id),
+                  google_account_email = COALESCE(EXCLUDED.google_account_email, google_tokens.google_account_email),
                   updated_at = NOW()
             """,
             user_id,
             encrypt(access_token),
             encrypt(refresh_token) if refresh_token else None,
             token_expiry,
+            account_id,
+            account_email,
         )
 
 
@@ -371,8 +383,8 @@ async def get_calendar_status(user_id: int) -> dict:
     """Return whether the user has connected Google Calendar and enabled any calendar."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        has_token = await conn.fetchval(
-            "SELECT 1 FROM google_tokens WHERE user_id = $1", user_id
+        account = await conn.fetchrow(
+            "SELECT google_account_email FROM google_tokens WHERE user_id = $1", user_id
         )
         has_enabled = await conn.fetchval(
             "SELECT 1 FROM calendars WHERE owner_user_id = $1 AND is_managed = TRUE AND record_enabled = TRUE", user_id
@@ -381,7 +393,8 @@ async def get_calendar_status(user_id: int) -> dict:
             "SELECT COUNT(*) FROM calendars WHERE owner_user_id = $1 AND is_managed = TRUE", user_id
         ) or 0
     return {
-        "connected": bool(has_token),
+        "connected": bool(account),
+        "google_account_email": account["google_account_email"] if account else None,
         "has_enabled_calendar": bool(has_enabled),
         "calendar_count": int(cal_count),
     }

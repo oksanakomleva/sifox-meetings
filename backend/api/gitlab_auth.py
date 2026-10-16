@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/auth/gitlab", tags=["auth"])
 
 def _require_pilot() -> None:
     if not (
-        config.GITLAB_PILOT_ENABLED
+        (config.GITLAB_PILOT_ENABLED or config.GITLAB_ALL_USERS_ENABLED)
         and config.GITLAB_CLIENT_ID
         and config.GITLAB_CLIENT_SECRET
     ):
@@ -65,13 +65,14 @@ async def gitlab_status(
 ):
     """Expose pilot availability without sending users to a disabled OAuth route."""
     enabled = bool(
-        config.GITLAB_PILOT_ENABLED
+        (config.GITLAB_PILOT_ENABLED or config.GITLAB_ALL_USERS_ENABLED)
         and config.GITLAB_CLIENT_ID
         and config.GITLAB_CLIENT_SECRET
     )
-    direct_login = enabled and config.APP_ENV == "staging"
+    direct_login = enabled and (config.APP_ENV == "staging" or config.GITLAB_ALL_USERS_ENABLED)
     if not enabled or not session_token:
         return {"enabled": enabled, "direct_login": direct_login,
+                "all_users": enabled and config.GITLAB_ALL_USERS_ENABLED,
                 "can_link": False, "linked": False}
     session = await models.get_session(session_token)
     can_link = bool(
@@ -88,6 +89,7 @@ async def gitlab_status(
         and await models.has_auth_identity(session["user_id"], "gitlab")
     )
     return {"enabled": enabled, "direct_login": direct_login,
+            "all_users": enabled and config.GITLAB_ALL_USERS_ENABLED,
             "can_link": can_link and not linked, "linked": linked}
 
 
@@ -98,6 +100,8 @@ async def link_gitlab(
 ):
     """Start linking while already signed in with the pilot's Google account."""
     client = _client()
+    if config.GITLAB_ALL_USERS_ENABLED:
+        raise HTTPException(404, "Direct GitLab sign-in does not need manual linking")
     if request.cookies.get("preview"):
         raise HTTPException(403, "Exit user preview before linking GitLab")
     session = await models.get_session(session_token) if session_token else None
@@ -170,6 +174,11 @@ async def _staging_direct_login(request: Request, userinfo: dict, subject: str) 
         return _error("gitlab_pilot_mismatch")
 
     email = config.GITLAB_PILOT_EMAIL.strip().lower()
+    claim_email = (userinfo.get("email") or "").strip().lower()
+    # A pinned subject permits a private/missing email, but a *different*
+    # email claim must not silently bind that subject to the pilot account.
+    if claim_email and (userinfo.get("email_verified") is not True or claim_email != email):
+        return _error("gitlab_identity_unverified")
     user = await models.get_user_by_auth_identity("gitlab", subject)
     if user:
         if not user.get("is_active", True) or user["email"].lower() != email:
@@ -178,7 +187,6 @@ async def _staging_direct_login(request: Request, userinfo: dict, subject: str) 
         # GitLab omits email claims when the user's public email is hidden.
         # In that case, require the stable, operator-pinned OIDC subject. If
         # no subject is pinned, only a verified exact email can enroll.
-        claim_email = (userinfo.get("email") or "").strip().lower()
         if not pinned_sub and not (
             claim_email == email and userinfo.get("email_verified") is True
         ):
@@ -192,6 +200,32 @@ async def _staging_direct_login(request: Request, userinfo: dict, subject: str) 
         if not user:
             return _error("gitlab_pilot_access_denied")
     return await _finish_login(request, user, userinfo=userinfo)
+
+
+async def _verified_email_login(request: Request, userinfo: dict, subject: str) -> RedirectResponse:
+    """All-user mode: one Sifox user for an exact verified email and GitLab subject."""
+    email = (userinfo.get("email") or "").strip().lower()
+    if userinfo.get("email_verified") is not True or not email:
+        return _error("gitlab_identity_unverified")
+    if (email.count("@") != 1 or not email.split("@", 1)[0]
+            or email.rsplit("@", 1)[-1] not in {"sifox.com", "sifox.ru"}):
+        return _error("domain_not_allowed")
+    user = await models.get_user_by_auth_identity("gitlab", subject)
+    if user:
+        if not user.get("is_active", True) or user["email"].lower() != email:
+            return _error("gitlab_account_conflict")
+    else:
+        # Exact email reuse links an existing Google user without changing its
+        # user_id, meetings or permissions; .com and .ru never merge by name.
+        user = await models.get_or_create_gitlab_pilot_user(
+            subject=subject, email=email,
+            name=userinfo.get("name") or userinfo.get("preferred_username") or email,
+            avatar_url=userinfo.get("picture"),
+            is_admin_default=email in config.admin_email_list,
+        )
+        if not user:
+            return _error("gitlab_account_conflict")
+    return await _finish_login(request, user)
 
 
 @router.get("/email-check")
@@ -264,6 +298,8 @@ async def gitlab_callback(request: Request):
         return _error("gitlab_failed")
     if config.APP_ENV == "staging":
         return await _staging_direct_login(request, userinfo, subject)
+    if config.GITLAB_ALL_USERS_ENABLED:
+        return await _verified_email_login(request, userinfo, subject)
 
     user = await models.get_user_by_auth_identity("gitlab", subject)
     if (

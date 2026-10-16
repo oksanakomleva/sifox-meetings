@@ -39,6 +39,8 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_preview BOOLEAN NOT NULL DEFAUL
 -- ── Google Calendar tokens (per user, for calendar sync) ─────────────────────
 CREATE TABLE IF NOT EXISTS google_tokens (
     user_id       BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    google_account_id TEXT,                 -- calendar OAuth identity, not Sifox sign-in
+    google_account_email TEXT,
     access_token  TEXT NOT NULL,         -- Fernet-encrypted
     refresh_token TEXT,                  -- Fernet-encrypted
     token_expiry  TIMESTAMP,
@@ -48,6 +50,8 @@ CREATE TABLE IF NOT EXISTS google_tokens (
 );
 -- Migration: add has_write_scope if missing
 ALTER TABLE google_tokens ADD COLUMN IF NOT EXISTS has_write_scope BOOLEAN DEFAULT FALSE;
+ALTER TABLE google_tokens ADD COLUMN IF NOT EXISTS google_account_id TEXT;
+ALTER TABLE google_tokens ADD COLUMN IF NOT EXISTS google_account_email TEXT;
 
 -- ── Gmail send tokens (per user, personal OAuth gmail.send) ──────────────────
 -- Kept SEPARATE from google_tokens so granting send access never clobbers the

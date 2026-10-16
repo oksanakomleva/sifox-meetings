@@ -253,6 +253,20 @@ def test_zoom_missing_form_reports_webclient_without_leaking_passcode():
     assert "pwd" not in detail and "secret" not in detail
 
 
+def test_zoom_direct_webclient_fallback_keeps_passcode_and_rejects_other_hosts():
+    from services import recorder
+    invitation = "https://us04web.zoom.us/j/75332086484?pwd=secret-token"
+    assert recorder._zoom_direct_webclient_url(invitation) == (
+        "https://us04web.zoom.us/wc/75332086484/join?pwd=secret-token"
+    )
+    assert recorder._zoom_direct_webclient_url(
+        "https://evilzoom.us/j/75332086484?pwd=secret-token"
+    ) is None
+    assert recorder._zoom_direct_webclient_url(
+        "https://us04web.zoom.us/signin?pwd=secret-token"
+    ) is None
+
+
 def test_zoom_guest_submit_cannot_match_account_signin_button():
     from services import recorder
     selectors = recorder._ZOOM_GUEST_JOIN_SELECTORS

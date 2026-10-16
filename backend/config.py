@@ -13,6 +13,10 @@ class Config(BaseSettings):
     # In staging, domain membership alone does not grant access. Empty means
     # only ADMIN_EMAILS may sign in; add more testers explicitly if needed.
     STAGING_ALLOWED_EMAILS: str = ""
+    # Optional isolated calendar pilot. Empty keeps external connections off in
+    # staging; when set, only the pilot user may connect this exact Google
+    # calendar account. Use a dedicated test calendar, never a work calendar.
+    STAGING_CALENDAR_TEST_EMAIL: str = ""
 
     # ── Database ──────────────────────────────────────────────────────────
     DATABASE_URL: str                        # postgresql://...
@@ -24,6 +28,9 @@ class Config(BaseSettings):
     # GitLab sign-in pilot. Disabled until a GitLab OAuth application is
     # registered and its credentials are configured on the server.
     GITLAB_PILOT_ENABLED: bool = False
+    # Rollout switch for verified-email GitLab sign-in on both Sifox domains.
+    # Keep off until the company OAuth app and staging checks are approved.
+    GITLAB_ALL_USERS_ENABLED: bool = False
     GITLAB_ISSUER: str = "https://gitlab.sifox.ru"
     GITLAB_CLIENT_ID: str = ""
     GITLAB_CLIENT_SECRET: str = ""

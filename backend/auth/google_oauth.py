@@ -144,10 +144,10 @@ def get_calendar_url(
     user_id: int,
     *,
     session_token: str,
-    expected_google_id: str | None,
-    expected_email: str,
+    expected_google_id: str | None = None,
+    expected_email: str | None = None,
 ) -> str:
-    """Generate Google OAuth URL for calendar read access (all users)."""
+    """Generate read-only consent; calendar identity may differ from login."""
     state = _store_state(
         "calendar",
         user_id=user_id,

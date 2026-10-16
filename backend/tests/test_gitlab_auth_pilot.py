@@ -178,18 +178,18 @@ def test_status_only_offers_linking_to_unlinked_pilot(monkeypatch):
     monkeypatch.setattr(gitlab_auth.models, "has_auth_identity", has_identity, raising=False)
 
     assert asyncio.run(gitlab_auth.gitlab_status()) == {
-        "enabled": True, "direct_login": False, "can_link": False, "linked": False,
+        "enabled": True, "direct_login": False, "all_users": False, "can_link": False, "linked": False,
     }
     assert asyncio.run(gitlab_auth.gitlab_status("pilot-session")) == {
-        "enabled": True, "direct_login": False, "can_link": True, "linked": False,
+        "enabled": True, "direct_login": False, "all_users": False, "can_link": True, "linked": False,
     }
     has_identity.return_value = True
     assert asyncio.run(gitlab_auth.gitlab_status("pilot-session")) == {
-        "enabled": True, "direct_login": False, "can_link": False, "linked": True,
+        "enabled": True, "direct_login": False, "all_users": False, "can_link": False, "linked": True,
     }
     get_session.return_value = {**_existing_user(), "email": "other@sifox.com"}
     assert asyncio.run(gitlab_auth.gitlab_status("other-session")) == {
-        "enabled": True, "direct_login": False, "can_link": False, "linked": False,
+        "enabled": True, "direct_login": False, "all_users": False, "can_link": False, "linked": False,
     }
 
 
@@ -277,11 +277,9 @@ def test_staging_gitlab_email_check_reports_claims_without_address(monkeypatch):
     monkeypatch.setattr(gitlab_auth.models, "create_session",
                         AsyncMock(return_value="new-session"), raising=False)
     req = _request(session={"gitlab_pilot": {"purpose": "login"}})
-    asyncio.run(gitlab_auth.gitlab_callback(req))
-    assert req.session["gitlab_email_check"] == {
-        "user_id": 42, "present": True, "verification": "unverified",
-        "matches_account": False,
-    }
+    result = asyncio.run(gitlab_auth.gitlab_callback(req))
+    assert "gitlab_identity_unverified" in result.headers["location"]
+    assert "gitlab_email_check" not in req.session
     assert "different@sifox.com" not in str(req.session)
 
 
@@ -348,5 +346,53 @@ def test_staging_status_does_not_offer_google_link_step(monkeypatch):
     get_session = AsyncMock(return_value=_existing_user())
     monkeypatch.setattr(gitlab_auth.models, "get_session", get_session, raising=False)
     assert asyncio.run(gitlab_auth.gitlab_status("pilot-session")) == {
-        "enabled": True, "direct_login": True, "can_link": False, "linked": False,
+        "enabled": True, "direct_login": True, "all_users": False, "can_link": False, "linked": False,
     }
+
+
+def test_all_user_mode_enrolls_verified_ru_email_without_merging_domains(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "production")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_ALL_USERS_ENABLED", True)
+    monkeypatch.setattr(gitlab_auth, "_client", lambda: FakeClient({
+        "sub": "901", "email": "person@sifox.ru", "email_verified": True,
+    }))
+    monkeypatch.setattr(gitlab_auth.models, "get_user_by_auth_identity",
+                        AsyncMock(return_value=None), raising=False)
+    enroll = AsyncMock(return_value={"id": 91, "email": "person@sifox.ru"})
+    monkeypatch.setattr(gitlab_auth.models, "get_or_create_gitlab_pilot_user", enroll, raising=False)
+    monkeypatch.setattr(gitlab_auth.models, "create_session",
+                        AsyncMock(return_value="session-ru"), raising=False)
+    result = asyncio.run(gitlab_auth.gitlab_callback(
+        _request(session={"gitlab_pilot": {"purpose": "login"}})
+    ))
+    assert "session=session-ru" in result.headers["set-cookie"]
+    assert enroll.await_args.kwargs["email"] == "person@sifox.ru"
+    assert enroll.await_args.kwargs["subject"] == "901"
+
+
+def test_all_user_mode_requires_verified_email_and_exact_linked_address(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "production")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_ALL_USERS_ENABLED", True)
+    enroll = AsyncMock()
+    monkeypatch.setattr(gitlab_auth.models, "get_or_create_gitlab_pilot_user", enroll, raising=False)
+    lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(gitlab_auth.models, "get_user_by_auth_identity", lookup, raising=False)
+    for claim, error in (
+        ({"sub": "901", "email": "person@sifox.ru", "email_verified": False}, "gitlab_identity_unverified"),
+        ({"sub": "901", "email": "person@example.com", "email_verified": True}, "domain_not_allowed"),
+    ):
+        monkeypatch.setattr(gitlab_auth, "_client", lambda claim=claim: FakeClient(claim))
+        result = asyncio.run(gitlab_auth.gitlab_callback(
+            _request(session={"gitlab_pilot": {"purpose": "login"}})
+        ))
+        assert error in result.headers["location"]
+    enroll.assert_not_awaited()
+
+    monkeypatch.setattr(gitlab_auth, "_client", lambda: FakeClient({
+        "sub": "901", "email": "person@sifox.ru", "email_verified": True,
+    }))
+    lookup.return_value = {"id": 91, "email": "person@sifox.com", "is_active": True}
+    result = asyncio.run(gitlab_auth.gitlab_callback(
+        _request(session={"gitlab_pilot": {"purpose": "login"}})
+    ))
+    assert "gitlab_account_conflict" in result.headers["location"]

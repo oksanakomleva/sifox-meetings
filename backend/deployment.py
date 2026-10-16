@@ -27,6 +27,8 @@ def validate_runtime(settings, *, railway_environment: str | None = None,
         raise RuntimeError("Railway staging must set APP_ENV=staging")
     if settings.APP_ENV != "staging":
         return
+    if getattr(settings, "GITLAB_ALL_USERS_ENABLED", False):
+        raise RuntimeError("All-user GitLab rollout is forbidden in staging pilot")
     if railway_environment and railway_environment != "staging":
         raise RuntimeError("APP_ENV=staging requires the Railway staging environment")
     base = urlsplit(settings.BASE_URL)

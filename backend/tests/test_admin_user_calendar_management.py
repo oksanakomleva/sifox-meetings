@@ -101,7 +101,7 @@ def test_in_domain_invitation_is_accepted_after_google_login(monkeypatch):
     monkeypatch.setattr(auth.models, "accept_invitation", accept, raising=False)
     monkeypatch.setattr(auth.models, "create_session", AsyncMock(return_value="session"), raising=False)
     result = asyncio.run(auth._process_callback({
-        "purpose": "login", "user_info": {"sub": "google-id", "email": "new@sifox.com", "name": "New"},
+        "purpose": "login", "user_info": {"sub": "google-id", "email": "new@sifox.com", "email_verified": True, "name": "New"},
     }, "secret-invitation-token"))
     assert result.status_code == 307
     accept.assert_awaited_once_with("secret-invitation-token")

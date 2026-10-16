@@ -22,6 +22,7 @@ def _settings(**overrides):
         "MM_RECORDER_COMMANDS_ENABLED": False,
         "MEGAFON_ENABLED": False,
         "GITLAB_PILOT_ENABLED": False,
+        "GITLAB_ALL_USERS_ENABLED": False,
         "GITLAB_CLIENT_ID": "",
         "GITLAB_CLIENT_SECRET": "",
         "GITLAB_ISSUER": "https://gitlab.sifox.ru",
@@ -46,6 +47,7 @@ def test_staging_uses_its_own_private_db_and_audio_volume():
     ({"MM_TOKEN": "copied-token"}, "external integrations"),
     ({"GOOGLE_SERVICE_ACCOUNT_JSON": "copied-key"}, "external integrations"),
     ({"ALERTS_ENABLED": True}, "external integrations"),
+    ({"GITLAB_ALL_USERS_ENABLED": True}, "All-user GitLab rollout"),
 ])
 def test_staging_rejects_unsafe_configuration(changes, reason):
     with pytest.raises(RuntimeError, match=reason):
@@ -100,7 +102,7 @@ def test_staging_google_login_rejects_other_domain_user(monkeypatch):
     monkeypatch.setattr(auth.models, "upsert_user", upsert, raising=False)
     result = asyncio.run(auth._process_callback({
         "purpose": "login",
-        "user_info": {"sub": "google-id", "email": "someone-else@sifox.com"},
+        "user_info": {"sub": "google-id", "email": "someone-else@sifox.com", "email_verified": True},
     }, None))
     assert "error=domain_not_allowed" in result.headers["location"]
     upsert.assert_not_awaited()
@@ -115,7 +117,7 @@ def test_staging_google_login_allows_named_tester(monkeypatch):
     monkeypatch.setattr(auth.models, "create_session", AsyncMock(return_value="session"), raising=False)
     result = asyncio.run(auth._process_callback({
         "purpose": "login",
-        "user_info": {"sub": "google-id", "email": "tester@sifox.com"},
+        "user_info": {"sub": "google-id", "email": "tester@sifox.com", "email_verified": True},
     }, None))
     assert result.headers["location"].endswith("/")
 

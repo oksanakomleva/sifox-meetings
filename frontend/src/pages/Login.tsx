@@ -8,6 +8,7 @@ export default function Login() {
   const navigate = useNavigate()
   const [gitlabEnabled, setGitlabEnabled] = useState(false)
   const [gitlabDirectLogin, setGitlabDirectLogin] = useState(false)
+  const [gitlabAllUsers, setGitlabAllUsers] = useState(false)
 
   useEffect(() => {
     if (!loading && user) navigate('/', { replace: true })
@@ -17,6 +18,7 @@ export default function Login() {
     api.auth.gitlabStatus().then(status => {
       setGitlabEnabled(status.enabled)
       setGitlabDirectLogin(status.direct_login)
+      setGitlabAllUsers(status.all_users)
     }).catch(() => {})
   }, [])
 
@@ -77,6 +79,8 @@ export default function Login() {
             {error === 'invite_invalid' && 'Ссылка приглашения недействительна или истекла'}
             {error === 'invite_used' && 'Это приглашение уже было использовано'}
             {error === 'oauth_failed' && 'Ошибка авторизации Google. Попробуйте ещё раз.'}
+            {error === 'email_unverified' && 'Google не подтвердил адрес этого аккаунта. Выберите другой аккаунт или обратитесь к администратору.'}
+            {error === 'account_conflict' && 'Этот адрес уже связан с другой учётной записью Google. Обратитесь к администратору.'}
             {error === 'state_expired' && 'Сессия авторизации устарела. Попробуйте ещё раз.'}
             {error === 'gitlab_failed' && 'Не удалось подтвердить вход через GitLab. Попробуйте ещё раз.'}
             {error === 'gitlab_state_expired' && 'Время входа через GitLab истекло. Попробуйте ещё раз.'}
@@ -85,7 +89,8 @@ export default function Login() {
             {error === 'gitlab_not_linked' && 'Сначала свяжите GitLab с вашей учётной записью Sifox после входа через Google.'}
             {error === 'gitlab_pilot_mismatch' && 'Эта учётная запись GitLab не входит в пилот. Проверьте выбранный аккаунт.'}
             {error === 'gitlab_pilot_id_mismatch' && 'GitLab вернул другой User ID. Проверьте выбранный аккаунт и значение GITLAB_PILOT_SUB в staging.'}
-            {error === 'gitlab_identity_unverified' && 'GitLab не передал подтверждённый email. Для закрытого профиля администратор тестовой среды должен указать ваш GitLab User ID.'}
+            {error === 'gitlab_identity_unverified' && 'Email GitLab не подтверждён или не совпадает с адресом пилотной учётной записи. Проверьте выбранный аккаунт.'}
+            {error === 'gitlab_account_conflict' && 'Этот GitLab-аккаунт связан с другим адресом Sifox или адрес уже занят. Обратитесь к администратору.'}
             {error === 'gitlab_pilot_access_denied' && 'Не удалось подтвердить доступ пилотной учётной записи GitLab. Обратитесь к администратору тестовой среды.'}
           </div>
         )}
@@ -114,7 +119,9 @@ export default function Login() {
           fontSize: 'var(--font-size-xs)',
           color: 'var(--color-text-muted)',
         }}>
-          Google — для сотрудников sifox.com. GitLab пока доступен только в пилоте{gitlabDirectLogin ? ' для одной учётной записи.' : ' для привязанной учётной записи.'}
+          Google — для сотрудников sifox.com. {gitlabAllUsers
+            ? 'GitLab — для сотрудников с подтверждённым адресом sifox.com или sifox.ru.'
+            : <>GitLab пока доступен только в пилоте{gitlabDirectLogin ? ' для одной учётной записи.' : ' для привязанной учётной записи.'}</>}
           {!gitlabEnabled && ' Вход через GitLab ещё не настроен на сервере.'}
         </p>
       </div>
