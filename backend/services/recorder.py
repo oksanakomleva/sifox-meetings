@@ -1162,21 +1162,42 @@ async def _zoom_dismiss_prejoin_prompts(page) -> int:
     not mean the Join button can be used.  Recording does not need to transmit
     the bot's microphone or camera (the live assistant is Telemost-only).
     """
+    # Zoom's two consecutive media dialogs render the same action as a text
+    # link, not necessarily a <button>. Clicking the text itself also works
+    # when it is nested inside an anchor or a custom button.
     skipped = 0
-    for _ in range(3):
-        clicked = await _zoom_click_visible(page, (
-            "button:has-text('Продолжить без микрофона и камеры')",
-            "button:has-text('Continue without microphone and camera')",
-            "button:has-text('Continue without microphone or camera')",
-            "button:has-text('Continue without audio and video')",
-        ))
+    for _ in range(4):
+        clicked = await _zoom_click_visible(page, _ZOOM_SKIP_MEDIA_SELECTORS)
         if not clicked:
             break
         skipped += 1
-        await page.wait_for_timeout(300)
+        await page.wait_for_timeout(700)
     if skipped:
         logger.info("Skipped %d Zoom pre-join media prompt(s)", skipped)
     return skipped
+
+
+_ZOOM_SKIP_MEDIA_LABELS = (
+    "Продолжить без микрофона и камеры",
+    "Continue without microphone and camera",
+    "Continue without microphone or camera",
+    "Continue without audio and video",
+)
+_ZOOM_SKIP_MEDIA_SELECTORS = tuple(
+    f"{tag}:text-is('{label}')"
+    for label in _ZOOM_SKIP_MEDIA_LABELS
+    for tag in ("button", "a", "[role='button']", "")
+)
+
+
+async def _zoom_media_prompt_visible(page) -> bool:
+    for label in _ZOOM_SKIP_MEDIA_LABELS:
+        try:
+            if await page.locator(f":text-is('{label}')").first.is_visible(timeout=500):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 _ZOOM_GUEST_JOIN_SELECTORS = (
@@ -1334,6 +1355,8 @@ async def _zoom_join_failure_detail(page, name_field) -> str:
         "verify you are human", "complete the captcha", "подтвердите, что вы человек",
     )):
         return "Zoom запросил проверку, что участник не робот"
+    if await _zoom_media_prompt_visible(page):
+        return "окно выбора микрофона и камеры осталось поверх формы входа"
     try:
         if await name_field.is_visible(timeout=1_000):
             return "форма ввода имени осталась открытой после нажатия «Войти»"
@@ -1459,8 +1482,12 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
         )
         raise RuntimeError(f"Zoom: {detail}")
     await _zoom_dismiss_prejoin_prompts(join_surface)
+    if await _zoom_media_prompt_visible(join_surface):
+        raise RuntimeError("Zoom: не удалось закрыть окна выбора микрофона и камеры")
     await name_field.fill("Protocaller")
     await _zoom_dismiss_prejoin_prompts(join_surface)
+    if await _zoom_media_prompt_visible(join_surface):
+        raise RuntimeError("Zoom: окно выбора микрофона и камеры перекрыло кнопку входа")
     if not await _zoom_click_visible(join_surface, _ZOOM_GUEST_JOIN_SELECTORS):
         raise RuntimeError("Zoom: не найдена кнопка входа")
 

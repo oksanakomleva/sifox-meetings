@@ -171,6 +171,7 @@ def test_zoom_guest_flow_preserves_passcode_and_confirms_admission(monkeypatch):
     monkeypatch.setattr(recorder, "_navigate_to_meeting", navigate)
     monkeypatch.setattr(recorder, "_zoom_click_visible", click)
     monkeypatch.setattr(recorder, "_zoom_dismiss_prejoin_prompts", AsyncMock(return_value=0))
+    monkeypatch.setattr(recorder, "_zoom_media_prompt_visible", AsyncMock(return_value=False))
     page = MagicMock()
     page.url = ZOOM_URL
     page.frames = []
@@ -198,6 +199,7 @@ def test_zoom_submits_guest_form_inside_webclient_frame(monkeypatch):
     click = AsyncMock(side_effect=[False, True, False])
     monkeypatch.setattr(recorder, "_zoom_click_visible", click)
     monkeypatch.setattr(recorder, "_zoom_dismiss_prejoin_prompts", AsyncMock(return_value=0))
+    monkeypatch.setattr(recorder, "_zoom_media_prompt_visible", AsyncMock(return_value=False))
     page = MagicMock()
     page.url = ZOOM_URL
     frame = MagicMock()
@@ -215,6 +217,7 @@ def test_zoom_retries_browser_entry_when_launcher_button_renders_late(monkeypatc
     from services import recorder
     monkeypatch.setattr(recorder, "_navigate_to_meeting", AsyncMock())
     monkeypatch.setattr(recorder, "_zoom_dismiss_prejoin_prompts", AsyncMock(return_value=0))
+    monkeypatch.setattr(recorder, "_zoom_media_prompt_visible", AsyncMock(return_value=False))
     browser_attempts = 0
 
     async def click(_surface, selectors):
@@ -295,6 +298,27 @@ def test_zoom_skips_both_media_prompts_before_join(monkeypatch):
     assert asyncio.run(recorder._zoom_dismiss_prejoin_prompts(page)) == 2
     assert click.await_count == 3
     assert "без микрофона и камеры" in click.await_args_list[0].args[1][0]
+    selectors = click.await_args_list[0].args[1]
+    assert "a:text-is('Продолжить без микрофона и камеры')" in selectors
+    assert ":text-is('Продолжить без микрофона и камеры')" in selectors
+
+
+def test_zoom_does_not_submit_while_media_prompt_covers_join(monkeypatch):
+    from services import recorder
+    monkeypatch.setattr(recorder, "_navigate_to_meeting", AsyncMock())
+    monkeypatch.setattr(recorder, "_zoom_click_visible", AsyncMock(return_value=False))
+    monkeypatch.setattr(recorder, "_zoom_dismiss_prejoin_prompts", AsyncMock(return_value=0))
+    monkeypatch.setattr(recorder, "_zoom_media_prompt_visible", AsyncMock(return_value=True))
+    page = MagicMock()
+    page.url = ZOOM_URL
+    page.frames = []
+    field = page.locator.return_value.first
+    field.is_visible = AsyncMock(return_value=True)
+    field.fill = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="не удалось закрыть окна выбора микрофона и камеры"):
+        asyncio.run(recorder._join_zoom_meeting(page, ZOOM_URL))
+    field.fill.assert_not_awaited()
 
 
 def test_zoom_retries_stalled_guest_form_after_dismissing_prompt(monkeypatch):
@@ -339,14 +363,27 @@ def test_zoom_never_resubmits_after_guest_form_disappears(monkeypatch):
     click.assert_not_awaited()
 
 
-def test_zoom_timeout_reports_open_name_form_not_unproven_waiting_room():
+def test_zoom_timeout_reports_open_name_form_not_unproven_waiting_room(monkeypatch):
     from services import recorder
+    monkeypatch.setattr(recorder, "_zoom_media_prompt_visible", AsyncMock(return_value=False))
     page = MagicMock()
     page.locator.return_value.inner_text = AsyncMock(return_value="Введите информацию о встрече")
     name_field = MagicMock()
     name_field.is_visible = AsyncMock(return_value=True)
     assert asyncio.run(recorder._zoom_join_failure_detail(page, name_field)) == (
         "форма ввода имени осталась открытой после нажатия «Войти»"
+    )
+
+
+def test_zoom_timeout_reports_media_overlay_instead_of_open_form(monkeypatch):
+    from services import recorder
+    monkeypatch.setattr(recorder, "_zoom_media_prompt_visible", AsyncMock(return_value=True))
+    page = MagicMock()
+    page.locator.return_value.inner_text = AsyncMock(return_value="Введите информацию о встрече")
+    name_field = MagicMock()
+    name_field.is_visible = AsyncMock(return_value=True)
+    assert asyncio.run(recorder._zoom_join_failure_detail(page, name_field)) == (
+        "окно выбора микрофона и камеры осталось поверх формы входа"
     )
 
 
