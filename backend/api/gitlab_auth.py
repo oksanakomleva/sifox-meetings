@@ -129,9 +129,25 @@ async def login_gitlab(request: Request):
     )
 
 
-async def _finish_login(request: Request, user: dict) -> RedirectResponse:
+async def _finish_login(
+    request: Request, user: dict, *, userinfo: dict | None = None,
+) -> RedirectResponse:
     session_token = await models.create_session(user["id"], config.SESSION_TTL_DAYS)
     request.session.clear()
+    if config.APP_ENV == "staging" and userinfo is not None:
+        claim_email = (userinfo.get("email") or "").strip().lower()
+        verified = userinfo.get("email_verified")
+        # The signed, short-lived OAuth cookie carries only diagnostic flags.
+        # Never store or return GitLab's email address or OAuth tokens here.
+        request.session["gitlab_email_check"] = {
+            "user_id": user["id"],
+            "present": bool(claim_email),
+            "verification": (
+                "verified" if verified is True else
+                "unverified" if verified is False else "not_provided"
+            ),
+            "matches_account": claim_email == user["email"].lower() if claim_email else None,
+        }
     response = RedirectResponse(f"{config.BASE_URL}/")
     response.set_cookie(
         key="session", value=session_token, httponly=True, samesite="lax",
@@ -175,7 +191,31 @@ async def _staging_direct_login(request: Request, userinfo: dict, subject: str) 
         )
         if not user:
             return _error("gitlab_pilot_access_denied")
-    return await _finish_login(request, user)
+    return await _finish_login(request, user, userinfo=userinfo)
+
+
+@router.get("/email-check")
+async def gitlab_email_check(
+    request: Request,
+    session_token: Annotated[str | None, Cookie(alias="session")] = None,
+):
+    """Consume a private, one-time staging diagnostic after GitLab login."""
+    if config.APP_ENV != "staging":
+        raise HTTPException(404, "Not available")
+    if not session_token:
+        raise HTTPException(401, "Not authenticated")
+    session = await models.get_session(session_token)
+    if not session or not session.get("is_active", True):
+        raise HTTPException(401, "Session expired")
+    result = request.session.pop("gitlab_email_check", None)
+    if not result or result.get("user_id") != session["user_id"]:
+        return {"available": False}
+    return {
+        "available": True,
+        "present": result["present"],
+        "verification": result["verification"],
+        "matches_account": result["matches_account"],
+    }
 
 
 @router.get("/callback")

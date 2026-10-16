@@ -53,6 +53,11 @@ export const api = {
     gitlabLoginUrl: () => '/api/auth/gitlab/login',
     gitlabLinkUrl: () => '/api/auth/gitlab/link',
     gitlabStatus: () => request<{ enabled: boolean; direct_login: boolean; can_link: boolean; linked: boolean }>('/auth/gitlab/status'),
+    gitlabEmailCheck: () => request<{
+      available: boolean; present?: boolean;
+      verification?: 'verified' | 'unverified' | 'not_provided';
+      matches_account?: boolean | null;
+    }>('/auth/gitlab/email-check'),
     connectCalendarUrl: () => '/api/auth/connect-calendar',
     gmailSendStatus: () => request<{ connected: boolean }>('/auth/gmail-send-status'),
     connectGmailSendUrl: (next: string) => `/api/auth/connect-gmail-send?next=${encodeURIComponent(next)}`,

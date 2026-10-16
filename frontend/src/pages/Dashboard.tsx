@@ -17,6 +17,10 @@ export default function Dashboard() {
   const [calendarJustConnected, setCalendarJustConnected] = useState(false)
   const [gitlabNotice, setGitlabNotice] = useState<{ ok: boolean; text: string } | null>(null)
   const [gitlabStatus, setGitlabStatus] = useState<{ enabled: boolean; direct_login: boolean; can_link: boolean; linked: boolean } | null>(null)
+  const [gitlabEmailCheck, setGitlabEmailCheck] = useState<{
+    present: boolean; verification: 'verified' | 'unverified' | 'not_provided';
+    matches_account: boolean | null;
+  } | null>(null)
   useEffect(() => {
     // Check if redirected back after connecting calendar
     if (searchParams.get('calendar_connected') === '1') {
@@ -50,7 +54,22 @@ export default function Dashboard() {
       .then(s => setCalStatus(s))
       .catch(() => {})
     api.auth.gitlabStatus()
-      .then(setGitlabStatus)
+      .then(status => {
+        setGitlabStatus(status)
+        if (status.direct_login) {
+          api.auth.gitlabEmailCheck()
+            .then(check => {
+              if (check.available && check.present !== undefined && check.verification) {
+                setGitlabEmailCheck({
+                  present: check.present,
+                  verification: check.verification,
+                  matches_account: check.matches_account ?? null,
+                })
+              }
+            })
+            .catch(() => {})
+        }
+      })
       .catch(() => {})
   }, [])
 
@@ -70,6 +89,28 @@ export default function Dashboard() {
             color: gitlabNotice.ok ? 'var(--color-success)' : 'var(--color-error)',
           }}>
             {gitlabNotice.text}
+          </div>
+        )}
+
+        {gitlabEmailCheck && (
+          <div role="status" style={{
+            borderRadius: 'var(--radius-lg)', padding: 'var(--space-5)',
+            border: '1px solid var(--color-border)', background: 'var(--color-surface)',
+          }}>
+            <div style={{ fontWeight: 'var(--font-weight-semibold)', marginBottom: 'var(--space-2)' }}>
+              Проверка GitLab email (только staging)
+            </div>
+            <div>Адрес передан: {gitlabEmailCheck.present ? 'да' : 'нет'}</div>
+            <div>Подтверждение адреса: {{
+              verified: 'да', unverified: 'нет', not_provided: 'не передано',
+            }[gitlabEmailCheck.verification]}</div>
+            <div>Совпадает с адресом аккаунта Sifox: {
+              gitlabEmailCheck.matches_account === null ? 'нельзя проверить' :
+              gitlabEmailCheck.matches_account ? 'да' : 'нет'
+            }</div>
+            <p style={{ color: 'var(--color-text-secondary)', marginTop: 'var(--space-2)' }}>
+              Показаны только результаты проверки, без адреса и токена. После обновления страницы эта отметка исчезнет.
+            </p>
           </div>
         )}
 

@@ -215,6 +215,74 @@ def test_staging_direct_login_enrolls_pinned_gitlab_user_without_google(monkeypa
     enroll.assert_awaited_once()
     assert enroll.await_args.kwargs["subject"] == "220"
     assert enroll.await_args.kwargs["email"] == gitlab_auth.config.GITLAB_PILOT_EMAIL
+    assert req.session["gitlab_email_check"] == {
+        "user_id": 42, "present": False, "verification": "not_provided",
+        "matches_account": None,
+    }
+
+
+def test_staging_gitlab_email_check_is_private_and_one_time(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "staging")
+    monkeypatch.setattr(gitlab_auth.models, "get_session",
+                        AsyncMock(return_value={"user_id": 42, "is_active": True}),
+                        raising=False)
+    req = _request(session={"gitlab_email_check": {
+        "user_id": 42, "present": True, "verification": "verified",
+        "matches_account": True,
+    }}, cookie="new-session")
+    result = asyncio.run(gitlab_auth.gitlab_email_check(req, "new-session"))
+    assert result == {
+        "available": True, "present": True, "verification": "verified",
+        "matches_account": True,
+    }
+    assert asyncio.run(gitlab_auth.gitlab_email_check(req, "new-session")) == {
+        "available": False,
+    }
+
+
+def test_staging_gitlab_email_check_rejects_another_user(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "staging")
+    monkeypatch.setattr(gitlab_auth.models, "get_session",
+                        AsyncMock(return_value={"user_id": 99, "is_active": True}),
+                        raising=False)
+    req = _request(session={"gitlab_email_check": {
+        "user_id": 42, "present": True, "verification": "verified",
+        "matches_account": True,
+    }}, cookie="other-session")
+    assert asyncio.run(gitlab_auth.gitlab_email_check(req, "other-session")) == {
+        "available": False,
+    }
+
+
+def test_gitlab_email_check_is_unavailable_in_production(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "production")
+    req = _request(session={"gitlab_email_check": {
+        "user_id": 42, "present": True, "verification": "verified",
+        "matches_account": True,
+    }}, cookie="new-session")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(gitlab_auth.gitlab_email_check(req, "new-session"))
+    assert exc.value.status_code == 404
+
+
+def test_staging_gitlab_email_check_reports_claims_without_address(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "staging")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_PILOT_SUB", "220")
+    monkeypatch.setattr(gitlab_auth, "_client", lambda: FakeClient({
+        "sub": "220", "email": "different@sifox.com", "email_verified": False,
+    }))
+    monkeypatch.setattr(gitlab_auth.models, "get_user_by_auth_identity",
+                        AsyncMock(return_value={"id": 42, "email": gitlab_auth.config.GITLAB_PILOT_EMAIL}),
+                        raising=False)
+    monkeypatch.setattr(gitlab_auth.models, "create_session",
+                        AsyncMock(return_value="new-session"), raising=False)
+    req = _request(session={"gitlab_pilot": {"purpose": "login"}})
+    asyncio.run(gitlab_auth.gitlab_callback(req))
+    assert req.session["gitlab_email_check"] == {
+        "user_id": 42, "present": True, "verification": "unverified",
+        "matches_account": False,
+    }
+    assert "different@sifox.com" not in str(req.session)
 
 
 def test_staging_pinned_user_id_survives_username_change(monkeypatch):
