@@ -59,3 +59,6 @@ def validate_runtime(settings, *, railway_environment: str | None = None,
             raise RuntimeError("Staging GitLab pilot must use the Sifox GitLab issuer")
         if not settings.GITLAB_PILOT_USERNAME or settings.GITLAB_PILOT_EMAIL.lower() not in allowed:
             raise RuntimeError("Staging GitLab pilot must be limited to an allowed tester")
+        pilot_sub = getattr(settings, "GITLAB_PILOT_SUB", "") or ""
+        if pilot_sub and not pilot_sub.isdecimal():
+            raise RuntimeError("Staging GitLab pilot subject must be a numeric GitLab user ID")

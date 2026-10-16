@@ -1,4 +1,4 @@
-"""The GitLab pilot may only link/sign in the existing Google user."""
+"""The GitLab pilot allows direct staging login only for its pinned identity."""
 import asyncio
 from unittest.mock import AsyncMock
 
@@ -131,6 +131,7 @@ def test_link_rejects_a_different_gitlab_username(monkeypatch):
 
 
 def test_login_only_accepts_already_linked_active_pilot(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "production")
     monkeypatch.setattr(gitlab_auth, "_client", lambda: FakeClient())
     lookup = AsyncMock(return_value={**_existing_user(), "id": 42})
     create_session = AsyncMock(return_value="new-session")
@@ -167,6 +168,7 @@ def test_pilot_is_off_without_flag_and_credentials(monkeypatch):
 
 
 def test_status_only_offers_linking_to_unlinked_pilot(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "production")
     monkeypatch.setattr(gitlab_auth.config, "GITLAB_PILOT_ENABLED", True)
     monkeypatch.setattr(gitlab_auth.config, "GITLAB_CLIENT_ID", "test-client")
     monkeypatch.setattr(gitlab_auth.config, "GITLAB_CLIENT_SECRET", "test-secret")
@@ -176,16 +178,86 @@ def test_status_only_offers_linking_to_unlinked_pilot(monkeypatch):
     monkeypatch.setattr(gitlab_auth.models, "has_auth_identity", has_identity, raising=False)
 
     assert asyncio.run(gitlab_auth.gitlab_status()) == {
-        "enabled": True, "can_link": False, "linked": False,
+        "enabled": True, "direct_login": False, "can_link": False, "linked": False,
     }
     assert asyncio.run(gitlab_auth.gitlab_status("pilot-session")) == {
-        "enabled": True, "can_link": True, "linked": False,
+        "enabled": True, "direct_login": False, "can_link": True, "linked": False,
     }
     has_identity.return_value = True
     assert asyncio.run(gitlab_auth.gitlab_status("pilot-session")) == {
-        "enabled": True, "can_link": False, "linked": True,
+        "enabled": True, "direct_login": False, "can_link": False, "linked": True,
     }
     get_session.return_value = {**_existing_user(), "email": "other@sifox.com"}
     assert asyncio.run(gitlab_auth.gitlab_status("other-session")) == {
-        "enabled": True, "can_link": False, "linked": False,
+        "enabled": True, "direct_login": False, "can_link": False, "linked": False,
+    }
+
+
+def test_staging_direct_login_enrolls_pinned_gitlab_user_without_google(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "staging")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_PILOT_SUB", "220")
+    monkeypatch.setattr(gitlab_auth, "_client", lambda: FakeClient({
+        "sub": "220", "preferred_username": gitlab_auth.config.GITLAB_PILOT_USERNAME,
+        "name": "Oksana",  # Email can stay private in GitLab.
+    }))
+    lookup = AsyncMock(return_value=None)
+    enroll = AsyncMock(return_value={"id": 42, "email": gitlab_auth.config.GITLAB_PILOT_EMAIL})
+    create_session = AsyncMock(return_value="new-session")
+    monkeypatch.setattr(gitlab_auth.models, "get_user_by_auth_identity", lookup, raising=False)
+    monkeypatch.setattr(gitlab_auth.models, "get_or_create_gitlab_pilot_user", enroll, raising=False)
+    monkeypatch.setattr(gitlab_auth.models, "create_session", create_session, raising=False)
+
+    req = _request(session={"gitlab_pilot": {"purpose": "login"}})
+    result = asyncio.run(gitlab_auth.gitlab_callback(req))
+    assert result.headers["location"].endswith("/")
+    assert "session=new-session" in result.headers["set-cookie"]
+    lookup.assert_awaited_once_with("gitlab", "220")
+    enroll.assert_awaited_once()
+    assert enroll.await_args.kwargs["subject"] == "220"
+    assert enroll.await_args.kwargs["email"] == gitlab_auth.config.GITLAB_PILOT_EMAIL
+
+
+def test_staging_direct_login_rejects_wrong_subject_without_enrollment(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "staging")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_PILOT_SUB", "220")
+    monkeypatch.setattr(gitlab_auth, "_client", lambda: FakeClient({
+        "sub": "221", "preferred_username": gitlab_auth.config.GITLAB_PILOT_USERNAME,
+    }))
+    enroll = AsyncMock()
+    monkeypatch.setattr(gitlab_auth.models, "get_or_create_gitlab_pilot_user", enroll, raising=False)
+
+    result = asyncio.run(gitlab_auth.gitlab_callback(
+        _request(session={"gitlab_pilot": {"purpose": "login"}})
+    ))
+    assert "gitlab_pilot_mismatch" in result.headers["location"]
+    enroll.assert_not_awaited()
+
+
+def test_staging_direct_login_without_pin_requires_verified_matching_email(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "staging")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_PILOT_SUB", "")
+    monkeypatch.setattr(gitlab_auth, "_client", lambda: FakeClient({
+        "sub": "220", "preferred_username": gitlab_auth.config.GITLAB_PILOT_USERNAME,
+        "email": gitlab_auth.config.GITLAB_PILOT_EMAIL, "email_verified": False,
+    }))
+    monkeypatch.setattr(gitlab_auth.models, "get_user_by_auth_identity", AsyncMock(return_value=None), raising=False)
+    enroll = AsyncMock()
+    monkeypatch.setattr(gitlab_auth.models, "get_or_create_gitlab_pilot_user", enroll, raising=False)
+
+    result = asyncio.run(gitlab_auth.gitlab_callback(
+        _request(session={"gitlab_pilot": {"purpose": "login"}})
+    ))
+    assert "gitlab_identity_unverified" in result.headers["location"]
+    enroll.assert_not_awaited()
+
+
+def test_staging_status_does_not_offer_google_link_step(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "staging")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_PILOT_ENABLED", True)
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_CLIENT_ID", "test-client")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_CLIENT_SECRET", "test-secret")
+    get_session = AsyncMock(return_value=_existing_user())
+    monkeypatch.setattr(gitlab_auth.models, "get_session", get_session, raising=False)
+    assert asyncio.run(gitlab_auth.gitlab_status("pilot-session")) == {
+        "enabled": True, "direct_login": True, "can_link": False, "linked": False,
     }

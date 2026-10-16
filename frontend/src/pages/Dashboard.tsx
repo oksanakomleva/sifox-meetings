@@ -16,7 +16,7 @@ export default function Dashboard() {
   const [calStatus, setCalStatus] = useState<{ connected: boolean; has_enabled_calendar: boolean } | null>(null)
   const [calendarJustConnected, setCalendarJustConnected] = useState(false)
   const [gitlabNotice, setGitlabNotice] = useState<{ ok: boolean; text: string } | null>(null)
-  const [gitlabStatus, setGitlabStatus] = useState<{ enabled: boolean; can_link: boolean; linked: boolean } | null>(null)
+  const [gitlabStatus, setGitlabStatus] = useState<{ enabled: boolean; direct_login: boolean; can_link: boolean; linked: boolean } | null>(null)
   useEffect(() => {
     // Check if redirected back after connecting calendar
     if (searchParams.get('calendar_connected') === '1') {
@@ -73,7 +73,7 @@ export default function Dashboard() {
           </div>
         )}
 
-        {gitlabStatus?.can_link && (
+        {gitlabStatus?.can_link && !gitlabStatus.direct_login && (
           <div style={{
             borderRadius: 'var(--radius-lg)', padding: 'var(--space-5)',
             border: '1px solid var(--color-border)', background: 'var(--color-surface)',
@@ -89,7 +89,7 @@ export default function Dashboard() {
             </a>
           </div>
         )}
-        {gitlabStatus?.linked && !gitlabNotice && (
+        {gitlabStatus?.linked && !gitlabStatus.direct_login && !gitlabNotice && (
           <div role="status" style={{ color: 'var(--color-text-secondary)' }}>
             GitLab подключён. Для проверки входа выйдите из приложения или откройте его в отдельном окне браузера.
           </div>

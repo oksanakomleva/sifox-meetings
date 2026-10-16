@@ -29,6 +29,9 @@ class Config(BaseSettings):
     GITLAB_CLIENT_SECRET: str = ""
     GITLAB_PILOT_EMAIL: str = "oksana.komleva@sifox.com"
     GITLAB_PILOT_USERNAME: str = "oksana.komleva"
+    # Optional stable GitLab OIDC subject (the numeric GitLab user ID). In
+    # staging it permits direct sign-in without making the user's email public.
+    GITLAB_PILOT_SUB: str = ""
 
     @property
     def GOOGLE_REDIRECT_URI(self) -> str:

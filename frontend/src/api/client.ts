@@ -52,7 +52,7 @@ export const api = {
     loginUrl: () => '/api/auth/login',
     gitlabLoginUrl: () => '/api/auth/gitlab/login',
     gitlabLinkUrl: () => '/api/auth/gitlab/link',
-    gitlabStatus: () => request<{ enabled: boolean; can_link: boolean; linked: boolean }>('/auth/gitlab/status'),
+    gitlabStatus: () => request<{ enabled: boolean; direct_login: boolean; can_link: boolean; linked: boolean }>('/auth/gitlab/status'),
     connectCalendarUrl: () => '/api/auth/connect-calendar',
     gmailSendStatus: () => request<{ connected: boolean }>('/auth/gmail-send-status'),
     connectGmailSendUrl: (next: string) => `/api/auth/connect-gmail-send?next=${encodeURIComponent(next)}`,

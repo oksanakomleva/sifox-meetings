@@ -1692,6 +1692,51 @@ async def get_user_by_auth_identity(provider: str, subject: str) -> dict[str, An
     return dict(row) if row else None
 
 
+async def get_or_create_gitlab_pilot_user(
+    *, subject: str, email: str, name: str, avatar_url: str | None,
+    is_admin_default: bool,
+) -> dict[str, Any] | None:
+    """Atomically enroll the one approved GitLab identity in staging.
+
+    Reuse an existing user with the exact configured email, so their meetings
+    and permissions remain intact. Never relink a different GitLab subject or
+    reactivate a disabled account.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            user = await conn.fetchrow(
+                """
+                INSERT INTO users (email, name, avatar_url, is_admin, last_login)
+                VALUES ($1, $2, $3, $4, NOW())
+                ON CONFLICT (email) DO UPDATE SET last_login = NOW()
+                WHERE users.is_active = TRUE
+                RETURNING *
+                """,
+                email, name, avatar_url, is_admin_default,
+            )
+            if not user:
+                return None
+            await conn.execute(
+                """
+                INSERT INTO auth_identities (provider, subject, user_id)
+                VALUES ('gitlab', $1, $2)
+                ON CONFLICT DO NOTHING
+                """,
+                subject, user["id"],
+            )
+            identity = await conn.fetchrow(
+                """
+                SELECT subject, user_id FROM auth_identities
+                WHERE provider = 'gitlab' AND (subject = $1 OR user_id = $2)
+                """,
+                subject, user["id"],
+            )
+            if not identity or identity["subject"] != subject or identity["user_id"] != user["id"]:
+                return None
+    return dict(user)
+
+
 async def has_auth_identity(user_id: int, provider: str) -> bool:
     pool = await get_pool()
     async with pool.acquire() as conn:

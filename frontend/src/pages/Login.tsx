@@ -7,13 +7,17 @@ export default function Login() {
   const { user, loading } = useAuth()
   const navigate = useNavigate()
   const [gitlabEnabled, setGitlabEnabled] = useState(false)
+  const [gitlabDirectLogin, setGitlabDirectLogin] = useState(false)
 
   useEffect(() => {
     if (!loading && user) navigate('/', { replace: true })
   }, [user, loading, navigate])
 
   useEffect(() => {
-    api.auth.gitlabStatus().then(status => setGitlabEnabled(status.enabled)).catch(() => {})
+    api.auth.gitlabStatus().then(status => {
+      setGitlabEnabled(status.enabled)
+      setGitlabDirectLogin(status.direct_login)
+    }).catch(() => {})
   }, [])
 
   const error = new URLSearchParams(window.location.search).get('error')
@@ -79,6 +83,9 @@ export default function Login() {
             {error === 'gitlab_link_failed' && 'Не удалось связать аккаунты. Войдите через Google и повторите попытку.'}
             {error === 'gitlab_link_conflict' && 'Этот аккаунт GitLab уже связан с другой учётной записью.'}
             {error === 'gitlab_not_linked' && 'Сначала свяжите GitLab с вашей учётной записью Sifox после входа через Google.'}
+            {error === 'gitlab_pilot_mismatch' && 'Эта учётная запись GitLab не входит в пилот. Проверьте выбранный аккаунт.'}
+            {error === 'gitlab_identity_unverified' && 'GitLab не передал подтверждённый email. Для закрытого профиля администратор тестовой среды должен указать ваш GitLab User ID.'}
+            {error === 'gitlab_pilot_access_denied' && 'Не удалось подтвердить доступ пилотной учётной записи GitLab. Обратитесь к администратору тестовой среды.'}
           </div>
         )}
 
@@ -106,7 +113,7 @@ export default function Login() {
           fontSize: 'var(--font-size-xs)',
           color: 'var(--color-text-muted)',
         }}>
-          Google — для сотрудников sifox.com. GitLab пока доступен только в пилоте для привязанной учётной записи.
+          Google — для сотрудников sifox.com. GitLab пока доступен только в пилоте{gitlabDirectLogin ? ' для одной учётной записи.' : ' для привязанной учётной записи.'}
           {!gitlabEnabled && ' Вход через GitLab ещё не настроен на сервере.'}
         </p>
       </div>

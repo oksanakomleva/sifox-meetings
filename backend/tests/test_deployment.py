@@ -27,6 +27,7 @@ def _settings(**overrides):
         "GITLAB_ISSUER": "https://gitlab.sifox.ru",
         "GITLAB_PILOT_EMAIL": "oksana.komleva@sifox.com",
         "GITLAB_PILOT_USERNAME": "oksana.komleva",
+        "GITLAB_PILOT_SUB": "",
         "ADMIN_EMAILS": "oksana.komleva@sifox.com",
         "STAGING_ALLOWED_EMAILS": "",
     }
@@ -78,6 +79,7 @@ def test_staging_allows_gitlab_pilot_for_named_tester_with_credentials():
     ({"GITLAB_ISSUER": "https://other.example"}, "Sifox GitLab issuer"),
     ({"GITLAB_PILOT_EMAIL": "other@sifox.com"}, "allowed tester"),
     ({"GITLAB_PILOT_USERNAME": ""}, "allowed tester"),
+    ({"GITLAB_PILOT_SUB": "not-a-number"}, "numeric GitLab user ID"),
 ])
 def test_staging_gitlab_pilot_rejects_broad_or_incomplete_configuration(changes, reason):
     settings = _settings(**{

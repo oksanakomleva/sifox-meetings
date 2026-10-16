@@ -1,4 +1,4 @@
-"""One-account GitLab OIDC pilot; does not provision new Sifox users."""
+"""One-account GitLab OIDC pilot with isolated direct sign-in in staging."""
 import hashlib
 import hmac
 import logging
@@ -69,10 +69,14 @@ async def gitlab_status(
         and config.GITLAB_CLIENT_ID
         and config.GITLAB_CLIENT_SECRET
     )
+    direct_login = enabled and config.APP_ENV == "staging"
     if not enabled or not session_token:
-        return {"enabled": enabled, "can_link": False, "linked": False}
+        return {"enabled": enabled, "direct_login": direct_login,
+                "can_link": False, "linked": False}
     session = await models.get_session(session_token)
     can_link = bool(
+        not direct_login
+        and
         session
         and session.get("is_active", True)
         and not session.get("is_preview")
@@ -83,7 +87,8 @@ async def gitlab_status(
         can_link
         and await models.has_auth_identity(session["user_id"], "gitlab")
     )
-    return {"enabled": enabled, "can_link": can_link and not linked, "linked": linked}
+    return {"enabled": enabled, "direct_login": direct_login,
+            "can_link": can_link and not linked, "linked": linked}
 
 
 @router.get("/link")
@@ -116,12 +121,57 @@ async def link_gitlab(
 
 @router.get("/login")
 async def login_gitlab(request: Request):
-    """Sign in only an already-linked pilot account; never auto-create users."""
+    """Start GitLab OIDC login; staging can enroll its one approved tester."""
     client = _client()
     request.session["gitlab_pilot"] = {"purpose": "login"}
     return await client.authorize_redirect(
         request, f"{config.BASE_URL}/api/auth/gitlab/callback"
     )
+
+
+async def _finish_login(request: Request, user: dict) -> RedirectResponse:
+    session_token = await models.create_session(user["id"], config.SESSION_TTL_DAYS)
+    request.session.clear()
+    response = RedirectResponse(f"{config.BASE_URL}/")
+    response.set_cookie(
+        key="session", value=session_token, httponly=True, samesite="lax",
+        secure=config.BASE_URL.startswith("https"),
+        max_age=config.SESSION_TTL_DAYS * 86400, path="/",
+    )
+    return response
+
+
+async def _staging_direct_login(request: Request, userinfo: dict, subject: str) -> RedirectResponse:
+    """Admit only the configured GitLab person, with no Google prerequisite."""
+    if userinfo.get("preferred_username") != config.GITLAB_PILOT_USERNAME:
+        return _error("gitlab_pilot_mismatch")
+    pinned_sub = config.GITLAB_PILOT_SUB.strip()
+    if pinned_sub and subject != pinned_sub:
+        return _error("gitlab_pilot_mismatch")
+
+    email = config.GITLAB_PILOT_EMAIL.strip().lower()
+    user = await models.get_user_by_auth_identity("gitlab", subject)
+    if user:
+        if not user.get("is_active", True) or user["email"].lower() != email:
+            return _error("gitlab_pilot_access_denied")
+    else:
+        # GitLab omits email claims when the user's public email is hidden.
+        # In that case, require the stable, operator-pinned OIDC subject. If
+        # no subject is pinned, only a verified exact email can enroll.
+        claim_email = (userinfo.get("email") or "").strip().lower()
+        if not pinned_sub and not (
+            claim_email == email and userinfo.get("email_verified") is True
+        ):
+            return _error("gitlab_identity_unverified")
+        user = await models.get_or_create_gitlab_pilot_user(
+            subject=subject, email=email,
+            name=userinfo.get("name") or config.GITLAB_PILOT_USERNAME,
+            avatar_url=userinfo.get("picture"),
+            is_admin_default=email in config.admin_email_list,
+        )
+        if not user:
+            return _error("gitlab_pilot_access_denied")
+    return await _finish_login(request, user)
 
 
 @router.get("/callback")
@@ -168,6 +218,9 @@ async def gitlab_callback(request: Request):
 
     if pilot.get("purpose") != "login":
         return _error("gitlab_failed")
+    if config.APP_ENV == "staging":
+        return await _staging_direct_login(request, userinfo, subject)
+
     user = await models.get_user_by_auth_identity("gitlab", subject)
     if (
         not user
@@ -176,16 +229,4 @@ async def gitlab_callback(request: Request):
     ):
         return _error("gitlab_not_linked")
 
-    session_token = await models.create_session(user["id"], config.SESSION_TTL_DAYS)
-    request.session.clear()
-    response = RedirectResponse(f"{config.BASE_URL}/")
-    response.set_cookie(
-        key="session",
-        value=session_token,
-        httponly=True,
-        samesite="lax",
-        secure=config.BASE_URL.startswith("https"),
-        max_age=config.SESSION_TTL_DAYS * 86400,
-        path="/",
-    )
-    return response
+    return await _finish_login(request, user)
