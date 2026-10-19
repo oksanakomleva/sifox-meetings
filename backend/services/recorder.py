@@ -1257,6 +1257,44 @@ async def _zoom_dismiss_prejoin_prompts(page) -> int:
     return skipped
 
 
+async def _zoom_dismiss_cookie_banner(page) -> bool:
+    """Close Zoom's cookie notice when it overlays the guest launcher.
+
+    The current notice has no Accept button; do not change the consent choice.
+    Only click a close control inside a small banner containing Zoom's cookie
+    text, never a generic close button elsewhere on the page.
+    """
+    try:
+        dismissed = await page.evaluate(r"""() => {
+          const phrases = [
+            'zoom uses cookies and similar technologies',
+            'zoom использует файлы cookie',
+          ];
+          for (const node of document.querySelectorAll('body *')) {
+            if (node.children.length || !node.getBoundingClientRect().width) continue;
+            const text = (node.textContent || '').toLowerCase();
+            if (!phrases.some(phrase => text.includes(phrase))) continue;
+            let parent = node.parentElement;
+            for (let depth = 0; parent && depth < 5; depth++, parent = parent.parentElement) {
+              if ((parent.innerText || '').length > 700) break;
+              const close = Array.from(parent.querySelectorAll('button')).find(button => {
+                const label = `${button.getAttribute('aria-label') || ''} ${button.getAttribute('title') || ''}`;
+                const box = button.getBoundingClientRect();
+                return box.width && (/close|закрыть/i.test(label) ||
+                  (!button.innerText.trim() && box.width < 60));
+              });
+              if (close) { close.click(); return true; }
+            }
+          }
+          return false;
+        }""")
+    except Exception:
+        return False
+    if dismissed is True:
+        logger.info("Zoom launcher cookie notice dismissed")
+    return dismissed is True
+
+
 _ZOOM_SKIP_MEDIA_LABELS = (
     "Продолжить без микрофона и камеры",
     "Continue without microphone and camera",
@@ -1591,6 +1629,7 @@ async def _join_zoom_meeting(
                 and not any(_zoom_route_kind(surface) == "webclient" for surface in surfaces)
                 and not _zoom_popup_seen(page)
                 and now - last_browser_click >= 5):
+            await _zoom_dismiss_cookie_banner(page)
             if await _zoom_click_visible(page, _ZOOM_BROWSER_JOIN_SELECTORS):
                 browser_clicks += 1
                 last_browser_click = time.monotonic()
