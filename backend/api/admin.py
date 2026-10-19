@@ -8,6 +8,7 @@ import time
 import uuid
 from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from typing import Annotated, Literal
 
@@ -119,6 +120,48 @@ async def trigger_sync(admin: AdminUser):
 async def list_all_meetings(admin: AdminUser, limit: int = 100, offset: int = 0):
     meetings = await models.get_all_meetings(limit=limit, offset=offset)
     return {"meetings": meetings}
+
+
+def _zoom_debug_folder(meeting_id: str) -> Path:
+    from config import config
+    from services.recorder import ZOOM_DEBUG_ROOT
+
+    if config.APP_ENV != "staging":
+        raise HTTPException(404, "Not available")
+    try:
+        if str(uuid.UUID(meeting_id)) != meeting_id:
+            raise ValueError
+    except ValueError:
+        raise HTTPException(404, "Not found") from None
+    return ZOOM_DEBUG_ROOT / meeting_id
+
+
+@router.get("/meetings/{meeting_id}/zoom-debug")
+async def list_zoom_debug_screenshots(meeting_id: str, admin: AdminUser):
+    """Stage names only; images require a separate authenticated request."""
+    from services.recorder import ZOOM_DEBUG_STAGES
+
+    folder = _zoom_debug_folder(meeting_id)
+    stages = [stage for stage in sorted(ZOOM_DEBUG_STAGES)
+              if (folder / f"{stage}.png").is_file()]
+    return {"meeting_id": meeting_id, "stages": stages}
+
+
+@router.get("/meetings/{meeting_id}/zoom-debug/{stage}")
+async def get_zoom_debug_screenshot(meeting_id: str, stage: str, admin: AdminUser):
+    """Private staging-only screenshots of the bot's Zoom guest join."""
+    from services.recorder import ZOOM_DEBUG_STAGES
+
+    folder = _zoom_debug_folder(meeting_id)
+    if stage not in ZOOM_DEBUG_STAGES:
+        raise HTTPException(404, "Not found")
+    path = folder / f"{stage}.png"
+    if not path.is_file():
+        raise HTTPException(404, "Not found")
+    return FileResponse(path, media_type="image/png", headers={
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    })
 
 
 @router.get("/upcoming")

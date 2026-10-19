@@ -10,6 +10,7 @@ import re
 import signal
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -21,6 +22,40 @@ from services.transcriber import transcribe_audio
 from services.analyzer import analyze_meeting
 
 logger = logging.getLogger(__name__)
+
+# Staging-only, ephemeral visual evidence of Zoom's guest admission flow.
+# Never include meeting URLs or passcodes in filenames or logs.
+ZOOM_DEBUG_ROOT = Path("/tmp/zoom-join-debug")
+ZOOM_DEBUG_STAGES = frozenset({
+    "launcher", "guest-form", "after-join", "form-retry", "signin", "failure",
+})
+
+
+async def _zoom_debug_snapshot(page, meeting_id: str | None, stage: str) -> None:
+    """Best-effort screenshot; diagnostics must never interrupt admission."""
+    if config.APP_ENV != "staging" or not meeting_id or stage not in ZOOM_DEBUG_STAGES:
+        return
+    try:
+        safe_id = str(uuid.UUID(meeting_id))
+        if safe_id != meeting_id:
+            return
+        # Frames cannot be screenshotted directly; capture their owning tab.
+        image = await asyncio.wait_for(
+            page.screenshot(full_page=False, timeout=4_000), timeout=5,
+        )
+        if len(image) > 2_000_000:
+            logger.warning("Zoom diagnostic screenshot too large: %s", stage)
+            return
+        folder = ZOOM_DEBUG_ROOT / safe_id
+        await asyncio.wait_for(
+            asyncio.to_thread(folder.mkdir, parents=True, exist_ok=True), timeout=3,
+        )
+        await asyncio.wait_for(
+            asyncio.to_thread((folder / f"{stage}.png").write_bytes, image), timeout=3,
+        )
+        logger.info("Zoom diagnostic screenshot saved: meeting=%s stage=%s", safe_id[:8], stage)
+    except Exception as exc:
+        logger.warning("Zoom diagnostic screenshot failed: stage=%s reason=%s", stage, type(exc).__name__)
 
 # In-memory registry of active recordings: meeting_id -> task
 _active: dict[str, asyncio.Task] = {}
@@ -747,6 +782,7 @@ async def _record_pipeline(meeting_id: str) -> None:
             lambda: _join_meeting(
                 page,
                 url,
+                meeting_id=meeting_id,
                 scheduled_start=meeting.get("start_time"),
             ),
             "вход во встречу",
@@ -1447,7 +1483,9 @@ async def _zoom_participant_count(page) -> int | None:
     return None
 
 
-async def _join_zoom_meeting(page, url: str) -> tuple[set[str], object]:
+async def _join_zoom_meeting(
+    page, url: str, *, meeting_id: str | None = None,
+) -> tuple[set[str], object]:
     """Join Zoom's browser client as a guest; never claim recording in its lobby."""
     # Follow Zoom's documented guest route from the invitation.  The launch
     # page supplies current web-client tokens and may wrap the form in an iframe.
@@ -1456,6 +1494,7 @@ async def _join_zoom_meeting(page, url: str) -> tuple[set[str], object]:
         "#onetrust-accept-btn-handler", "button:has-text('Accept Cookies')",
         "button:has-text('Принять')",
     ))
+    await _zoom_debug_snapshot(page, meeting_id, "launcher")
     name_selectors = (
         "#input-for-name", "input[placeholder*='name' i]",
         "input[placeholder*='имя' i]",
@@ -1524,6 +1563,7 @@ async def _join_zoom_meeting(page, url: str) -> tuple[set[str], object]:
             last_entry_log = now
         await page.wait_for_timeout(1_000)
     if name_field is None:
+        await _zoom_debug_snapshot(page, meeting_id, "failure")
         detail = await _zoom_missing_guest_form_detail(page)
         logger.warning(
             "Zoom guest form missing: route=%s browser_clicks=%d popup_seen=%s direct_fallback=%s detail=%s",
@@ -1532,13 +1572,18 @@ async def _join_zoom_meeting(page, url: str) -> tuple[set[str], object]:
         raise RuntimeError(f"Zoom: {detail}")
     await _zoom_dismiss_prejoin_prompts(join_surface)
     if await _zoom_media_prompt_visible(join_surface):
+        await _zoom_debug_snapshot(_zoom_owner_page(page, join_surface), meeting_id, "failure")
         raise RuntimeError("Zoom: не удалось закрыть окна выбора микрофона и камеры")
     await name_field.fill("Protocaller")
     await _zoom_dismiss_prejoin_prompts(join_surface)
     if await _zoom_media_prompt_visible(join_surface):
+        await _zoom_debug_snapshot(_zoom_owner_page(page, join_surface), meeting_id, "failure")
         raise RuntimeError("Zoom: окно выбора микрофона и камеры перекрыло кнопку входа")
+    await _zoom_debug_snapshot(_zoom_owner_page(page, join_surface), meeting_id, "guest-form")
     if not await _zoom_click_visible(join_surface, _ZOOM_GUEST_JOIN_SELECTORS):
+        await _zoom_debug_snapshot(_zoom_owner_page(page, join_surface), meeting_id, "failure")
         raise RuntimeError("Zoom: не найдена кнопка входа")
+    await _zoom_debug_snapshot(_zoom_owner_page(page, join_surface), meeting_id, "after-join")
 
     # Give the organizer time to admit the named guest from the waiting room.
     # A Zoom sign-in banner alone is not proof that the host disabled guest
@@ -1551,7 +1596,13 @@ async def _join_zoom_meeting(page, url: str) -> tuple[set[str], object]:
     while time.monotonic() < deadline:
         for surface in _zoom_join_surfaces(page):
             await _zoom_dismiss_prejoin_prompts(surface)
-        if _zoom_on_signin_page(page) or _zoom_on_signin_page(join_surface):
+        signin_surface = next(
+            (surface for surface in (page, join_surface, *_zoom_join_surfaces(page))
+             if _zoom_on_signin_page(surface)),
+            None,
+        )
+        if signin_surface is not None:
+            await _zoom_debug_snapshot(_zoom_owner_page(page, signin_surface), meeting_id, "signin")
             raise RuntimeError("Zoom: после гостевой формы браузер перенаправлен на страницу входа в аккаунт")
         probes += 1
         if probes == 1 or probes % 10 == 0:
@@ -1601,6 +1652,7 @@ async def _join_zoom_meeting(page, url: str) -> tuple[set[str], object]:
         if form_visible:
             now = time.monotonic()
             if now >= form_deadline:
+                await _zoom_debug_snapshot(_zoom_owner_page(page, join_surface), meeting_id, "failure")
                 detail = await _zoom_join_failure_detail(join_surface, name_field)
                 raise RuntimeError(f"Zoom: {detail}")
             if form_retries < 2 and now >= next_form_retry:
@@ -1610,9 +1662,11 @@ async def _join_zoom_meeting(page, url: str) -> tuple[set[str], object]:
                 if detail == "форма ввода имени осталась открытой после нажатия «Войти»":
                     form_retries += 1
                     submitted = await _zoom_retry_guest_form(join_surface, name_field, form_retries)
+                    await _zoom_debug_snapshot(_zoom_owner_page(page, join_surface), meeting_id, "form-retry")
                     logger.info("Zoom guest form retry %d submitted=%s", form_retries, submitted)
                     next_form_retry = now + 10
         await page.wait_for_timeout(2_000)
+    await _zoom_debug_snapshot(_zoom_owner_page(page, join_surface), meeting_id, "failure")
     detail = await _zoom_join_failure_detail(join_surface, name_field)
     logger.warning("Zoom guest admission not confirmed after 240s: %s", detail)
     raise RuntimeError(f"Zoom: {detail}")
@@ -1969,10 +2023,11 @@ async def _join_meeting(
     page,
     url: str,
     *,
+    meeting_id: str | None = None,
     scheduled_start: datetime | None = None,
 ) -> set[str]:
     if _meeting_service(url) == "zoom":
-        return await _join_zoom_meeting(page, url)
+        return await _join_zoom_meeting(page, url, meeting_id=meeting_id)
 
     debug_dir = Path("/tmp/recorder-debug")
     debug_dir.mkdir(exist_ok=True)

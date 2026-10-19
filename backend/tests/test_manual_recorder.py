@@ -161,7 +161,7 @@ def test_zoom_uses_its_own_join_flow(monkeypatch):
     join = AsyncMock(return_value=(set(), page))
     monkeypatch.setattr(recorder, "_join_zoom_meeting", join)
     assert asyncio.run(recorder._join_meeting(page, ZOOM_URL)) == (set(), page)
-    join.assert_awaited_once_with(page, ZOOM_URL)
+    join.assert_awaited_once_with(page, ZOOM_URL, meeting_id=None)
 
 
 def test_zoom_guest_flow_preserves_passcode_and_confirms_admission(monkeypatch):
