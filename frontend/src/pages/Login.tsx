@@ -9,10 +9,13 @@ export default function Login() {
   const [gitlabEnabled, setGitlabEnabled] = useState(false)
   const [gitlabDirectLogin, setGitlabDirectLogin] = useState(false)
   const [gitlabAllUsers, setGitlabAllUsers] = useState(false)
+  const query = new URLSearchParams(window.location.search)
+  const error = query.get('error')
+  const invited = query.get('invite') === '1'
 
   useEffect(() => {
-    if (!loading && user) navigate('/', { replace: true })
-  }, [user, loading, navigate])
+    if (!loading && user && !invited) navigate('/', { replace: true })
+  }, [user, loading, navigate, invited])
 
   useEffect(() => {
     api.auth.gitlabStatus().then(status => {
@@ -21,8 +24,6 @@ export default function Login() {
       setGitlabAllUsers(status.all_users)
     }).catch(() => {})
   }, [])
-
-  const error = new URLSearchParams(window.location.search).get('error')
 
   return (
     <div style={{
@@ -66,6 +67,12 @@ export default function Login() {
           Записи встреч и протоколы команды
         </p>
 
+        {invited && (
+          <p style={{ fontSize: 'var(--font-size-sm)', marginBottom: 'var(--space-6)' }}>
+            Вы получили приглашение. Выберите вход через GitLab с адресом, на который пришло письмо.
+          </p>
+        )}
+
         {error && (
           <div style={{
             background: 'var(--color-error-bg)',
@@ -75,9 +82,10 @@ export default function Login() {
             fontSize: 'var(--font-size-sm)',
             marginBottom: 'var(--space-6)',
           }}>
-            {error === 'domain_not_allowed' && 'Доступ только для аккаунтов @sifox.com или по приглашению'}
+            {error === 'domain_not_allowed' && 'Для входа через GitLab нужен подтверждённый адрес @sifox.com или @sifox.ru. Вход через Google также доступен по приглашению.'}
             {error === 'invite_invalid' && 'Ссылка приглашения недействительна или истекла'}
             {error === 'invite_used' && 'Это приглашение уже было использовано'}
+            {error === 'invite_email_mismatch' && 'Адрес выбранного аккаунта GitLab не совпадает с адресом приглашения. Выберите другой аккаунт.'}
             {error === 'oauth_failed' && 'Ошибка авторизации Google. Попробуйте ещё раз.'}
             {error === 'email_unverified' && 'Google не подтвердил адрес этого аккаунта. Выберите другой аккаунт или обратитесь к администратору.'}
             {error === 'account_conflict' && 'Этот адрес уже связан с другой учётной записью Google. Обратитесь к администратору.'}
@@ -89,7 +97,7 @@ export default function Login() {
             {error === 'gitlab_not_linked' && 'Сначала свяжите GitLab с вашей учётной записью Sifox после входа через Google.'}
             {error === 'gitlab_pilot_mismatch' && 'Эта учётная запись GitLab не входит в пилот. Проверьте выбранный аккаунт.'}
             {error === 'gitlab_pilot_id_mismatch' && 'GitLab вернул другой User ID. Проверьте выбранный аккаунт и значение GITLAB_PILOT_SUB в staging.'}
-            {error === 'gitlab_identity_unverified' && 'Email GitLab не подтверждён или не совпадает с адресом пилотной учётной записи. Проверьте выбранный аккаунт.'}
+            {error === 'gitlab_identity_unverified' && 'GitLab не передал подтверждённый email. Проверьте выбранный аккаунт и настройку Public email в профиле GitLab.'}
             {error === 'gitlab_account_conflict' && 'Этот GitLab-аккаунт связан с другим адресом Sifox или адрес уже занят. Обратитесь к администратору.'}
             {error === 'gitlab_pilot_access_denied' && 'Не удалось подтвердить доступ пилотной учётной записи GitLab. Обратитесь к администратору тестовой среды.'}
           </div>
@@ -120,7 +128,7 @@ export default function Login() {
           color: 'var(--color-text-muted)',
         }}>
           Google — для сотрудников sifox.com. {gitlabAllUsers
-            ? 'GitLab — для сотрудников с подтверждённым адресом sifox.com или sifox.ru.'
+            ? 'GitLab — для сотрудников с подтверждённым адресом sifox.com или sifox.ru. В тестовой среде используйте только тестовые встречи и данные.'
             : <>GitLab пока доступен только в пилоте{gitlabDirectLogin ? ' для одной учётной записи.' : ' для привязанной учётной записи.'}</>}
           {!gitlabEnabled && ' Вход через GitLab ещё не настроен на сервере.'}
         </p>

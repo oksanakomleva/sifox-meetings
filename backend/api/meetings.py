@@ -361,6 +361,10 @@ async def send_protocol(meeting_id: str, body: SendProtocolRequest, user: Curren
     """E-mail the (edited) protocol to the given recipients from the current
     user's own mailbox via personal OAuth (gmail.send)."""
     from services import gmail_send
+    from config import config
+
+    if config.APP_ENV == "staging":
+        raise HTTPException(403, "В staging отправка протоколов отключена")
 
     meeting = await _get_accessible_meeting(meeting_id, user)
 

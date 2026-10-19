@@ -11,9 +11,9 @@ CREATE TABLE IF NOT EXISTS users (
     last_login  TIMESTAMP
 );
 
--- Additional sign-in identities point to one Sifox user. Staging's restricted
--- GitLab pilot may create that user on first login, or reuse their existing
--- email-matched user so meetings and permissions stay on the same account.
+-- Additional sign-in identities point to one Sifox user. Verified-email
+-- GitLab login can create a user or reuse an exact email-matched Google user
+-- so meetings and permissions stay on the same account.
 CREATE TABLE IF NOT EXISTS auth_identities (
     provider   TEXT NOT NULL,
     subject    TEXT NOT NULL,

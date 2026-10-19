@@ -17,6 +17,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 def _require_external_connections_enabled(purpose: str = "") -> None:
     if config.APP_ENV == "staging" and not (
         purpose == "calendar" and config.STAGING_CALENDAR_TEST_EMAIL.strip()
+        or purpose == "gmail_send" and config.STAGING_INVITE_SENDER_EMAIL.strip()
     ):
         raise HTTPException(403, "В тестовой среде внешние подключения отключены")
 
@@ -31,8 +32,8 @@ async def login():
 @router.get("/invite/{token}")
 async def accept_invite(token: str):
     """
-    User clicks invitation link → validates token, sets cookie, redirects to Google login.
-    After OAuth the callback reads the cookie and bypasses the domain check for invited emails.
+    Validate the emailed link and keep its token for the selected OAuth flow.
+    When GitLab's verified-email flow is on, show both sign-in choices.
     """
     invitation = await models.get_invitation_by_token(token)
     if not invitation:
@@ -40,8 +41,12 @@ async def accept_invite(token: str):
     if invitation.get("accepted_at"):
         return RedirectResponse(f"{config.BASE_URL}/login?error=invite_used")
 
-    # Set short-lived invite_token cookie, then redirect to Google OAuth
-    login_url = google_oauth.get_login_url()
+    from api.gitlab_auth import _all_users_enabled
+
+    login_url = (
+        f"{config.BASE_URL}/login?invite=1"
+        if _all_users_enabled() else google_oauth.get_login_url()
+    )
     redirect = RedirectResponse(login_url)
     redirect.set_cookie(
         key="invite_token",
@@ -222,6 +227,16 @@ async def _process_callback(
     elif result["purpose"] == "gmail_send":
         # ── Personal gmail.send connect (for emailing protocols) ──────────
         user_id = result["existing_user_id"]
+        if config.APP_ENV == "staging":
+            session = await models.get_session(session_token) if session_token else None
+            sender = config.STAGING_INVITE_SENDER_EMAIL.strip().lower()
+            if (not session or not session.get("is_active", True)
+                    or not session.get("is_admin") or session.get("is_preview")
+                    or session["user_id"] != user_id
+                    or session["email"].lower() != sender
+                    or (user_info.get("email") or "").strip().lower() != sender
+                    or user_info.get("email_verified") is not True):
+                raise HTTPException(403, "Тестовая отправка доступна только разрешённому администратору")
         tokens = result["tokens"]
         await models.save_gmail_send_token(
             user_id,
@@ -341,12 +356,17 @@ async def connect_gmail_send(
 ):
     """Start personal OAuth consent for gmail.send (to e-mail meeting protocols).
     `next` is the relative path to return to after consent (e.g. /meetings/{id})."""
-    _require_external_connections_enabled()
+    _require_external_connections_enabled("gmail_send")
     if not session_token:
         raise HTTPException(401, "Not authenticated")
     session = await models.get_session(session_token)
-    if not session:
+    if not session or not session.get("is_active", True) or session.get("is_preview"):
         raise HTTPException(401, "Session expired")
+    if config.APP_ENV == "staging" and (
+        not session.get("is_admin")
+        or session["email"].lower() != config.STAGING_INVITE_SENDER_EMAIL.strip().lower()
+    ):
+        raise HTTPException(403, "Тестовая отправка доступна только разрешённому администратору")
     safe_next = next if next.startswith("/") else "/"
     url = google_oauth.get_gmail_send_url(
         session["user_id"],

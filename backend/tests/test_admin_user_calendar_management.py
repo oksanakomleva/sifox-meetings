@@ -44,6 +44,9 @@ def test_invitation_needs_sender_before_creating_row(monkeypatch):
 
 
 def test_ru_invitation_does_not_promise_unavailable_gitlab_login(monkeypatch):
+    from config import config
+    monkeypatch.setattr(config, "APP_ENV", "production")
+    monkeypatch.setattr(config, "GITLAB_ALL_USERS_ENABLED", False)
     create = AsyncMock()
     monkeypatch.setattr(admin.models, "create_invitation", create, raising=False)
     with pytest.raises(HTTPException) as exc:
@@ -91,6 +94,52 @@ def test_invitation_email_contains_clickable_safe_link(monkeypatch):
     html_body, text_body = sender.await_args.args[-2:]
     assert 'href="https://example.com/api/auth/invite/a&quot;b"' in html_body
     assert url in text_body
+
+
+def test_staging_invitation_to_ru_uses_gitlab_and_allowed_sender(monkeypatch):
+    from config import config
+    monkeypatch.setattr(config, "APP_ENV", "staging")
+    monkeypatch.setattr(config, "GITLAB_STAGING_ALL_USERS_ENABLED", True)
+    monkeypatch.setattr(config, "STAGING_INVITE_SENDER_EMAIL", "admin@sifox.com")
+    monkeypatch.setattr(admin.models, "get_user_by_email", AsyncMock(return_value=None), raising=False)
+    monkeypatch.setattr(admin.models, "get_gmail_send_token",
+                        AsyncMock(return_value={"access_token": "encrypted"}), raising=False)
+    monkeypatch.setattr(admin.models, "get_pending_invitation", AsyncMock(return_value=None), raising=False)
+    monkeypatch.setattr(admin.models, "create_invitation",
+                        AsyncMock(return_value=_invite("new@sifox.ru")), raising=False)
+    monkeypatch.setattr(admin.models, "mark_invitation_delivery", AsyncMock(), raising=False)
+    from services import gmail_send
+    send = AsyncMock(return_value={"ok": True})
+    monkeypatch.setattr(gmail_send, "send_invitation_email", send)
+    result = asyncio.run(admin.create_invitation(admin.InviteRequest(email="new@sifox.ru"), ADMIN))
+    assert result["ok"] is True
+    assert send.await_args.kwargs["gitlab_available"] is True
+    assert send.await_args.args[3] == "new@sifox.ru"
+
+
+def test_staging_invitation_rejects_other_sender_and_external_email(monkeypatch):
+    from config import config
+    monkeypatch.setattr(config, "APP_ENV", "staging")
+    monkeypatch.setattr(config, "STAGING_INVITE_SENDER_EMAIL", "admin@sifox.com")
+    for recipient, sender in (("new@sifox.ru", "other@sifox.com"),
+                              ("new@example.com", "admin@sifox.com")):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(admin.create_invitation(admin.InviteRequest(email=recipient),
+                                                {**ADMIN, "email": sender}))
+        assert exc.value.status_code == 403
+
+
+def test_gitlab_invitation_mail_explains_the_right_login(monkeypatch):
+    from services import gmail_send
+    sender = AsyncMock(return_value={"ok": True})
+    monkeypatch.setattr(gmail_send, "_send_email", sender)
+    asyncio.run(gmail_send.send_invitation_email(
+        7, {}, "admin@sifox.com", "new@sifox.ru", "https://stage.example/invite",
+        gitlab_available=True,
+    ))
+    html_body, text_body = sender.await_args.args[-2:]
+    assert "Войдите через GitLab" in html_body
+    assert "Войдите через GitLab" in text_body
 
 
 def test_in_domain_invitation_is_accepted_after_google_login(monkeypatch):

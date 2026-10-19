@@ -17,6 +17,9 @@ class Config(BaseSettings):
     # staging; when set, only the pilot user may connect this exact Google
     # calendar account. Use a dedicated test calendar, never a work calendar.
     STAGING_CALENDAR_TEST_EMAIL: str = ""
+    # Explicitly allow one staging admin mailbox to send invitation e-mails.
+    # Empty keeps Gmail consent and outbound invitations disabled in staging.
+    STAGING_INVITE_SENDER_EMAIL: str = ""
 
     # ── Database ──────────────────────────────────────────────────────────
     DATABASE_URL: str                        # postgresql://...
@@ -31,6 +34,9 @@ class Config(BaseSettings):
     # Rollout switch for verified-email GitLab sign-in on both Sifox domains.
     # Keep off until the company OAuth app and staging checks are approved.
     GITLAB_ALL_USERS_ENABLED: bool = False
+    # Exercise the same verified-email flow in the isolated staging environment
+    # without enabling the production rollout switch.
+    GITLAB_STAGING_ALL_USERS_ENABLED: bool = False
     GITLAB_ISSUER: str = "https://gitlab.sifox.ru"
     GITLAB_CLIENT_ID: str = ""
     GITLAB_CLIENT_SECRET: str = ""

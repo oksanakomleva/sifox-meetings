@@ -23,6 +23,7 @@ def _settings(**overrides):
         "MEGAFON_ENABLED": False,
         "GITLAB_PILOT_ENABLED": False,
         "GITLAB_ALL_USERS_ENABLED": False,
+        "GITLAB_STAGING_ALL_USERS_ENABLED": False,
         "GITLAB_CLIENT_ID": "",
         "GITLAB_CLIENT_SECRET": "",
         "GITLAB_ISSUER": "https://gitlab.sifox.ru",
@@ -31,6 +32,7 @@ def _settings(**overrides):
         "GITLAB_PILOT_SUB": "",
         "ADMIN_EMAILS": "oksana.komleva@sifox.com",
         "STAGING_ALLOWED_EMAILS": "",
+        "STAGING_INVITE_SENDER_EMAIL": "",
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -47,7 +49,7 @@ def test_staging_uses_its_own_private_db_and_audio_volume():
     ({"MM_TOKEN": "copied-token"}, "external integrations"),
     ({"GOOGLE_SERVICE_ACCOUNT_JSON": "copied-key"}, "external integrations"),
     ({"ALERTS_ENABLED": True}, "external integrations"),
-    ({"GITLAB_ALL_USERS_ENABLED": True}, "All-user GitLab rollout"),
+    ({"GITLAB_ALL_USERS_ENABLED": True}, "Production GitLab rollout switch"),
 ])
 def test_staging_rejects_unsafe_configuration(changes, reason):
     with pytest.raises(RuntimeError, match=reason):
@@ -66,6 +68,40 @@ def test_staging_flag_cannot_run_in_production_environment():
 
 def test_production_configuration_keeps_existing_behavior():
     validate_runtime(_settings(APP_ENV="production"), railway_environment="production")
+
+
+def test_staging_gitlab_all_users_requires_its_own_credentials():
+    with pytest.raises(RuntimeError, match="OAuth client credentials"):
+        validate_runtime(_settings(GITLAB_STAGING_ALL_USERS_ENABLED=True),
+                         railway_environment="staging", volume_mount="/audio")
+    validate_runtime(_settings(
+        GITLAB_STAGING_ALL_USERS_ENABLED=True,
+        GITLAB_CLIENT_ID="company-staging-client",
+        GITLAB_CLIENT_SECRET="company-staging-secret",
+    ), railway_environment="staging", volume_mount="/audio")
+
+
+def test_staging_rollout_switch_cannot_be_used_in_production():
+    with pytest.raises(RuntimeError, match="cannot run in production"):
+        validate_runtime(_settings(APP_ENV="production", GITLAB_STAGING_ALL_USERS_ENABLED=True),
+                         railway_environment="production")
+
+
+def test_staging_invite_sender_must_be_admin_and_use_gitlab_rollout():
+    with pytest.raises(RuntimeError, match="verified-email GitLab login"):
+        validate_runtime(_settings(STAGING_INVITE_SENDER_EMAIL="oksana.komleva@sifox.com"),
+                         railway_environment="staging", volume_mount="/audio")
+    with pytest.raises(RuntimeError, match="Sifox Google admin"):
+        validate_runtime(_settings(
+            GITLAB_STAGING_ALL_USERS_ENABLED=True,
+            GITLAB_CLIENT_ID="client", GITLAB_CLIENT_SECRET="secret",
+            STAGING_INVITE_SENDER_EMAIL="other@sifox.com",
+        ), railway_environment="staging", volume_mount="/audio")
+    validate_runtime(_settings(
+        GITLAB_STAGING_ALL_USERS_ENABLED=True,
+        GITLAB_CLIENT_ID="client", GITLAB_CLIENT_SECRET="secret",
+        STAGING_INVITE_SENDER_EMAIL="oksana.komleva@sifox.com",
+    ), railway_environment="staging", volume_mount="/audio")
 
 
 def test_staging_allows_gitlab_pilot_for_named_tester_with_credentials():
@@ -125,12 +161,33 @@ def test_staging_google_login_allows_named_tester(monkeypatch):
 def test_staging_cannot_connect_real_calendar_or_mail(monkeypatch):
     from api import auth
     monkeypatch.setattr(auth.config, "APP_ENV", "staging")
+    monkeypatch.setattr(auth.config, "STAGING_INVITE_SENDER_EMAIL", "")
     for connect in (auth.connect_calendar, auth.connect_calendar_write, auth.connect_gmail_send):
         with pytest.raises(HTTPException) as error:
             asyncio.run(connect(session_token="session"))
         assert error.value.status_code == 403
     with pytest.raises(HTTPException) as error:
         asyncio.run(auth._process_callback({"purpose": "calendar"}, None))
+    assert error.value.status_code == 403
+
+
+def test_staging_invitation_mail_consent_is_limited_to_named_admin(monkeypatch):
+    from api import auth
+    monkeypatch.setattr(auth.config, "APP_ENV", "staging")
+    monkeypatch.setattr(auth.config, "STAGING_INVITE_SENDER_EMAIL", "admin@sifox.com")
+    monkeypatch.setattr(auth.models, "get_session", AsyncMock(return_value={
+        "user_id": 7, "email": "admin@sifox.com", "is_admin": True,
+        "is_active": True, "is_preview": False, "google_id": "google-admin",
+    }), raising=False)
+    monkeypatch.setattr(auth.google_oauth, "get_gmail_send_url", lambda *args, **kwargs: "https://google.example/consent")
+    result = asyncio.run(auth.connect_gmail_send(session_token="admin-session"))
+    assert result.headers["location"] == "https://google.example/consent"
+    monkeypatch.setattr(auth.models, "get_session", AsyncMock(return_value={
+        "user_id": 8, "email": "other@sifox.com", "is_admin": True,
+        "is_active": True, "is_preview": False,
+    }), raising=False)
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(auth.connect_gmail_send(session_token="other-session"))
     assert error.value.status_code == 403
 
 

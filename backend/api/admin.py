@@ -447,11 +447,18 @@ async def list_invitations(admin: AdminUser):
 @router.post("/invitations")
 async def create_invitation(req: InviteRequest, admin: RealAdminUser):
     from config import config as app_config
+    from api.gitlab_auth import _all_users_enabled
     from services import gmail_send
     email = req.email.strip().lower()
     if len(email) > 254 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
         raise HTTPException(400, "Некорректный email")
-    if email.endswith("@sifox.ru"):
+    if app_config.APP_ENV == "staging":
+        if admin["email"].lower() != app_config.STAGING_INVITE_SENDER_EMAIL.strip().lower():
+            raise HTTPException(403, "Отправка приглашений в staging не настроена для этого аккаунта")
+        if email.rsplit("@", 1)[-1] not in {"sifox.com", "sifox.ru"}:
+            raise HTTPException(403, "Из staging приглашения разрешены только на адреса Sifox")
+    gitlab_available = _all_users_enabled()
+    if email.endswith("@sifox.ru") and not gitlab_available:
         raise HTTPException(409, "Для sifox.ru пока не включён вход через GitLab. Приглашение не отправлено")
     if await models.get_user_by_email(email):
         raise HTTPException(409, "Пользователь с таким email уже есть в системе")
@@ -464,6 +471,7 @@ async def create_invitation(req: InviteRequest, admin: RealAdminUser):
     invite_url = f"{app_config.BASE_URL}/api/auth/invite/{invitation['token']}"
     result = await gmail_send.send_invitation_email(
         admin["user_id"], sender_token, admin["email"], email, invite_url,
+        gitlab_available=gitlab_available,
     )
     if not result["ok"]:
         await models.mark_invitation_delivery(invitation["id"], "Не удалось отправить письмо")

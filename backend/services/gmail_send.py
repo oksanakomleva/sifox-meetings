@@ -149,25 +149,34 @@ async def send_protocol_email(
 
 async def send_invitation_email(
     user_id: int, token_row: dict, sender: str, recipient: str, invite_url: str,
+    *, gitlab_available: bool = False,
 ) -> dict:
     """Send a clickable invitation with both HTML and plain-text alternatives."""
     safe_url = _html.escape(invite_url, quote=True)
+    if gitlab_available and recipient.lower().endswith("@sifox.ru"):
+        login_hint = "Войдите через GitLab с той же почтой, на которую пришло письмо."
+    elif gitlab_available and recipient.lower().endswith("@sifox.com"):
+        login_hint = "Войдите через GitLab или Google с той же почтой, на которую пришло письмо."
+    else:
+        login_hint = "Войдите через Google с той же почтой, на которую пришло письмо."
+    staging_notice = "Это тестовая среда Sifox; не используйте её для рабочих встреч. " if config.APP_ENV == "staging" else ""
     html_body = (
         '<div style="font-family:Arial,sans-serif;font-size:15px;line-height:1.5">'
         '<p>Вас пригласили в Sifox — сервис протоколов встреч.</p>'
         f'<p><a href="{safe_url}">Принять приглашение</a></p>'
-        '<p>Войдите через Google с той же почтой, на которую пришло письмо. '
+        f'<p>{staging_notice}{login_hint} '
         'Ссылка действует 7 дней. Если вы не ожидали приглашения, игнорируйте письмо.</p>'
         '</div>'
     )
     text_body = (
         "Вас пригласили в Sifox — сервис протоколов встреч.\n\n"
         f"Чтобы войти, откройте ссылку: {invite_url}\n\n"
-        "Войдите через Google с той же почтой, на которую пришло письмо. "
+        f"{staging_notice}{login_hint} "
         "Ссылка действует 7 дней. Если вы не ожидали приглашения, игнорируйте письмо."
     )
     return await _send_email(
-        user_id, token_row, sender, [recipient], "Приглашение в Sifox",
+        user_id, token_row, sender, [recipient],
+        "Тестовое приглашение в Sifox" if config.APP_ENV == "staging" else "Приглашение в Sifox",
         html_body, text_body,
     )
 

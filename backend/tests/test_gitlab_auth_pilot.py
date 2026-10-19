@@ -25,10 +25,15 @@ class FakeClient:
         return {"userinfo": self.userinfo}
 
 
-def _request(session=None, cookie=None):
+def _request(session=None, cookie=None, invite_token=None):
     headers = []
+    cookies = []
     if cookie:
-        headers.append((b"cookie", f"session={cookie}".encode()))
+        cookies.append(f"session={cookie}")
+    if invite_token:
+        cookies.append(f"invite_token={invite_token}")
+    if cookies:
+        headers.append((b"cookie", "; ".join(cookies).encode()))
     return Request({
         "type": "http",
         "method": "GET",
@@ -396,3 +401,115 @@ def test_all_user_mode_requires_verified_email_and_exact_linked_address(monkeypa
         _request(session={"gitlab_pilot": {"purpose": "login"}})
     ))
     assert "gitlab_account_conflict" in result.headers["location"]
+
+
+def test_staging_full_flow_registers_verified_ru_user_not_pinned_pilot(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "staging")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_PILOT_ENABLED", False)
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_STAGING_ALL_USERS_ENABLED", True)
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_PILOT_SUB", "220")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_CLIENT_ID", "company-client")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_CLIENT_SECRET", "company-secret")
+    monkeypatch.setattr(gitlab_auth, "_client", lambda: FakeClient({
+        "sub": "901", "email": "new@sifox.ru", "email_verified": True,
+    }))
+    monkeypatch.setattr(gitlab_auth.models, "get_user_by_auth_identity",
+                        AsyncMock(return_value=None), raising=False)
+    enroll = AsyncMock(return_value={"id": 91, "email": "new@sifox.ru"})
+    monkeypatch.setattr(gitlab_auth.models, "get_or_create_gitlab_pilot_user", enroll, raising=False)
+    monkeypatch.setattr(gitlab_auth.models, "create_session",
+                        AsyncMock(return_value="session-new"), raising=False)
+    assert asyncio.run(gitlab_auth.gitlab_status()) == {
+        "enabled": True, "direct_login": True, "all_users": True,
+        "can_link": False, "linked": False,
+    }
+    result = asyncio.run(gitlab_auth.gitlab_callback(
+        _request(session={"gitlab_pilot": {"purpose": "login"}})
+    ))
+    assert result.headers["location"].endswith("/")
+    assert "session=session-new" in result.headers["set-cookie"]
+    assert enroll.await_args.kwargs["email"] == "new@sifox.ru"
+
+
+def test_staging_full_flow_keeps_existing_google_user_id(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "staging")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_STAGING_ALL_USERS_ENABLED", True)
+    monkeypatch.setattr(gitlab_auth, "_client", lambda: FakeClient({
+        "sub": "220", "email": "person@sifox.com", "email_verified": True,
+    }))
+    lookup = AsyncMock(return_value={
+        "id": 42, "email": "person@sifox.com", "google_id": "google-42", "is_active": True,
+    })
+    enroll = AsyncMock()
+    monkeypatch.setattr(gitlab_auth.models, "get_user_by_auth_identity", lookup, raising=False)
+    monkeypatch.setattr(gitlab_auth.models, "get_or_create_gitlab_pilot_user", enroll, raising=False)
+    session = AsyncMock(return_value="session-existing")
+    monkeypatch.setattr(gitlab_auth.models, "create_session", session, raising=False)
+    result = asyncio.run(gitlab_auth.gitlab_callback(
+        _request(session={"gitlab_pilot": {"purpose": "login"}})
+    ))
+    assert result.headers["location"].endswith("/")
+    session.assert_awaited_once_with(42, gitlab_auth.config.SESSION_TTL_DAYS)
+    enroll.assert_not_awaited()
+
+
+def test_staging_full_flow_rejects_private_or_unverified_email(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "staging")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_STAGING_ALL_USERS_ENABLED", True)
+    lookup = AsyncMock()
+    monkeypatch.setattr(gitlab_auth.models, "get_user_by_auth_identity", lookup, raising=False)
+    for claim in (
+        {"sub": "901"},
+        {"sub": "901", "email": "new@sifox.com", "email_verified": False},
+    ):
+        monkeypatch.setattr(gitlab_auth, "_client", lambda claim=claim: FakeClient(claim))
+        result = asyncio.run(gitlab_auth.gitlab_callback(
+            _request(session={"gitlab_pilot": {"purpose": "login"}})
+        ))
+        assert "gitlab_identity_unverified" in result.headers["location"]
+    lookup.assert_not_awaited()
+
+
+def test_gitlab_invitation_requires_same_verified_email_then_marks_accepted(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "staging")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_STAGING_ALL_USERS_ENABLED", True)
+    monkeypatch.setattr(gitlab_auth, "_client", lambda: FakeClient({
+        "sub": "901", "email": "new@sifox.ru", "email_verified": True,
+    }))
+    invitation = {"email": "other@sifox.ru", "accepted_at": None}
+    monkeypatch.setattr(gitlab_auth.models, "get_invitation_by_token",
+                        AsyncMock(return_value=invitation), raising=False)
+    lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(gitlab_auth.models, "get_user_by_auth_identity", lookup, raising=False)
+    accept = AsyncMock()
+    monkeypatch.setattr(gitlab_auth.models, "accept_invitation", accept, raising=False)
+    result = asyncio.run(gitlab_auth.gitlab_callback(
+        _request(session={"gitlab_pilot": {"purpose": "login"}}, invite_token="invite-token")
+    ))
+    assert "invite_email_mismatch" in result.headers["location"]
+    lookup.assert_not_awaited()
+    accept.assert_not_awaited()
+
+    invitation["email"] = "new@sifox.ru"
+    monkeypatch.setattr(gitlab_auth.models, "get_or_create_gitlab_pilot_user",
+                        AsyncMock(return_value={"id": 91, "email": "new@sifox.ru"}), raising=False)
+    monkeypatch.setattr(gitlab_auth.models, "create_session",
+                        AsyncMock(return_value="session-new"), raising=False)
+    result = asyncio.run(gitlab_auth.gitlab_callback(
+        _request(session={"gitlab_pilot": {"purpose": "login"}}, invite_token="invite-token")
+    ))
+    assert result.headers["location"].endswith("/")
+    accept.assert_awaited_once_with("invite-token")
+    assert any("invite_token=" in value for value in result.headers.getlist("set-cookie"))
+
+
+def test_invitation_link_offers_gitlab_when_full_flow_is_enabled(monkeypatch):
+    from api import auth
+    monkeypatch.setattr(gitlab_auth.config, "APP_ENV", "staging")
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_STAGING_ALL_USERS_ENABLED", True)
+    monkeypatch.setattr(auth.models, "get_invitation_by_token", AsyncMock(return_value={
+        "email": "new@sifox.ru", "accepted_at": None,
+    }), raising=False)
+    result = asyncio.run(auth.accept_invite("invite-token"))
+    assert result.headers["location"].endswith("/login?invite=1")
+    assert "invite_token=invite-token" in result.headers["set-cookie"]

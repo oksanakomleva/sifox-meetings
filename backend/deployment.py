@@ -26,9 +26,11 @@ def validate_runtime(settings, *, railway_environment: str | None = None,
     if railway_environment == "staging" and settings.APP_ENV != "staging":
         raise RuntimeError("Railway staging must set APP_ENV=staging")
     if settings.APP_ENV != "staging":
+        if getattr(settings, "GITLAB_STAGING_ALL_USERS_ENABLED", False):
+            raise RuntimeError("Staging GitLab rollout switch cannot run in production")
         return
     if getattr(settings, "GITLAB_ALL_USERS_ENABLED", False):
-        raise RuntimeError("All-user GitLab rollout is forbidden in staging pilot")
+        raise RuntimeError("Production GitLab rollout switch is forbidden in staging")
     if railway_environment and railway_environment != "staging":
         raise RuntimeError("APP_ENV=staging requires the Railway staging environment")
     base = urlsplit(settings.BASE_URL)
@@ -48,7 +50,14 @@ def validate_runtime(settings, *, railway_environment: str | None = None,
                if getattr(settings, name, None)]
     if enabled:
         raise RuntimeError(f"Staging external integrations must be disabled: {', '.join(enabled)}")
-    if settings.GITLAB_PILOT_ENABLED:
+    invite_sender = (getattr(settings, "STAGING_INVITE_SENDER_EMAIL", "") or "").strip().lower()
+    if invite_sender:
+        if not getattr(settings, "GITLAB_STAGING_ALL_USERS_ENABLED", False):
+            raise RuntimeError("Staging invitation sender needs verified-email GitLab login")
+        admins = {email.strip().lower() for email in settings.ADMIN_EMAILS.split(",")}
+        if invite_sender not in admins or not invite_sender.endswith("@sifox.com"):
+            raise RuntimeError("Staging invitation sender must be a Sifox Google admin")
+    if settings.GITLAB_PILOT_ENABLED or getattr(settings, "GITLAB_STAGING_ALL_USERS_ENABLED", False):
         allowed = {
             address.strip().lower()
             for name in ("ADMIN_EMAILS", "STAGING_ALLOWED_EMAILS")
@@ -56,11 +65,12 @@ def validate_runtime(settings, *, railway_environment: str | None = None,
             if address.strip()
         }
         if not settings.GITLAB_CLIENT_ID or not settings.GITLAB_CLIENT_SECRET:
-            raise RuntimeError("Staging GitLab pilot needs its own OAuth client credentials")
+            raise RuntimeError("Staging GitLab needs its own OAuth client credentials")
         if settings.GITLAB_ISSUER.rstrip("/") != "https://gitlab.sifox.ru":
-            raise RuntimeError("Staging GitLab pilot must use the Sifox GitLab issuer")
-        if not settings.GITLAB_PILOT_USERNAME or settings.GITLAB_PILOT_EMAIL.lower() not in allowed:
-            raise RuntimeError("Staging GitLab pilot must be limited to an allowed tester")
-        pilot_sub = getattr(settings, "GITLAB_PILOT_SUB", "") or ""
-        if pilot_sub and not pilot_sub.isdecimal():
-            raise RuntimeError("Staging GitLab pilot subject must be a numeric GitLab user ID")
+            raise RuntimeError("Staging GitLab must use the Sifox GitLab issuer")
+        if settings.GITLAB_PILOT_ENABLED:
+            if not settings.GITLAB_PILOT_USERNAME or settings.GITLAB_PILOT_EMAIL.lower() not in allowed:
+                raise RuntimeError("Staging GitLab pilot must be limited to an allowed tester")
+            pilot_sub = getattr(settings, "GITLAB_PILOT_SUB", "") or ""
+            if pilot_sub and not pilot_sub.isdecimal():
+                raise RuntimeError("Staging GitLab pilot subject must be a numeric GitLab user ID")

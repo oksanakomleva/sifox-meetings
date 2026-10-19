@@ -1709,9 +1709,9 @@ async def get_or_create_gitlab_pilot_user(
     *, subject: str, email: str, name: str, avatar_url: str | None,
     is_admin_default: bool,
 ) -> dict[str, Any] | None:
-    """Atomically enroll the one approved GitLab identity in staging.
+    """Atomically enroll a verified GitLab identity or pinned staging pilot.
 
-    Reuse an existing user with the exact configured email, so their meetings
+    Reuse an existing user with the exact email, so their meetings
     and permissions remain intact. Never relink a different GitLab subject or
     reactivate a disabled account.
     """

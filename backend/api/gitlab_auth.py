@@ -1,4 +1,4 @@
-"""One-account GitLab OIDC pilot with isolated direct sign-in in staging."""
+"""GitLab OIDC sign-in: a pinned pilot or verified-email Sifox accounts."""
 import hashlib
 import hmac
 import logging
@@ -15,9 +15,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth/gitlab", tags=["auth"])
 
 
+def _all_users_enabled() -> bool:
+    return config.GITLAB_ALL_USERS_ENABLED or (
+        config.APP_ENV == "staging" and config.GITLAB_STAGING_ALL_USERS_ENABLED
+    )
+
+
 def _require_pilot() -> None:
     if not (
-        (config.GITLAB_PILOT_ENABLED or config.GITLAB_ALL_USERS_ENABLED)
+        (config.GITLAB_PILOT_ENABLED or _all_users_enabled())
         and config.GITLAB_CLIENT_ID
         and config.GITLAB_CLIENT_SECRET
     ):
@@ -65,14 +71,15 @@ async def gitlab_status(
 ):
     """Expose pilot availability without sending users to a disabled OAuth route."""
     enabled = bool(
-        (config.GITLAB_PILOT_ENABLED or config.GITLAB_ALL_USERS_ENABLED)
+        (config.GITLAB_PILOT_ENABLED or _all_users_enabled())
         and config.GITLAB_CLIENT_ID
         and config.GITLAB_CLIENT_SECRET
     )
-    direct_login = enabled and (config.APP_ENV == "staging" or config.GITLAB_ALL_USERS_ENABLED)
+    all_users = enabled and _all_users_enabled()
+    direct_login = enabled and (config.APP_ENV == "staging" or all_users)
     if not enabled or not session_token:
         return {"enabled": enabled, "direct_login": direct_login,
-                "all_users": enabled and config.GITLAB_ALL_USERS_ENABLED,
+                "all_users": all_users,
                 "can_link": False, "linked": False}
     session = await models.get_session(session_token)
     can_link = bool(
@@ -89,7 +96,7 @@ async def gitlab_status(
         and await models.has_auth_identity(session["user_id"], "gitlab")
     )
     return {"enabled": enabled, "direct_login": direct_login,
-            "all_users": enabled and config.GITLAB_ALL_USERS_ENABLED,
+            "all_users": all_users,
             "can_link": can_link and not linked, "linked": linked}
 
 
@@ -100,7 +107,7 @@ async def link_gitlab(
 ):
     """Start linking while already signed in with the pilot's Google account."""
     client = _client()
-    if config.GITLAB_ALL_USERS_ENABLED:
+    if _all_users_enabled():
         raise HTTPException(404, "Direct GitLab sign-in does not need manual linking")
     if request.cookies.get("preview"):
         raise HTTPException(403, "Exit user preview before linking GitLab")
@@ -125,7 +132,7 @@ async def link_gitlab(
 
 @router.get("/login")
 async def login_gitlab(request: Request):
-    """Start GitLab OIDC login; staging can enroll its one approved tester."""
+    """Start GitLab OIDC login with server-side state and PKCE."""
     client = _client()
     request.session["gitlab_pilot"] = {"purpose": "login"}
     return await client.authorize_redirect(
@@ -135,6 +142,7 @@ async def login_gitlab(request: Request):
 
 async def _finish_login(
     request: Request, user: dict, *, userinfo: dict | None = None,
+    invite_token: str | None = None,
 ) -> RedirectResponse:
     session_token = await models.create_session(user["id"], config.SESSION_TTL_DAYS)
     request.session.clear()
@@ -158,6 +166,8 @@ async def _finish_login(
         secure=config.BASE_URL.startswith("https"),
         max_age=config.SESSION_TTL_DAYS * 86400, path="/",
     )
+    if invite_token:
+        response.delete_cookie("invite_token", path="/")
     return response
 
 
@@ -210,6 +220,15 @@ async def _verified_email_login(request: Request, userinfo: dict, subject: str) 
     if (email.count("@") != 1 or not email.split("@", 1)[0]
             or email.rsplit("@", 1)[-1] not in {"sifox.com", "sifox.ru"}):
         return _error("domain_not_allowed")
+    invite_token = request.cookies.get("invite_token")
+    if invite_token:
+        invitation = await models.get_invitation_by_token(invite_token)
+        if not invitation:
+            return _error("invite_invalid")
+        if invitation.get("accepted_at"):
+            return _error("invite_used")
+        if invitation["email"].lower() != email:
+            return _error("invite_email_mismatch")
     user = await models.get_user_by_auth_identity("gitlab", subject)
     if user:
         if not user.get("is_active", True) or user["email"].lower() != email:
@@ -225,7 +244,9 @@ async def _verified_email_login(request: Request, userinfo: dict, subject: str) 
         )
         if not user:
             return _error("gitlab_account_conflict")
-    return await _finish_login(request, user)
+    if invite_token:
+        await models.accept_invitation(invite_token)
+    return await _finish_login(request, user, invite_token=invite_token)
 
 
 @router.get("/email-check")
@@ -296,10 +317,10 @@ async def gitlab_callback(request: Request):
 
     if pilot.get("purpose") != "login":
         return _error("gitlab_failed")
+    if _all_users_enabled():
+        return await _verified_email_login(request, userinfo, subject)
     if config.APP_ENV == "staging":
         return await _staging_direct_login(request, userinfo, subject)
-    if config.GITLAB_ALL_USERS_ENABLED:
-        return await _verified_email_login(request, userinfo, subject)
 
     user = await models.get_user_by_auth_identity("gitlab", subject)
     if (
