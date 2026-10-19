@@ -1264,35 +1264,68 @@ async def _zoom_dismiss_cookie_banner(page) -> bool:
     Only click a close control inside a small banner containing Zoom's cookie
     text, never a generic close button elsewhere on the page.
     """
+    marker = "data-sifox-zoom-cookie-close"
     try:
-        dismissed = await page.evaluate(r"""() => {
+        found = await page.evaluate(r"""marker => {
           const phrases = [
             'zoom uses cookies and similar technologies',
             'zoom использует файлы cookie',
           ];
-          for (const node of document.querySelectorAll('body *')) {
-            if (node.children.length || !node.getBoundingClientRect().width) continue;
-            const text = (node.textContent || '').toLowerCase();
-            if (!phrases.some(phrase => text.includes(phrase))) continue;
-            let parent = node.parentElement;
-            for (let depth = 0; parent && depth < 5; depth++, parent = parent.parentElement) {
-              if ((parent.innerText || '').length > 700) break;
-              const close = Array.from(parent.querySelectorAll('button')).find(button => {
-                const label = `${button.getAttribute('aria-label') || ''} ${button.getAttribute('title') || ''}`;
-                const box = button.getBoundingClientRect();
-                return box.width && (/close|закрыть/i.test(label) ||
-                  (!button.innerText.trim() && box.width < 60));
-              });
-              if (close) { close.click(); return true; }
+          // The sentence can be split across text and link elements. Search
+          // small visible containers, not only leaf elements.
+          const containers = Array.from(document.querySelectorAll('body *'))
+            .filter(node => {
+              const box = node.getBoundingClientRect();
+              const text = (node.textContent || '').toLowerCase();
+              return box.width > 0 && box.height > 0 &&
+                box.width < 900 && box.height < 260 &&
+                phrases.some(phrase => text.includes(phrase));
+            })
+            .sort((a, b) => {
+              const x = a.getBoundingClientRect(), y = b.getBoundingClientRect();
+              return x.width * x.height - y.width * y.height;
+            });
+          for (const container of containers) {
+            const panel = container.getBoundingClientRect();
+            const controls = container.querySelectorAll('button, [role="button"]');
+            for (const control of controls) {
+              const box = control.getBoundingClientRect();
+              const label = `${control.getAttribute('aria-label') || ''} ${control.getAttribute('title') || ''}`;
+              const topRight = box.left >= panel.right - 100 && box.top <= panel.top + 70;
+              if (box.width > 0 && box.height > 0 && box.width < 60 && box.height < 60 &&
+                  (/close|закрыть/i.test(label) || (topRight && !control.innerText.trim()))) {
+                control.setAttribute(marker, 'true');
+                return true;
+              }
             }
           }
           return false;
-        }""")
+        }""", marker)
+        if not found:
+            return False
+        # Playwright generates a real pointer click. A JS .click() can be
+        # ignored by consent widgets that require a trusted user action.
+        await page.locator(f'[{marker}="true"]').first.click(timeout=2_000)
+        await page.wait_for_timeout(250)
+        dismissed = await page.evaluate(r"""() => !Array.from(document.querySelectorAll('body *'))
+          .some(node => {
+            const box = node.getBoundingClientRect();
+            const text = (node.textContent || '').toLowerCase();
+            return box.width > 0 && box.height > 0 && box.width < 900 && box.height < 260 &&
+              (text.includes('zoom uses cookies and similar technologies') ||
+               text.includes('zoom использует файлы cookie'));
+          })""")
     except Exception:
+        logger.warning("Zoom launcher cookie notice could not be dismissed")
         return False
-    if dismissed is True:
+    finally:
+        try:
+            await page.evaluate("marker => document.querySelectorAll(`[${marker}]`).forEach(node => node.removeAttribute(marker))", marker)
+        except Exception:
+            pass
+    if dismissed:
         logger.info("Zoom launcher cookie notice dismissed")
-    return dismissed is True
+    return bool(dismissed)
 
 
 _ZOOM_SKIP_MEDIA_LABELS = (

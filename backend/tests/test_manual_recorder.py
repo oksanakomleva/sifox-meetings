@@ -416,13 +416,26 @@ def test_zoom_reads_only_matching_tokenized_anchor_from_launcher():
 def test_zoom_cookie_notice_dismissal_does_not_require_accepting_cookies():
     from services import recorder
     page = MagicMock()
-    page.evaluate = AsyncMock(return_value=True)
+    page.evaluate = AsyncMock(side_effect=[True, True, None])
+    page.wait_for_timeout = AsyncMock()
+    page.locator.return_value.first.click = AsyncMock()
 
     assert asyncio.run(recorder._zoom_dismiss_cookie_banner(page)) is True
-    script = page.evaluate.await_args.args[0]
-    assert "zoom uses cookies and similar technologies" in script
-    assert "close.click()" in script
-    assert "accept" not in script.lower()
+    discovery_script = page.evaluate.await_args_list[0].args[0]
+    assert "zoom uses cookies and similar technologies" in discovery_script
+    assert "node.textContent" in discovery_script
+    assert "control.setAttribute" in discovery_script
+    assert "accept" not in discovery_script.lower()
+    page.locator.return_value.first.click.assert_awaited_once()
+
+
+def test_zoom_cookie_notice_dismissal_does_not_click_when_banner_absent():
+    from services import recorder
+    page = MagicMock()
+    page.evaluate = AsyncMock(side_effect=[False, None])
+
+    assert asyncio.run(recorder._zoom_dismiss_cookie_banner(page)) is False
+    page.locator.assert_not_called()
 
 
 def test_zoom_missing_form_reports_webclient_without_leaking_passcode():
