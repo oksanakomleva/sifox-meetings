@@ -13,7 +13,7 @@ import time
 import uuid
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from config import config
 from database import models
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Never include meeting URLs or passcodes in filenames or logs.
 ZOOM_DEBUG_ROOT = Path("/tmp/zoom-join-debug")
 ZOOM_DEBUG_STAGES = frozenset({
-    "launcher", "guest-form", "after-join", "form-retry", "signin", "failure",
+    "launcher", "browser-click", "guest-form", "after-join", "form-retry", "signin", "failure",
 })
 
 
@@ -138,27 +138,37 @@ _SYNTHETIC_CAMERA_INIT_SCRIPT = r"""
 })();
 """
 
-# The Zoom launcher sometimes calls window.open with a one-time Web App URL,
-# but Railway's headed Chromium does not create a visible Playwright popup.
-# Retain that URL in the launcher page so the recorder can follow the same
-# tokenized route as a human guest. Never log or persist the URL itself.
+# Zoom can use window.open or an anchor for its one-time Web App URL. A headed
+# browser may suppress the resulting tab, so capture only the destination of
+# the real launcher action. Never log or persist the URL itself.
 _ZOOM_CAPTURE_LAUNCH_SCRIPT = r"""
 (() => {
   if (window.__sifoxZoomLaunchInstalled) return;
   window.__sifoxZoomLaunchInstalled = true;
-  const originalOpen = window.open;
-  window.open = function(...args) {
+  const remember = target => {
     try {
-      const target = args[0];
-      if (target != null) {
-        const url = new URL(String(target), location.href);
-        if (url.protocol === 'https:' && url.hostname === 'app.zoom.us' &&
-            /^\/wc\/\d{9,11}\/join$/.test(url.pathname)) {
-          window.__sifoxZoomLaunchUrl = url.href;
-        }
+      if (target == null) return;
+      const url = new URL(String(target), location.href);
+      if (url.protocol === 'https:' && url.hostname === 'app.zoom.us' &&
+          /^\/wc\/\d{9,11}\/join$/.test(url.pathname)) {
+        window.__sifoxZoomLaunchUrl = url.href;
       }
     } catch (_) {}
+  };
+  const originalOpen = window.open;
+  window.open = function(...args) {
+    remember(args[0]);
     return originalOpen.apply(this, args);
+  };
+  document.addEventListener('click', event => {
+    const target = event.target;
+    const link = target instanceof Element ? target.closest('a[href]') : null;
+    if (link) remember(link.href);
+  }, true);
+  const originalAnchorClick = HTMLAnchorElement.prototype.click;
+  HTMLAnchorElement.prototype.click = function(...args) {
+    remember(this.href);
+    return originalAnchorClick.apply(this, args);
   };
 })();
 """
@@ -1297,28 +1307,6 @@ def _is_zoom_host(hostname: str | None) -> bool:
     return hostname == "zoom.us" or bool(hostname and hostname.endswith(".zoom.us"))
 
 
-def _zoom_direct_webclient_url(invitation_url: str) -> str | None:
-    """Open Zoom's Web App host with the invitation meeting ID and passcode.
-
-    Zoom's launcher can fail to expose its browser button in automation even
-    when the guest web page works. The launcher shown to human guests goes to
-    app.zoom.us, not the regional invitation host. Only transform a validated
-    Zoom /j/ URL and never log the passcode.
-    """
-    parts = urlsplit(invitation_url)
-    meeting_id = parts.path.removeprefix("/j/")
-    if (parts.scheme != "https" or not _is_zoom_host(parts.hostname)
-            or not parts.path.startswith("/j/") or not meeting_id.isdecimal()
-            or not 9 <= len(meeting_id) <= 11):
-        return None
-    invitation_params = [(key, value) for key, value in parse_qsl(
-        parts.query, keep_blank_values=True,
-    ) if key not in ("ref_from", "fromPWA")]
-    query = [("ref_from", "launch"), *invitation_params]
-    query.append(("fromPWA", "1"))
-    return urlunsplit(("https", "app.zoom.us", f"/wc/{meeting_id}/join", urlencode(query), ""))
-
-
 def _zoom_valid_launcher_url(candidate: object, invitation_url: str) -> bool:
     """Accept only Zoom's tokenized Web App route for this exact meeting."""
     if not isinstance(candidate, str):
@@ -1345,7 +1333,7 @@ def _zoom_valid_launcher_url(candidate: object, invitation_url: str) -> bool:
 
 
 async def _zoom_launcher_webclient_url(page, invitation_url: str) -> str | None:
-    """Read the launcher's captured URL, including Zoom's one-time join tokens."""
+    """Read a real launcher destination, including Zoom's one-time join tokens."""
     try:
         surfaces = [page, *page.frames]
     except Exception:
@@ -1357,6 +1345,19 @@ async def _zoom_launcher_webclient_url(page, invitation_url: str) -> str | None:
             continue
         if _zoom_valid_launcher_url(candidate, invitation_url):
             return candidate
+        # Some Zoom launcher variants expose the generated destination as an
+        # anchor instead of calling window.open. Read-only: no synthetic URL.
+        try:
+            links = await surface.evaluate(
+                "() => Array.from(document.querySelectorAll('a[href]'), "
+                "link => link.href).slice(0, 50)"
+            )
+        except Exception:
+            continue
+        if isinstance(links, list):
+            for link in links:
+                if _zoom_valid_launcher_url(link, invitation_url):
+                    return link
     return None
 
 
@@ -1594,6 +1595,8 @@ async def _join_zoom_meeting(
                 browser_clicks += 1
                 last_browser_click = time.monotonic()
                 logger.info("Zoom browser entry clicked (attempt %d)", browser_clicks)
+                if browser_clicks == 3:
+                    await _zoom_debug_snapshot(page, meeting_id, "browser-click")
                 surfaces = _zoom_join_surfaces(page)
         for surface in surfaces:
             await _zoom_dismiss_prejoin_prompts(surface)
@@ -1610,21 +1613,17 @@ async def _join_zoom_meeting(
                 break
         if name_field:
             break
-        # Prefer Zoom's launcher-produced tab when it exists. If CTA clicks
-        # produce no tab (observed in Railway), use the Web App host shown by
-        # the human guest flow rather than a bare route on the regional host.
+        # Follow only a URL produced by Zoom's own launcher. A URL synthesized
+        # from the invitation can display the name form yet redirect the bot
+        # to account sign-in after Join (observed in Railway staging).
         if (not direct_attempted and not _zoom_popup_seen(page)
                 and now - started >= 20
                 and not any(_zoom_route_kind(surface) == "webclient" for surface in surfaces)):
             launcher_url = await _zoom_launcher_webclient_url(page, url)
-            direct_url = launcher_url or _zoom_direct_webclient_url(url)
-            if direct_url:
+            if launcher_url:
                 direct_attempted = True
-                logger.info(
-                    "Zoom guest web-client fallback from %s",
-                    "launcher-generated URL" if launcher_url else "invitation URL",
-                )
-                await _navigate_to_meeting(page, direct_url)
+                logger.info("Zoom guest web-client fallback from launcher-generated URL")
+                await _navigate_to_meeting(page, launcher_url)
                 continue
         if now - last_entry_log >= 10:
             logger.info(
@@ -1640,6 +1639,9 @@ async def _join_zoom_meeting(
     if name_field is None:
         await _zoom_debug_snapshot(page, meeting_id, "failure")
         detail = await _zoom_missing_guest_form_detail(page)
+        if (browser_clicks and _zoom_route_kind(page) == "launcher"
+                and not _zoom_popup_seen(page)):
+            detail = "Zoom не открыл гостевой веб-клиент после нажатия «Войти через браузер»"
         logger.warning(
             "Zoom guest form missing: route=%s browser_clicks=%d popup_seen=%s direct_fallback=%s detail=%s",
             _zoom_route_kind(page), browser_clicks, _zoom_popup_seen(page), direct_attempted, detail,
