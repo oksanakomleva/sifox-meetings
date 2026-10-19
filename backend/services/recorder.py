@@ -1266,14 +1266,29 @@ async def _zoom_dismiss_cookie_banner(page) -> bool:
     """
     marker = "data-sifox-zoom-cookie-close"
     try:
-        found = await page.evaluate(r"""marker => {
+        surfaces = [page, *(frame for frame in page.frames if frame is not page.main_frame)]
+    except Exception:
+        surfaces = [page]
+    any_found = False
+    for surface_index, surface in enumerate(surfaces):
+        found = False
+        try:
+            found = await surface.evaluate(r"""marker => {
           const phrases = [
             'zoom uses cookies and similar technologies',
             'zoom использует файлы cookie',
           ];
-          // The sentence can be split across text and link elements. Search
-          // small visible containers, not only leaf elements.
-          const containers = Array.from(document.querySelectorAll('body *'))
+          // Zoom can render the notice in an iframe or open shadow root.
+          // The sentence can also be split across text and link elements.
+          const nodes = [];
+          const visit = root => {
+            for (const node of root.querySelectorAll('*')) {
+              nodes.push(node);
+              if (node.shadowRoot) visit(node.shadowRoot);
+            }
+          };
+          visit(document.body);
+          const containers = nodes
             .filter(node => {
               const box = node.getBoundingClientRect();
               const text = (node.textContent || '').toLowerCase();
@@ -1287,7 +1302,7 @@ async def _zoom_dismiss_cookie_banner(page) -> bool:
             });
           for (const container of containers) {
             const panel = container.getBoundingClientRect();
-            const controls = container.querySelectorAll('button, [role="button"]');
+            const controls = container.querySelectorAll('button, [role="button"], [aria-label], [title]');
             for (const control of controls) {
               const box = control.getBoundingClientRect();
               const label = `${control.getAttribute('aria-label') || ''} ${control.getAttribute('title') || ''}`;
@@ -1301,31 +1316,49 @@ async def _zoom_dismiss_cookie_banner(page) -> bool:
           }
           return false;
         }""", marker)
-        if not found:
-            return False
-        # Playwright generates a real pointer click. A JS .click() can be
-        # ignored by consent widgets that require a trusted user action.
-        await page.locator(f'[{marker}="true"]').first.click(timeout=2_000)
-        await page.wait_for_timeout(250)
-        dismissed = await page.evaluate(r"""() => !Array.from(document.querySelectorAll('body *'))
+            if not found:
+                continue
+            any_found = True
+            # Playwright generates a real pointer click. A JS .click() can be
+            # ignored by consent widgets that require a trusted user action.
+            await surface.locator(f'[{marker}="true"]').first.click(timeout=2_000)
+            await page.wait_for_timeout(250)
+            dismissed = await surface.evaluate(r"""() => {
+          const nodes = [];
+          const visit = root => {
+            for (const node of root.querySelectorAll('*')) {
+              nodes.push(node);
+              if (node.shadowRoot) visit(node.shadowRoot);
+            }
+          };
+          visit(document.body);
+          return !nodes
           .some(node => {
             const box = node.getBoundingClientRect();
             const text = (node.textContent || '').toLowerCase();
             return box.width > 0 && box.height > 0 && box.width < 900 && box.height < 260 &&
               (text.includes('zoom uses cookies and similar technologies') ||
                text.includes('zoom использует файлы cookie'));
-          })""")
-    except Exception:
-        logger.warning("Zoom launcher cookie notice could not be dismissed")
-        return False
-    finally:
-        try:
-            await page.evaluate("marker => document.querySelectorAll(`[${marker}]`).forEach(node => node.removeAttribute(marker))", marker)
+          });
+        }""")
+            if dismissed:
+                logger.info("Zoom launcher cookie notice dismissed on surface=%d", surface_index)
+                return True
+            logger.warning("Zoom launcher cookie close was clicked but notice remains on surface=%d", surface_index)
         except Exception:
-            pass
-    if dismissed:
-        logger.info("Zoom launcher cookie notice dismissed")
-    return bool(dismissed)
+            logger.warning("Zoom launcher cookie notice could not be dismissed on surface=%d", surface_index)
+        finally:
+            if found:
+                try:
+                    await surface.evaluate(
+                        "marker => document.querySelectorAll(`[${marker}]`).forEach(node => node.removeAttribute(marker))",
+                        marker,
+                    )
+                except Exception:
+                    pass
+    if not any_found:
+        logger.info("Zoom launcher cookie notice not found on %d surface(s)", len(surfaces))
+    return False
 
 
 _ZOOM_SKIP_MEDIA_LABELS = (

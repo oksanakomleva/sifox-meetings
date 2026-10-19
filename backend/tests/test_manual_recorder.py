@@ -438,6 +438,21 @@ def test_zoom_cookie_notice_dismissal_does_not_click_when_banner_absent():
     page.locator.assert_not_called()
 
 
+def test_zoom_cookie_notice_dismissal_checks_child_frames():
+    from services import recorder
+    page = MagicMock()
+    frame = MagicMock()
+    page.frames = [page.main_frame, frame]
+    page.evaluate = AsyncMock(return_value=False)
+    page.wait_for_timeout = AsyncMock()
+    frame.evaluate = AsyncMock(side_effect=[True, True, None])
+    frame.locator.return_value.first.click = AsyncMock()
+
+    assert asyncio.run(recorder._zoom_dismiss_cookie_banner(page)) is True
+    frame.locator.return_value.first.click.assert_awaited_once()
+    page.locator.assert_not_called()
+
+
 def test_zoom_missing_form_reports_webclient_without_leaking_passcode():
     from services import recorder
     page = MagicMock()
