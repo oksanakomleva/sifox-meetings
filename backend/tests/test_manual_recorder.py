@@ -157,10 +157,10 @@ def test_navigation_accepts_rendered_page_after_load_timeout():
 
 def test_zoom_uses_its_own_join_flow(monkeypatch):
     from services import recorder
-    join = AsyncMock(return_value=set())
-    monkeypatch.setattr(recorder, "_join_zoom_meeting", join)
     page = MagicMock()
-    assert asyncio.run(recorder._join_meeting(page, ZOOM_URL)) == set()
+    join = AsyncMock(return_value=(set(), page))
+    monkeypatch.setattr(recorder, "_join_zoom_meeting", join)
+    assert asyncio.run(recorder._join_meeting(page, ZOOM_URL)) == (set(), page)
     join.assert_awaited_once_with(page, ZOOM_URL)
 
 
@@ -177,7 +177,7 @@ def test_zoom_guest_flow_preserves_passcode_and_confirms_admission(monkeypatch):
     page.frames = []
     page.locator.return_value.first.is_visible = AsyncMock(return_value=True)
     page.locator.return_value.first.fill = AsyncMock()
-    assert asyncio.run(recorder._join_zoom_meeting(page, ZOOM_URL)) == set()
+    assert asyncio.run(recorder._join_zoom_meeting(page, ZOOM_URL)) == (set(), page)
     navigate.assert_awaited_once_with(page, ZOOM_URL)
     page.locator.return_value.first.fill.assert_awaited_once_with("Protocaller")
     assert click.await_args_list[1].args[1] == recorder._ZOOM_BROWSER_JOIN_SELECTORS
@@ -191,6 +191,56 @@ def test_zoom_finds_guest_form_inside_webclient_frame():
     frame.url = "https://app.zoom.us/wc/12345678901/join"
     page.frames = [frame]
     assert recorder._zoom_join_surfaces(page) == [frame, page]
+
+
+def test_zoom_resolves_webclient_frame_to_its_popup_page():
+    from services import recorder
+    launcher = MagicMock()
+    launcher.url = ZOOM_URL
+    launcher.frames = []
+    popup = MagicMock()
+    popup.url = "https://app.zoom.us/wc/12345678901/join?ref_from=launch"
+    frame = MagicMock()
+    frame.url = popup.url
+    popup.frames = [frame]
+    launcher.context.pages = [launcher, popup]
+    assert recorder._zoom_join_surfaces(launcher) == [frame, popup, launcher]
+    assert recorder._zoom_owner_page(launcher, frame) is popup
+
+
+def test_zoom_uses_browser_popup_for_join_and_recording(monkeypatch):
+    from services import recorder
+    navigate = AsyncMock()
+    monkeypatch.setattr(recorder, "_navigate_to_meeting", navigate)
+    monkeypatch.setattr(recorder, "_zoom_dismiss_prejoin_prompts", AsyncMock(return_value=0))
+    monkeypatch.setattr(recorder, "_zoom_media_prompt_visible", AsyncMock(return_value=False))
+    launcher = MagicMock()
+    launcher.url = ZOOM_URL
+    launcher.frames = []
+    launcher.context.pages = [launcher]
+    launcher.wait_for_timeout = AsyncMock()
+    launcher.locator.return_value.first.is_visible = AsyncMock(return_value=False)
+    popup = MagicMock()
+    popup.url = "https://app.zoom.us/wc/12345678901/join?ref_from=launch&pwd=secret"
+    popup.frames = []
+    popup.locator.return_value.first.is_visible = AsyncMock(return_value=True)
+    popup.locator.return_value.first.fill = AsyncMock()
+    popup.locator.return_value.inner_text = AsyncMock(return_value="Введите информацию о встрече")
+    browser_clicks = 0
+
+    async def click(surface, selectors):
+        nonlocal browser_clicks
+        if selectors == recorder._ZOOM_BROWSER_JOIN_SELECTORS:
+            browser_clicks += 1
+            launcher.context.pages = [launcher, popup]
+            return True
+        return selectors == recorder._ZOOM_GUEST_JOIN_SELECTORS and surface is popup
+
+    monkeypatch.setattr(recorder, "_zoom_click_visible", click)
+    assert asyncio.run(recorder._join_zoom_meeting(launcher, ZOOM_URL)) == (set(), popup)
+    assert browser_clicks == 1
+    navigate.assert_awaited_once_with(launcher, ZOOM_URL)
+    popup.locator.return_value.first.fill.assert_awaited_once_with("Protocaller")
 
 
 def test_zoom_submits_guest_form_inside_webclient_frame(monkeypatch):
@@ -207,7 +257,7 @@ def test_zoom_submits_guest_form_inside_webclient_frame(monkeypatch):
     page.frames = [frame]
     frame.locator.return_value.first.is_visible = AsyncMock(return_value=True)
     frame.locator.return_value.first.fill = AsyncMock()
-    assert asyncio.run(recorder._join_zoom_meeting(page, ZOOM_URL)) == set()
+    assert asyncio.run(recorder._join_zoom_meeting(page, ZOOM_URL)) == (set(), page)
     frame.locator.return_value.first.fill.assert_awaited_once_with("Protocaller")
     assert click.await_args_list[1].args[0] is frame
     assert "button.preview-join-button" in click.await_args_list[1].args[1]
@@ -236,7 +286,7 @@ def test_zoom_retries_browser_entry_when_launcher_button_renders_late(monkeypatc
     name_field.is_visible = AsyncMock(side_effect=lambda **_kwargs: browser_attempts >= 2)
     name_field.fill = AsyncMock()
 
-    assert asyncio.run(recorder._join_zoom_meeting(page, ZOOM_URL)) == set()
+    assert asyncio.run(recorder._join_zoom_meeting(page, ZOOM_URL)) == (set(), page)
     assert browser_attempts == 2
     name_field.fill.assert_awaited_once_with("Protocaller")
 

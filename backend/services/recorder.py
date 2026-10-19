@@ -743,7 +743,7 @@ async def _record_pipeline(meeting_id: str) -> None:
         )
 
         # 3. Join meeting
-        participants = await startup_step(
+        joined = await startup_step(
             lambda: _join_meeting(
                 page,
                 url,
@@ -752,6 +752,10 @@ async def _record_pipeline(meeting_id: str) -> None:
             "вход во встречу",
             max(30, config.RECORDER_STARTUP_TIMEOUT_SEC),
         )
+        if service == "zoom":
+            participants, page = joined
+        else:
+            participants = joined
         logger.info("Joined meeting %s, participants: %s", meeting_id[:8], participants)
 
         # 4. Start audio capture
@@ -1243,18 +1247,52 @@ def _zoom_direct_webclient_url(invitation_url: str) -> str | None:
     return urlunsplit((parts.scheme, parts.netloc, f"/wc/{meeting_id}/join", parts.query, ""))
 
 
-def _zoom_join_surfaces(page) -> list:
-    """Zoom may mount its guest UI in a webclient iframe or at top level."""
-    surfaces = []
+def _zoom_context_pages(page) -> list:
+    """Keep the launcher and Zoom tabs opened by its browser-join action."""
+    pages = [page]
     try:
-        for frame in page.frames:
-            parts = urlsplit(frame.url)
-            if _is_zoom_host(parts.hostname) and "/wc/" in parts.path:
-                surfaces.append(frame)
+        for candidate in page.context.pages:
+            if candidate is not page and _is_zoom_host(urlsplit(candidate.url).hostname):
+                pages.append(candidate)
     except Exception:
         pass
+    return pages
+
+
+def _zoom_popup_seen(page) -> bool:
+    try:
+        return any(candidate is not page for candidate in page.context.pages)
+    except Exception:
+        return False
+
+
+def _zoom_join_surfaces(page) -> list:
+    """Zoom may open a new tab, then mount its guest UI in an iframe."""
+    surfaces = []
+    for candidate in _zoom_context_pages(page):
+        try:
+            for frame in candidate.frames:
+                parts = urlsplit(frame.url)
+                if _is_zoom_host(parts.hostname) and "/wc/" in parts.path:
+                    surfaces.append(frame)
+        except Exception:
+            pass
+        if candidate is not page:
+            surfaces.append(candidate)
     surfaces.append(page)
     return surfaces
+
+
+def _zoom_owner_page(launcher, surface):
+    for candidate in _zoom_context_pages(launcher):
+        if surface is candidate:
+            return candidate
+        try:
+            if any(surface is frame for frame in candidate.frames):
+                return candidate
+        except Exception:
+            pass
+    return launcher
 
 
 def _zoom_on_signin_page(page) -> bool:
@@ -1298,6 +1336,8 @@ async def _zoom_missing_guest_form_detail(page) -> str:
             return "Zoom запросил проверку, что участник не робот, до появления гостевой формы"
     if any(_zoom_route_kind(surface) == "webclient" for surface in surfaces):
         return "веб-клиент Zoom открылся, но поле имени гостя не появилось"
+    if _zoom_popup_seen(page):
+        return "Zoom открыл новую вкладку, но гостевой веб-клиент в ней не загрузился"
     return "Zoom не открыл гостевой веб-клиент из страницы приглашения"
 
 
@@ -1401,7 +1441,7 @@ async def _zoom_participant_count(page) -> int | None:
     return None
 
 
-async def _join_zoom_meeting(page, url: str) -> set[str]:
+async def _join_zoom_meeting(page, url: str) -> tuple[set[str], object]:
     """Join Zoom's browser client as a guest; never claim recording in its lobby."""
     # Follow Zoom's documented guest route from the invitation.  The launch
     # page supplies current web-client tokens and may wrap the form in an iframe.
@@ -1432,6 +1472,7 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
         # the web client iframe exists, do not click the launcher again.
         if (browser_clicks < 3 and _zoom_route_kind(page) == "launcher"
                 and not any(_zoom_route_kind(surface) == "webclient" for surface in surfaces)
+                and not _zoom_popup_seen(page)
                 and now - last_browser_click >= 5):
             if await _zoom_click_visible(page, _ZOOM_BROWSER_JOIN_SELECTORS):
                 browser_clicks += 1
@@ -1453,10 +1494,11 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
                 break
         if name_field:
             break
-        # The launcher is a moving target (and some Zoom deployments omit its
-        # browser CTA). After giving it time, try Zoom's own /wc/ guest route
-        # with the original meeting ID and passcode, on the same browser page.
-        if (not direct_attempted and now - started >= 20
+        # Use the direct route only if no browser CTA could be clicked. When a
+        # click did happen, Zoom may have opened a new tab with launch tokens;
+        # discarding that tab for a bare /wc/ URL can leave an inert join form.
+        if (not direct_attempted and browser_clicks == 0 and not _zoom_popup_seen(page)
+                and now - started >= 20
                 and not any(_zoom_route_kind(surface) == "webclient" for surface in surfaces)):
             direct_url = _zoom_direct_webclient_url(url)
             if direct_url:
@@ -1466,10 +1508,11 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
                 continue
         if now - last_entry_log >= 10:
             logger.info(
-                "Zoom prejoin waiting: route=%s webclient_frames=%d browser_clicks=%d direct_fallback=%s",
+                "Zoom prejoin waiting: route=%s webclient_frames=%d browser_clicks=%d popup_seen=%s direct_fallback=%s",
                 _zoom_route_kind(page),
                 sum(_zoom_route_kind(surface) == "webclient" for surface in surfaces),
                 browser_clicks,
+                _zoom_popup_seen(page),
                 direct_attempted,
             )
             last_entry_log = now
@@ -1477,8 +1520,8 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
     if name_field is None:
         detail = await _zoom_missing_guest_form_detail(page)
         logger.warning(
-            "Zoom guest form missing: route=%s browser_clicks=%d direct_fallback=%s detail=%s",
-            _zoom_route_kind(page), browser_clicks, direct_attempted, detail,
+            "Zoom guest form missing: route=%s browser_clicks=%d popup_seen=%s direct_fallback=%s detail=%s",
+            _zoom_route_kind(page), browser_clicks, _zoom_popup_seen(page), direct_attempted, detail,
         )
         raise RuntimeError(f"Zoom: {detail}")
     await _zoom_dismiss_prejoin_prompts(join_surface)
@@ -1544,7 +1587,7 @@ async def _join_zoom_meeting(page, url: str) -> set[str]:
                 "button:has-text('Подключить звук компьютера')",
             ))
             logger.info("Zoom guest admission confirmed")
-            return set()
+            return set(), _zoom_owner_page(page, join_surface)
         try:
             form_visible = await name_field.is_visible(timeout=1_000)
         except Exception:
