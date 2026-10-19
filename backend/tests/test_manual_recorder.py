@@ -329,6 +329,77 @@ def test_zoom_uses_web_app_host_when_launcher_click_opens_no_tab(monkeypatch):
     )
 
 
+def test_zoom_prefers_launcher_generated_url_with_one_time_tokens(monkeypatch):
+    from services import recorder
+    page = MagicMock()
+    page.url = ZOOM_URL
+    page.frames = []
+    page.context.pages = [page]
+    page.wait_for_timeout = AsyncMock()
+    generated = (
+        "https://app.zoom.us/wc/12345678901/join?ref_from=launch&pwd=abc123"
+        "&_x_zm_rtaid=one-time-token&_x_zm_rhtaid=996&fromPWA=1"
+    )
+    page.evaluate = AsyncMock(return_value=generated)
+    field = page.locator.return_value.first
+    field.is_visible = AsyncMock(side_effect=lambda **_kwargs: "/wc/" in page.url)
+    field.fill = AsyncMock()
+    ticks = 0
+
+    def monotonic():
+        nonlocal ticks
+        ticks += 1
+        return ticks
+
+    async def navigate(_page, url):
+        page.url = url
+
+    async def click(_surface, selectors):
+        return selectors in (recorder._ZOOM_BROWSER_JOIN_SELECTORS,
+                             recorder._ZOOM_GUEST_JOIN_SELECTORS)
+
+    monkeypatch.setattr(recorder.time, "monotonic", monotonic)
+    navigation = AsyncMock(side_effect=navigate)
+    monkeypatch.setattr(recorder, "_navigate_to_meeting", navigation)
+    monkeypatch.setattr(recorder, "_zoom_click_visible", click)
+    monkeypatch.setattr(recorder, "_zoom_dismiss_prejoin_prompts", AsyncMock(return_value=0))
+    monkeypatch.setattr(recorder, "_zoom_media_prompt_visible", AsyncMock(return_value=False))
+
+    assert asyncio.run(recorder._join_zoom_meeting(page, ZOOM_URL)) == (set(), page)
+    navigation.assert_any_await(page, generated)
+
+
+def test_zoom_rejects_launcher_url_for_other_meeting_or_without_tokens():
+    from services import recorder
+    base = "https://app.zoom.us/wc/12345678901/join?pwd=abc123"
+    tokens = "&_x_zm_rtaid=one-time-token&_x_zm_rhtaid=996"
+    assert recorder._zoom_valid_launcher_url(base + tokens, ZOOM_URL)
+    assert not recorder._zoom_valid_launcher_url(base, ZOOM_URL)
+    assert not recorder._zoom_valid_launcher_url(
+        "https://app.zoom.us/wc/99999999999/join?pwd=abc123" + tokens, ZOOM_URL,
+    )
+    assert not recorder._zoom_valid_launcher_url(
+        "https://app.zoom.us.evil.example/wc/12345678901/join?pwd=abc123" + tokens,
+        ZOOM_URL,
+    )
+    assert not recorder._zoom_valid_launcher_url(base.replace("abc123", "wrong") + tokens, ZOOM_URL)
+
+
+def test_zoom_reads_generated_join_url_from_launcher_frame():
+    from services import recorder
+    generated = (
+        "https://app.zoom.us/wc/12345678901/join?pwd=abc123"
+        "&_x_zm_rtaid=one-time-token&_x_zm_rhtaid=996"
+    )
+    page = MagicMock()
+    page.evaluate = AsyncMock(return_value=None)
+    frame = MagicMock()
+    frame.evaluate = AsyncMock(return_value=generated)
+    page.frames = [frame]
+
+    assert asyncio.run(recorder._zoom_launcher_webclient_url(page, ZOOM_URL)) == generated
+
+
 def test_zoom_missing_form_reports_webclient_without_leaking_passcode():
     from services import recorder
     page = MagicMock()

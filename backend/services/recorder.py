@@ -138,6 +138,31 @@ _SYNTHETIC_CAMERA_INIT_SCRIPT = r"""
 })();
 """
 
+# The Zoom launcher sometimes calls window.open with a one-time Web App URL,
+# but Railway's headed Chromium does not create a visible Playwright popup.
+# Retain that URL in the launcher page so the recorder can follow the same
+# tokenized route as a human guest. Never log or persist the URL itself.
+_ZOOM_CAPTURE_LAUNCH_SCRIPT = r"""
+(() => {
+  if (window.__sifoxZoomLaunchInstalled) return;
+  window.__sifoxZoomLaunchInstalled = true;
+  const originalOpen = window.open;
+  window.open = function(...args) {
+    try {
+      const target = args[0];
+      if (target != null) {
+        const url = new URL(String(target), location.href);
+        if (url.protocol === 'https:' && url.hostname === 'app.zoom.us' &&
+            /^\/wc\/\d{9,11}\/join$/.test(url.pathname)) {
+          window.__sifoxZoomLaunchUrl = url.href;
+        }
+      }
+    } catch (_) {}
+    return originalOpen.apply(this, args);
+  };
+})();
+"""
+
 
 def _find_pids_with_environment(
     entry: str,
@@ -768,6 +793,11 @@ async def _record_pipeline(meeting_id: str) -> None:
                 "подготовка браузера Zoom",
                 10,
             )
+            await startup_step(
+                lambda: context.add_init_script(script=_ZOOM_CAPTURE_LAUNCH_SCRIPT),
+                "отслеживание перехода Zoom в браузер",
+                10,
+            )
         await startup_step(
             lambda: context.add_init_script(script=_SYNTHETIC_CAMERA_INIT_SCRIPT),
             "подготовка виртуальной камеры",
@@ -1289,6 +1319,47 @@ def _zoom_direct_webclient_url(invitation_url: str) -> str | None:
     return urlunsplit(("https", "app.zoom.us", f"/wc/{meeting_id}/join", urlencode(query), ""))
 
 
+def _zoom_valid_launcher_url(candidate: object, invitation_url: str) -> bool:
+    """Accept only Zoom's tokenized Web App route for this exact meeting."""
+    if not isinstance(candidate, str):
+        return False
+    try:
+        invitation = urlsplit(invitation_url)
+        parts = urlsplit(candidate)
+    except ValueError:
+        return False
+    meeting_id = invitation.path.removeprefix("/j/")
+    if (invitation.scheme != "https" or not _is_zoom_host(invitation.hostname)
+            or not invitation.path.startswith("/j/")
+            or not meeting_id.isdecimal() or not 9 <= len(meeting_id) <= 11
+            or parts.scheme != "https"
+            or parts.netloc != "app.zoom.us"
+            or parts.path != f"/wc/{meeting_id}/join" or parts.fragment):
+        return False
+    params = dict(parse_qsl(parts.query, keep_blank_values=True))
+    invitation_params = dict(parse_qsl(invitation.query, keep_blank_values=True))
+    if (not params.get("_x_zm_rtaid") or not params.get("_x_zm_rhtaid")
+            or (params.get("pwd") and params["pwd"] != invitation_params.get("pwd"))):
+        return False
+    return True
+
+
+async def _zoom_launcher_webclient_url(page, invitation_url: str) -> str | None:
+    """Read the launcher's captured URL, including Zoom's one-time join tokens."""
+    try:
+        surfaces = [page, *page.frames]
+    except Exception:
+        surfaces = [page]
+    for surface in surfaces:
+        try:
+            candidate = await surface.evaluate("window.__sifoxZoomLaunchUrl || null")
+        except Exception:
+            continue
+        if _zoom_valid_launcher_url(candidate, invitation_url):
+            return candidate
+    return None
+
+
 def _zoom_context_pages(page) -> list:
     """Keep the launcher and Zoom tabs opened by its browser-join action."""
     pages = [page]
@@ -1545,10 +1616,14 @@ async def _join_zoom_meeting(
         if (not direct_attempted and not _zoom_popup_seen(page)
                 and now - started >= 20
                 and not any(_zoom_route_kind(surface) == "webclient" for surface in surfaces)):
-            direct_url = _zoom_direct_webclient_url(url)
+            launcher_url = await _zoom_launcher_webclient_url(page, url)
+            direct_url = launcher_url or _zoom_direct_webclient_url(url)
             if direct_url:
                 direct_attempted = True
-                logger.info("Zoom guest web-client fallback from launcher")
+                logger.info(
+                    "Zoom guest web-client fallback from %s",
+                    "launcher-generated URL" if launcher_url else "invitation URL",
+                )
                 await _navigate_to_meeting(page, direct_url)
                 continue
         if now - last_entry_log >= 10:
