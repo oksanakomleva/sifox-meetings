@@ -128,7 +128,7 @@ export default function Login() {
           color: 'var(--color-text-muted)',
         }}>
           Google — для сотрудников sifox.com. {gitlabAllUsers
-            ? 'GitLab — для сотрудников с подтверждённым адресом sifox.com или sifox.ru. В тестовой среде используйте только тестовые встречи и данные.'
+            ? 'GitLab — для сотрудников с подтверждённым адресом sifox.com или sifox.ru.'
             : <>GitLab пока доступен только в пилоте{gitlabDirectLogin ? ' для одной учётной записи.' : ' для привязанной учётной записи.'}</>}
           {!gitlabEnabled && ' Вход через GitLab ещё не настроен на сервере.'}
         </p>

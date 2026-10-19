@@ -153,7 +153,9 @@ async def send_invitation_email(
 ) -> dict:
     """Send a clickable invitation with both HTML and plain-text alternatives."""
     safe_url = _html.escape(invite_url, quote=True)
-    if gitlab_available and recipient.lower().endswith("@sifox.ru"):
+    if gitlab_available and (
+        config.APP_ENV == "staging" or recipient.lower().endswith("@sifox.ru")
+    ):
         login_hint = "Войдите через GitLab с той же почтой, на которую пришло письмо."
     elif gitlab_available and recipient.lower().endswith("@sifox.com"):
         login_hint = "Войдите через GitLab или Google с той же почтой, на которую пришло письмо."
