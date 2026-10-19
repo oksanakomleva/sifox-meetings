@@ -12,7 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from config import config
 from database import models
@@ -1232,11 +1232,12 @@ def _is_zoom_host(hostname: str | None) -> bool:
 
 
 def _zoom_direct_webclient_url(invitation_url: str) -> str | None:
-    """Preserve the invitation passcode in Zoom's guest-web path.
+    """Open Zoom's Web App host with the invitation meeting ID and passcode.
 
     Zoom's launcher can fail to expose its browser button in automation even
-    when the guest web page works. Only transform a validated Zoom /j/ URL;
-    never log or reconstruct the passcode itself.
+    when the guest web page works. The launcher shown to human guests goes to
+    app.zoom.us, not the regional invitation host. Only transform a validated
+    Zoom /j/ URL and never log the passcode.
     """
     parts = urlsplit(invitation_url)
     meeting_id = parts.path.removeprefix("/j/")
@@ -1244,7 +1245,12 @@ def _zoom_direct_webclient_url(invitation_url: str) -> str | None:
             or not parts.path.startswith("/j/") or not meeting_id.isdecimal()
             or not 9 <= len(meeting_id) <= 11):
         return None
-    return urlunsplit((parts.scheme, parts.netloc, f"/wc/{meeting_id}/join", parts.query, ""))
+    invitation_params = [(key, value) for key, value in parse_qsl(
+        parts.query, keep_blank_values=True,
+    ) if key not in ("ref_from", "fromPWA")]
+    query = [("ref_from", "launch"), *invitation_params]
+    query.append(("fromPWA", "1"))
+    return urlunsplit(("https", "app.zoom.us", f"/wc/{meeting_id}/join", urlencode(query), ""))
 
 
 def _zoom_context_pages(page) -> list:
@@ -1494,10 +1500,10 @@ async def _join_zoom_meeting(page, url: str) -> tuple[set[str], object]:
                 break
         if name_field:
             break
-        # Use the direct route only if no browser CTA could be clicked. When a
-        # click did happen, Zoom may have opened a new tab with launch tokens;
-        # discarding that tab for a bare /wc/ URL can leave an inert join form.
-        if (not direct_attempted and browser_clicks == 0 and not _zoom_popup_seen(page)
+        # Prefer Zoom's launcher-produced tab when it exists. If CTA clicks
+        # produce no tab (observed in Railway), use the Web App host shown by
+        # the human guest flow rather than a bare route on the regional host.
+        if (not direct_attempted and not _zoom_popup_seen(page)
                 and now - started >= 20
                 and not any(_zoom_route_kind(surface) == "webclient" for surface in surfaces)):
             direct_url = _zoom_direct_webclient_url(url)

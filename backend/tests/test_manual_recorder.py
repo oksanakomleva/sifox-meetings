@@ -291,6 +291,44 @@ def test_zoom_retries_browser_entry_when_launcher_button_renders_late(monkeypatc
     name_field.fill.assert_awaited_once_with("Protocaller")
 
 
+def test_zoom_uses_web_app_host_when_launcher_click_opens_no_tab(monkeypatch):
+    from services import recorder
+    page = MagicMock()
+    page.url = ZOOM_URL
+    page.frames = []
+    page.context.pages = [page]
+    page.wait_for_timeout = AsyncMock()
+    field = page.locator.return_value.first
+    field.is_visible = AsyncMock(side_effect=lambda **_kwargs: "/wc/" in page.url)
+    field.fill = AsyncMock()
+    ticks = 0
+
+    def monotonic():
+        nonlocal ticks
+        ticks += 1
+        return ticks
+
+    async def navigate(_page, url):
+        page.url = url
+
+    async def click(_surface, selectors):
+        return selectors in (recorder._ZOOM_BROWSER_JOIN_SELECTORS,
+                             recorder._ZOOM_GUEST_JOIN_SELECTORS)
+
+    monkeypatch.setattr(recorder.time, "monotonic", monotonic)
+    navigation = AsyncMock(side_effect=navigate)
+    monkeypatch.setattr(recorder, "_navigate_to_meeting", navigation)
+    monkeypatch.setattr(recorder, "_zoom_click_visible", click)
+    monkeypatch.setattr(recorder, "_zoom_dismiss_prejoin_prompts", AsyncMock(return_value=0))
+    monkeypatch.setattr(recorder, "_zoom_media_prompt_visible", AsyncMock(return_value=False))
+
+    assert asyncio.run(recorder._join_zoom_meeting(page, ZOOM_URL)) == (set(), page)
+    assert navigation.await_count == 2
+    assert navigation.await_args_list[1].args[1].startswith(
+        "https://app.zoom.us/wc/12345678901/join?ref_from=launch&pwd=abc123"
+    )
+
+
 def test_zoom_missing_form_reports_webclient_without_leaking_passcode():
     from services import recorder
     page = MagicMock()
@@ -310,7 +348,7 @@ def test_zoom_direct_webclient_fallback_keeps_passcode_and_rejects_other_hosts()
     from services import recorder
     invitation = "https://us04web.zoom.us/j/75332086484?pwd=secret-token"
     assert recorder._zoom_direct_webclient_url(invitation) == (
-        "https://us04web.zoom.us/wc/75332086484/join?pwd=secret-token"
+        "https://app.zoom.us/wc/75332086484/join?ref_from=launch&pwd=secret-token&fromPWA=1"
     )
     assert recorder._zoom_direct_webclient_url(
         "https://evilzoom.us/j/75332086484?pwd=secret-token"
