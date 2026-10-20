@@ -185,7 +185,7 @@ export default function MeetingDetail() {
             </p>
           </div>
           <div className="form-row" style={{ alignItems: 'center', gap: 'var(--space-2)' }}>
-            {user && !user.is_preview && (
+            {user && !user.is_preview && (user.is_admin || meeting.status === 'done' || meeting.recorder_user_id === user.id) && (
               <button className="btn btn-secondary" onClick={() => setShowShare(true)}>
                 🔗 Доступ и публикация
               </button>

@@ -64,7 +64,36 @@ async def set_user_admin(user_id: int, is_admin: bool) -> None:
         )
 
 
-async def list_users(limit: int = 100) -> list[dict]:
+async def set_user_active(user_id: int, is_active: bool, actor_id: int) -> bool:
+    """Change account access atomically; never lock out the acting/last admin."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Serialise competing block operations before taking a row lock.
+            await conn.execute("SELECT pg_advisory_xact_lock(7081942)")
+            row = await conn.fetchrow(
+                "SELECT id, is_admin, is_active FROM users WHERE id = $1 FOR UPDATE",
+                user_id,
+            )
+            if row is None:
+                return False
+            if not is_active and user_id == actor_id:
+                raise ValueError("Cannot block your own account")
+            if not is_active and row["is_admin"] and row["is_active"]:
+                active_admins = await conn.fetchval(
+                    "SELECT count(*) FROM users WHERE is_admin AND is_active"
+                )
+                if active_admins <= 1:
+                    raise ValueError("Cannot block the last active administrator")
+            await conn.execute(
+                "UPDATE users SET is_active = $1 WHERE id = $2", is_active, user_id
+            )
+            if not is_active:
+                await conn.execute("DELETE FROM sessions WHERE user_id = $1", user_id)
+    return True
+
+
+async def list_users(limit: int = 1000) -> list[dict]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -1292,7 +1321,7 @@ async def get_meetings_for_user(
 
 
 async def user_can_access_meeting(user_id: int, email: str, meeting_id: str) -> bool:
-    """Owners can view an active recording; other grants require completion."""
+    """Invited attendees may open the scheduled card as well as the final result."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         return bool(await conn.fetchval(
@@ -1302,7 +1331,7 @@ async def user_can_access_meeting(user_id: int, email: str, meeting_id: str) -> 
                 FROM meetings m
                 WHERE m.id = $3
                   AND (m.recorder_user_id = $1 OR (
-                    m.status = 'done' AND (
+                    m.status IN ('pending', 'joining', 'recording', 'transcribing', 'analyzing', 'done') AND (
                     EXISTS (
                         SELECT 1 FROM meeting_participants mp
                         WHERE mp.meeting_id = m.id AND mp.user_id = $1
@@ -1315,7 +1344,7 @@ async def user_can_access_meeting(user_id: int, email: str, meeting_id: str) -> 
                         SELECT 1 FROM meeting_access_grants g
                         WHERE g.meeting_id = m.id AND g.user_id = $1
                     )
-                    OR m.visible_to_all = TRUE
+                    OR (m.status = 'done' AND m.visible_to_all = TRUE)
                     )
                   ))
             )
@@ -1816,8 +1845,9 @@ async def get_meeting_access_users(meeting_id: str) -> list[dict]:
             """
             SELECT u.id, u.name, u.email, u.is_active,
                    g.user_id IS NOT NULL AS explicit_grant,
-                   (u.is_active AND (u.is_admin OR (m.status = 'done' AND (
-                       m.visible_to_all OR m.recorder_user_id = u.id
+                   (u.is_active AND (u.is_admin OR m.recorder_user_id = u.id
+                       OR (m.status IN ('pending', 'joining', 'recording', 'transcribing', 'analyzing', 'done') AND (
+                       (m.status = 'done' AND m.visible_to_all)
                        OR g.user_id IS NOT NULL
                        OR EXISTS (SELECT 1 FROM meeting_participants mp
                                   WHERE mp.meeting_id = m.id AND mp.user_id = u.id)

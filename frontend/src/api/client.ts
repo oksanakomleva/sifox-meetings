@@ -150,6 +150,11 @@ export const api = {
         method: 'PATCH',
         body: JSON.stringify({ is_admin: isAdmin }),
       }),
+    setUserActive: (userId: number, isActive: boolean) =>
+      request<void>(`/admin/users/${userId}/active`, {
+        method: 'PATCH',
+        body: JSON.stringify({ is_active: isActive }),
+      }),
     calendars: () => request<{ calendars: import('../types').Calendar[] }>('/admin/calendars'),
     availableCalendars: () => request<{ calendars: import('../types').Calendar[] }>('/admin/calendars/available'),
     addCalendar: (calId: number) => request<void>(`/admin/calendars/${calId}/add`, { method: 'POST' }),

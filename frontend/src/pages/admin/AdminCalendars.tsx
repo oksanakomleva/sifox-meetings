@@ -5,6 +5,8 @@ import type { Calendar } from '../../types'
 export default function AdminCalendars() {
   const [calendars, setCalendars] = useState<Calendar[]>([])
   const [available, setAvailable] = useState<Calendar[]>([])
+  const [showAvailable, setShowAvailable] = useState(false)
+  const [availableLoading, setAvailableLoading] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
@@ -16,14 +18,25 @@ export default function AdminCalendars() {
   }, [])
 
   const load = () => {
-    Promise.all([api.admin.calendars(), api.admin.availableCalendars()])
-      .then(([selected, discovered]) => {
+    api.admin.calendars()
+      .then(selected => {
         setCalendars(selected.calendars)
-        setAvailable(discovered.calendars)
         setError('')
       })
       .catch(e => setError(e.message || 'Не удалось загрузить календари'))
       .finally(() => setLoading(false))
+  }
+
+  const openAvailable = async () => {
+    if (showAvailable) { setShowAvailable(false); return }
+    setShowAvailable(true)
+    setAvailableLoading(true)
+    try {
+      const discovered = await api.admin.availableCalendars()
+      setAvailable(discovered.calendars)
+      setError('')
+    } catch (e: any) { setError(e.message || 'Не удалось загрузить доступные календари') }
+    finally { setAvailableLoading(false) }
   }
 
   const remove = async (cal: Calendar) => {
@@ -31,12 +44,17 @@ export default function AdminCalendars() {
     try {
       await api.admin.removeCalendar(cal.id)
       load()
+      if (showAvailable) {
+        const discovered = await api.admin.availableCalendars()
+        setAvailable(discovered.calendars)
+      }
     } catch (e: any) { setError(e.message || 'Не удалось убрать календарь') }
   }
 
   const add = async (cal: Calendar) => {
     try {
       await api.admin.addCalendar(cal.id)
+      setAvailable(prev => prev.filter(c => c.id !== cal.id))
       load()
     } catch (e: any) { setError(e.message || 'Не удалось добавить календарь') }
   }
@@ -170,20 +188,26 @@ export default function AdminCalendars() {
             ))}
           </div>
         )}
-        {available.length > 0 && (
-          <section style={{ marginTop: 'var(--space-8)' }}>
-            <h2 style={{ fontSize: 'var(--font-size-lg)', marginBottom: 'var(--space-2)' }}>Доступные календари</h2>
-            <p style={{ color: 'var(--color-text-secondary)', marginBottom: 'var(--space-4)' }}>Исключены из списка Sifox. Их встречи не записываются; добавление не включает запись автоматически.</p>
-            <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+        <section style={{ marginTop: 'var(--space-8)' }}>
+          <button className="btn btn-secondary" onClick={openAvailable} disabled={availableLoading}>
+            {showAvailable ? 'Скрыть доступные календари' : 'Добавить календарь'}
+          </button>
+          {showAvailable && (
+            <div style={{ marginTop: 'var(--space-4)' }}>
+              <p style={{ color: 'var(--color-text-secondary)', marginBottom: 'var(--space-4)' }}>Выберите календарь для добавления. Запись встреч не включится автоматически.</p>
+              {availableLoading ? <span className="spinner" /> : available.length === 0 ? (
+                <div className="card">Нет календарей, доступных для добавления.</div>
+              ) : <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
               {available.map(cal => (
                 <div key={cal.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
                   <div><strong>{cal.name}</strong><div style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>{cal.owner_name} ({cal.owner_email})</div></div>
                   <button className="btn btn-secondary" onClick={() => add(cal)}>Добавить в список</button>
                 </div>
               ))}
+              </div>}
             </div>
-          </section>
-        )}
+          )}
+        </section>
       </div>
     </div>
   )

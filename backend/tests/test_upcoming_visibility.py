@@ -42,3 +42,13 @@ def test_active_meetings_remain_visible_after_two_hours(upcoming_models, is_admi
     ) in sql
     if not is_admin:
         assert ") AND ( -- the user is an actual attendee" in sql
+
+
+def test_scheduled_attendee_can_open_card_but_public_visibility_waits_for_completion(upcoming_models):
+    module, conn = upcoming_models
+    conn.fetchval = AsyncMock(return_value=True)
+    assert asyncio.run(module.user_can_access_meeting(7, "person@sifox.com", "meeting-1"))
+    sql = " ".join(conn.fetchval.call_args.args[0].split())
+    assert "m.status IN ('pending', 'joining', 'recording', 'transcribing', 'analyzing', 'done')" in sql
+    assert "m.status = 'done' AND m.visible_to_all = TRUE" in sql
+    assert "cml.meeting_id = m.id AND $2 = ANY(cml.attendee_emails)" in sql

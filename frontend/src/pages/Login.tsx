@@ -69,7 +69,7 @@ export default function Login() {
 
         {invited && (
           <p style={{ fontSize: 'var(--font-size-sm)', marginBottom: 'var(--space-6)' }}>
-            Вы получили приглашение. Выберите вход через GitLab с адресом, на который пришло письмо.
+            Вы получили приглашение. Войдите через GitLab с адресом, на который пришло письмо.
           </p>
         )}
 
@@ -104,21 +104,21 @@ export default function Login() {
         )}
 
         <a
-          href={api.auth.loginUrl()}
+          href={gitlabEnabled ? api.auth.gitlabLoginUrl() : undefined}
           style={{ textDecoration: 'none', display: 'block' }}
         >
-          <button className="btn btn-secondary btn-lg" style={{ width: '100%', gap: 'var(--space-3)' }}>
-            <GoogleIcon />
-            Войти через Google
+          <button className="btn btn-primary btn-lg" style={{ width: '100%' }} disabled={!gitlabEnabled}>
+            Войти через GitLab
           </button>
         </a>
 
         <a
-          href={gitlabEnabled ? api.auth.gitlabLoginUrl() : undefined}
+          href={api.auth.loginUrl()}
           style={{ textDecoration: 'none', display: 'block', marginTop: 'var(--space-3)' }}
         >
-          <button className="btn btn-secondary btn-lg" style={{ width: '100%' }} disabled={!gitlabEnabled}>
-            Войти через GitLab
+          <button className="btn btn-secondary btn-lg" style={{ width: '100%', gap: 'var(--space-3)' }}>
+            <GoogleIcon />
+            Войти через Google
           </button>
         </a>
 
@@ -127,9 +127,8 @@ export default function Login() {
           fontSize: 'var(--font-size-xs)',
           color: 'var(--color-text-muted)',
         }}>
-          Google — для сотрудников sifox.com. {gitlabAllUsers
-            ? 'GitLab — для сотрудников с подтверждённым адресом sifox.com или sifox.ru.'
-            : <>GitLab пока доступен только в пилоте{gitlabDirectLogin ? ' для одной учётной записи.' : ' для привязанной учётной записи.'}</>}
+          Вход через Google — только для сотрудников sifox.com.
+          {!gitlabAllUsers && <> GitLab пока доступен только в пилоте{gitlabDirectLogin ? ' для одной учётной записи.' : ' для привязанной учётной записи.'}</>}
           {!gitlabEnabled && ' Вход через GitLab ещё не настроен на сервере.'}
         </p>
       </div>

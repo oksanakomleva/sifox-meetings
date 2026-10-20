@@ -44,6 +44,22 @@ async def set_admin(user_id: int, req: SetAdminRequest, admin: AdminUser):
     return {"ok": True}
 
 
+class SetActiveRequest(BaseModel):
+    is_active: bool
+
+
+@router.patch("/users/{user_id}/active")
+async def set_user_active(user_id: int, req: SetActiveRequest, admin: RealAdminUser):
+    try:
+        found = await models.set_user_active(user_id, req.is_active, admin["user_id"])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not found:
+        raise HTTPException(404, "Пользователь не найден")
+    logger.info("Admin %s set user %s active=%s", admin["user_id"], user_id, req.is_active)
+    return {"ok": True}
+
+
 # ── Calendars ─────────────────────────────────────────────────────────────────
 
 @router.get("/calendars")

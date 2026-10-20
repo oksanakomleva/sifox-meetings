@@ -119,6 +119,41 @@ class TestParticipantPresence:
         page = _JoinPage(state={"count": 1, "prejoin": True})
         assert asyncio.run(recorder._participant_snapshot(page))["presence"] == "unknown"
 
+    def test_visible_ended_screen_requires_repeated_confirmation(self, monkeypatch):
+        elapsed = [0]
+        async def advance(seconds):
+            elapsed[0] += seconds
+        monkeypatch.setattr(recorder.asyncio, "sleep", advance)
+        monkeypatch.setattr(recorder.time, "monotonic", lambda: elapsed[0])
+        monkeypatch.setattr(recorder.config, "PARTICIPANT_POLL_INTERVAL", 30)
+        monkeypatch.setattr(recorder.config, "EMPTY_POLLS_TO_END", 3)
+        monkeypatch.setattr(recorder, "_participant_snapshot", AsyncMock(return_value={
+            "presence": "unknown", "count": None, "names": set(), "errors": [], "ended": True,
+        }))
+        monkeypatch.setattr(recorder, "_telemost_call_state", AsyncMock(return_value={}))
+        reasons = []
+        assert asyncio.run(recorder._wait_for_meeting_end(
+            _JoinPage(), {"Анна"}, on_end=lambda reason, _: reasons.append(reason),
+        ))
+        assert elapsed[0] == 90
+        assert reasons == ["meeting_ended"]
+
+    def test_ended_screen_never_overrides_present_participants(self, monkeypatch):
+        elapsed = [0]
+        async def advance(seconds):
+            elapsed[0] += seconds
+        async def probe(_page):
+            return {"presence": "present" if elapsed[0] <= 90 else "alone",
+                    "count": 2 if elapsed[0] <= 90 else 1,
+                    "names": set(), "errors": [], "ended": True}
+        monkeypatch.setattr(recorder.asyncio, "sleep", advance)
+        monkeypatch.setattr(recorder.time, "monotonic", lambda: elapsed[0])
+        monkeypatch.setattr(recorder.config, "PARTICIPANT_POLL_INTERVAL", 30)
+        monkeypatch.setattr(recorder.config, "EMPTY_POLLS_TO_END", 3)
+        monkeypatch.setattr(recorder, "_participant_snapshot", probe)
+        assert asyncio.run(recorder._wait_for_meeting_end(_JoinPage(), {"Анна"}))
+        assert elapsed[0] >= 180
+
     @pytest.mark.parametrize("mode", ["present", "unknown", "alone", "interrupted_empty"])
     def test_end_detection_with_virtual_clock(self, monkeypatch, mode):
         from datetime import datetime, timezone, timedelta
@@ -204,6 +239,13 @@ def test_synthetic_camera_preserves_real_audio_capture():
         _SYNTHETIC_CAMERA_INIT_SCRIPT
     )
     assert "--use-fake-device-for-media-stream" not in _SYNTHETIC_CAMERA_INIT_SCRIPT
+
+
+def test_telemost_probes_ignore_controls_covered_by_guest_overlay():
+    import inspect
+    surface_probe = inspect.getsource(recorder._telemost_surface_state)
+    assert "document.elementFromPoint" in surface_probe
+    assert "document.elementFromPoint" in recorder._PARTICIPANT_SNAPSHOT_SCRIPT
 
 
 def test_silent_fake_audio_file_is_valid_and_reused(tmp_path):

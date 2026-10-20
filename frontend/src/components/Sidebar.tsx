@@ -1,6 +1,7 @@
 import { useEffect, useState, type CSSProperties } from 'react'
 import { NavLink } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
+import { api } from '../api/client'
 
 const IconHome = () => (
   <svg className="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
@@ -56,6 +57,7 @@ export default function Sidebar() {
   const { user, logout } = useAuth()
   const [menuOpen, setMenuOpen] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
+  const [previewLoading, setPreviewLoading] = useState(false)
 
   useEffect(() => {
     document.body.style.overflow = mobileOpen ? 'hidden' : ''
@@ -64,6 +66,17 @@ export default function Sidebar() {
 
   const exitPreview = () => {
     window.location.href = '/api/auth/exit-preview'
+  }
+
+  const previewSelf = async () => {
+    setPreviewLoading(true)
+    try {
+      const res = await api.admin.previewSelf()
+      window.location.href = res.url
+    } catch (e: any) {
+      alert(e.message || 'Не удалось открыть режим пользователя')
+      setPreviewLoading(false)
+    }
   }
 
   const menuItemStyle: CSSProperties = {
@@ -185,6 +198,11 @@ export default function Sidebar() {
                   </button>
                   <div style={{ height: 1, background: 'var(--color-border)', margin: '4px 0' }} />
                 </>
+              )}
+              {user?.is_admin && !user.is_preview && (
+                <button style={menuItemStyle} onClick={previewSelf} disabled={previewLoading}>
+                  {previewLoading ? 'Открываем…' : 'Посмотреть как пользователь'}
+                </button>
               )}
               <button style={menuItemStyle} onClick={logout}>
                 <span>Выйти</span>

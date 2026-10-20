@@ -69,6 +69,7 @@ export interface Meeting {
   topic: string | null
   meeting_type: string | null
   audio_path: string | null
+  recorder_user_id?: number | null
   audio_size: number | null
   error_message: string | null
   created_at: string
