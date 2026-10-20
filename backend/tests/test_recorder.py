@@ -99,7 +99,7 @@ class TestParticipantPresence:
         assert elapsed[0] == 90
         assert reasons == [("meeting_ended", True)]
 
-    def test_missing_counter_alone_never_stops_a_live_meeting(self, monkeypatch):
+    def test_missing_counter_with_visible_call_controls_keeps_live_meeting(self, monkeypatch):
         elapsed = [0]
 
         async def advance(seconds):
@@ -112,6 +112,11 @@ class TestParticipantPresence:
         monkeypatch.setattr(recorder, "_participant_snapshot", AsyncMock(return_value={
             "presence": "unknown", "count": None, "names": set(),
             "errors": [], "ended": False,
+        }))
+        monkeypatch.setattr(recorder, "_telemost_call_state", AsyncMock(return_value={
+            "has_leave": True, "has_mic": True, "has_join": False,
+            "has_name_input": False, "has_waiting_room": False,
+            "in_call_signal_count": 2, "labels": ["Выйти из встречи"],
         }))
         asyncio.run(recorder._wait_for_meeting_end(_JoinPage(), {"Анна"}))
         assert elapsed[0] == 3630
