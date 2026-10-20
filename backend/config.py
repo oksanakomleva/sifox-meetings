@@ -95,6 +95,7 @@ class Config(BaseSettings):
     AUDIO_START_CONFIRM_TIMEOUT_SEC: int = 8
     PARTICIPANT_POLL_INTERVAL: int = 30      # seconds between polls
     EMPTY_POLLS_TO_END: int = 3             # ~90s after everyone leaves
+    BLANK_POLLS_TO_END: int = 6             # ~3m of a control-free UI after participants were seen
     MAX_RECORDING_HOURS: int = 4
     # Keep Chromium sandboxed by default. Set only as an emergency compatibility
     # fallback on a platform that cannot provide user namespaces.

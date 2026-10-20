@@ -2762,6 +2762,7 @@ async def _wait_for_meeting_end(
     partial_alone_polls = 0
     ended_polls = 0
     returned_to_prejoin_polls = 0
+    blank_polls = 0
     deadline = time.monotonic() + config.MAX_RECORDING_HOURS * 3600
     # Grace period after scheduled start — wait this long for someone to arrive
     # before giving up on a meeting that never started
@@ -2817,6 +2818,8 @@ async def _wait_for_meeting_end(
             empty_polls = 0
             unknown_polls = 0
             partial_alone_polls = 0
+            blank_polls = 0
+            returned_to_prejoin_polls = 0
             continue
 
         if presence == "unknown" and snapshot.get("count") == 1:
@@ -2827,6 +2830,7 @@ async def _wait_for_meeting_end(
             # Require the same counter evidence repeatedly before treating it as
             # an empty room; a single partial probe still cannot stop a meeting.
             partial_alone_polls += 1
+            blank_polls = 0
             unknown_polls += 1
             logger.warning(
                 "Partial alone evidence for %s (%d/%d, errors=%s)",
@@ -2858,31 +2862,57 @@ async def _wait_for_meeting_end(
                         and not call_state.get("in_call_signal_count")
                     )
                     returned_to_prejoin_polls = returned_to_prejoin_polls + 1 if exited else 0
+                    # Observed in staging after the host ended a Telemost 3
+                    # meeting: its iframe and controls vanished, but the URL
+                    # stayed on /j/ and no end heading appeared. Only after a
+                    # real participant was previously observed do we accept a
+                    # prolonged UI without any call controls as an end signal.
+                    blank = bool(
+                        meeting_started
+                        and not snapshot["names"]
+                        and not snapshot["errors"]
+                        and not call_state.get("has_leave")
+                        and not call_state.get("has_mic")
+                        and not call_state.get("has_join")
+                        and not call_state.get("has_name_input")
+                        and not call_state.get("has_waiting_room")
+                        and not call_state.get("in_call_signal_count")
+                        and not call_state.get("surface_errors")
+                    )
+                    blank_polls = blank_polls + 1 if blank else 0
                     if unknown_polls == 1 or unknown_polls % 10 == 0:
                         logger.warning(
                             "Telemost unknown call state for %s: prejoin=%s join=%s "
-                            "name_input=%s leave=%s waiting=%s signals=%s",
+                            "name_input=%s leave=%s waiting=%s signals=%s labels=%d",
                             (meeting_id or "unknown")[:8],
                             call_state.get("has_visible_prejoin"), call_state.get("has_join"),
                             call_state.get("has_name_input"), call_state.get("has_leave"),
                             call_state.get("has_waiting_room"), call_state.get("in_call_signal_count"),
+                            len(call_state.get("labels") or []),
                         )
+                    if blank_polls >= config.BLANK_POLLS_TO_END:
+                        logger.info("Telemost blank call UI confirmed for %s after %d polls",
+                                    (meeting_id or "unknown")[:8], blank_polls)
+                        return finish("blank_call_ui")
                     if returned_to_prejoin_polls >= config.EMPTY_POLLS_TO_END:
                         logger.info("Telemost returned to prejoin for %s", (meeting_id or "unknown")[:8])
                         return finish("returned_to_prejoin")
                 except Exception as exc:
                     returned_to_prejoin_polls = 0
+                    blank_polls = 0
                     if unknown_polls == 1 or unknown_polls % 10 == 0:
                         logger.warning("Telemost call state probe unavailable for %s: %s",
                                        (meeting_id or "unknown")[:8], type(exc).__name__)
             if unknown_polls == 1 or unknown_polls % 10 == 0:
                 logger.warning(
-                    "Participant state unknown for %s (%d polls); keeping recording",
+                    "Participant state unknown for %s (%d polls, blank=%d/%d); keeping recording",
                     (meeting_id or "unknown")[:8], unknown_polls,
+                    blank_polls, config.BLANK_POLLS_TO_END,
                 )
             continue
         unknown_polls = 0
         returned_to_prejoin_polls = 0
+        blank_polls = 0
         if presence != "alone":
             partial_alone_polls = 0
 
