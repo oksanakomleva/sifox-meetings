@@ -24,8 +24,7 @@ async def login():
 @router.get("/invite/{token}")
 async def accept_invite(token: str):
     """
-    User clicks invitation link → validates token, sets cookie, redirects to Google login.
-    After OAuth the callback reads the cookie and bypasses the domain check for invited emails.
+    Validate the emailed link and keep its token for the selected OAuth flow.
     """
     invitation = await models.get_invitation_by_token(token)
     if not invitation:
@@ -33,8 +32,10 @@ async def accept_invite(token: str):
     if invitation.get("accepted_at"):
         return RedirectResponse(f"{config.BASE_URL}/login?error=invite_used")
 
-    # Set short-lived invite_token cookie, then redirect to Google OAuth
-    login_url = google_oauth.get_login_url()
+    login_url = (
+        f"{config.BASE_URL}/login?invite=1"
+        if config.GITLAB_ALL_USERS_ENABLED else google_oauth.get_login_url()
+    )
     redirect = RedirectResponse(login_url)
     redirect.set_cookie(
         key="invite_token",
@@ -70,14 +71,16 @@ async def callback(
         return RedirectResponse(f"{config.BASE_URL}/login?error=state_expired")
 
     try:
-        return await _process_callback(result, invite_token)
+        return await _process_callback(result, invite_token, session_token)
     except Exception as e:
         logger.exception("Error processing OAuth callback (purpose=%s, email=%s): %s",
                          result.get("purpose"), result.get("user_info", {}).get("email"), e)
         return RedirectResponse(f"{config.BASE_URL}/login?error=oauth_failed")
 
 
-async def _process_callback(result: dict, invite_token: str | None):
+async def _process_callback(
+    result: dict, invite_token: str | None, session_token: str | None = None,
+):
     """Inner callback logic, separated for clean error handling."""
     user_info = result["user_info"]
     email: str = user_info.get("email", "").lower()
@@ -85,6 +88,8 @@ async def _process_callback(result: dict, invite_token: str | None):
 
     if result["purpose"] == "login":
         # ── Login flow ────────────────────────────────────────────────────
+        if user_info.get("email_verified") is not True:
+            return RedirectResponse(f"{config.BASE_URL}/login?error=email_unverified")
         allowed = domain == config.ALLOWED_DOMAIN
 
         # Always resolve the invitation: even sifox.com users need the invite
@@ -110,6 +115,8 @@ async def _process_callback(result: dict, invite_token: str | None):
             avatar_url=user_info.get("picture"),
             is_admin_default=is_admin_default,
         )
+        if not user:
+            return RedirectResponse(f"{config.BASE_URL}/login?error=account_conflict")
 
         # Force admin if in admin list
         if is_admin_default and not user.get("is_admin"):
@@ -138,20 +145,38 @@ async def _process_callback(result: dict, invite_token: str | None):
     elif result["purpose"] == "calendar":
         # ── Calendar connect flow (read-only) ─────────────────────────────
         user_id = result["existing_user_id"]
+        session = await models.get_session(session_token) if session_token else None
+        if (not session or session["user_id"] != user_id
+                or not session.get("is_active", True) or session.get("is_preview")):
+            return RedirectResponse(f"{config.BASE_URL}/?calendar_error=session_expired")
+        account_id = user_info.get("sub")
+        account_email = (user_info.get("email") or "").strip().lower()
+        if not account_id or not account_email or user_info.get("email_verified") is not True:
+            return RedirectResponse(f"{config.BASE_URL}/?calendar_error=email_unverified")
         tokens = result["tokens"]
         was_connected = await models.get_google_token(user_id)
+        if was_connected:
+            previous_id = was_connected.get("google_account_id")
+            if previous_id and previous_id != account_id:
+                return RedirectResponse(f"{config.BASE_URL}/?calendar_error=account_conflict")
+            # Older connections have no stored subject; do not silently replace
+            # them with a different Google account.
+            if not previous_id and account_email != session["email"].lower():
+                return RedirectResponse(f"{config.BASE_URL}/?calendar_error=account_conflict")
         await models.save_google_token(
             user_id,
             tokens["token"],
             tokens.get("refresh_token"),
             tokens.get("expiry"),
+            account_id=account_id,
+            account_email=account_email,
         )
         # Sync calendars list immediately so we can auto-enable
         from services.calendar_sync import sync_user_calendars, sync_user_events
         try:
             await sync_user_calendars(user_id)
             # Auto-enable primary calendar so recording starts right away
-            if not was_connected:
+            if not was_connected and account_email == session["email"].lower():
                 await models.auto_enable_primary_calendar(user_id)
             # Kick off first events sync in background
             import asyncio
@@ -160,7 +185,9 @@ async def _process_callback(result: dict, invite_token: str | None):
             logger.warning("Calendar sync after connect failed: %s", e)
 
         # Redirect to dashboard with success flag (works for both admin and regular users)
-        return RedirectResponse(f"{config.BASE_URL}/?calendar_connected=1")
+        selection_needed = not was_connected and account_email != session["email"].lower()
+        suffix = "&calendar_requires_selection=1" if selection_needed else ""
+        return RedirectResponse(f"{config.BASE_URL}/?calendar_connected=1{suffix}")
 
     elif result["purpose"] == "calendar_write":
         # ── Calendar write connect (E2E admin only) ───────────────────────
@@ -282,8 +309,6 @@ async def connect_calendar(
     url = google_oauth.get_calendar_url(
         session["user_id"],
         session_token=session_token,
-        expected_google_id=session.get("google_id"),
-        expected_email=session["email"],
     )
     return RedirectResponse(url)
 

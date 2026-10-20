@@ -25,10 +25,15 @@ class FakeClient:
         return {"userinfo": self.userinfo}
 
 
-def _request(session=None, cookie=None):
+def _request(session=None, cookie=None, invite_token=None):
     headers = []
+    cookies = []
     if cookie:
-        headers.append((b"cookie", f"session={cookie}".encode()))
+        cookies.append(f"session={cookie}")
+    if invite_token:
+        cookies.append(f"invite_token={invite_token}")
+    if cookies:
+        headers.append((b"cookie", "; ".join(cookies).encode()))
     return Request({
         "type": "http",
         "method": "GET",
@@ -176,16 +181,103 @@ def test_status_only_offers_linking_to_unlinked_pilot(monkeypatch):
     monkeypatch.setattr(gitlab_auth.models, "has_auth_identity", has_identity, raising=False)
 
     assert asyncio.run(gitlab_auth.gitlab_status()) == {
-        "enabled": True, "can_link": False, "linked": False,
+        "enabled": True, "direct_login": False, "all_users": False,
+        "can_link": False, "linked": False,
     }
     assert asyncio.run(gitlab_auth.gitlab_status("pilot-session")) == {
-        "enabled": True, "can_link": True, "linked": False,
+        "enabled": True, "direct_login": False, "all_users": False,
+        "can_link": True, "linked": False,
     }
     has_identity.return_value = True
     assert asyncio.run(gitlab_auth.gitlab_status("pilot-session")) == {
-        "enabled": True, "can_link": False, "linked": True,
+        "enabled": True, "direct_login": False, "all_users": False,
+        "can_link": False, "linked": True,
     }
     get_session.return_value = {**_existing_user(), "email": "other@sifox.com"}
     assert asyncio.run(gitlab_auth.gitlab_status("other-session")) == {
-        "enabled": True, "can_link": False, "linked": False,
+        "enabled": True, "direct_login": False, "all_users": False,
+        "can_link": False, "linked": False,
     }
+
+
+def test_all_user_mode_registers_verified_sifox_email(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_ALL_USERS_ENABLED", True)
+    monkeypatch.setattr(gitlab_auth, "_client", lambda: FakeClient({
+        "sub": "901", "email": "person@sifox.ru", "email_verified": True,
+    }))
+    monkeypatch.setattr(gitlab_auth.models, "get_user_by_auth_identity",
+                        AsyncMock(return_value=None), raising=False)
+    enroll = AsyncMock(return_value={"id": 91, "email": "person@sifox.ru"})
+    monkeypatch.setattr(gitlab_auth.models, "get_or_create_gitlab_user", enroll, raising=False)
+    monkeypatch.setattr(gitlab_auth.models, "create_session",
+                        AsyncMock(return_value="session-ru"), raising=False)
+    result = asyncio.run(gitlab_auth.gitlab_callback(
+        _request(session={"gitlab_pilot": {"purpose": "login"}})
+    ))
+    assert "session=session-ru" in result.headers["set-cookie"]
+    assert enroll.await_args.kwargs["email"] == "person@sifox.ru"
+    assert enroll.await_args.kwargs["subject"] == "901"
+
+
+def test_all_user_mode_rejects_missing_or_wrong_email(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_ALL_USERS_ENABLED", True)
+    lookup = AsyncMock(return_value=None)
+    enroll = AsyncMock()
+    monkeypatch.setattr(gitlab_auth.models, "get_user_by_auth_identity", lookup, raising=False)
+    monkeypatch.setattr(gitlab_auth.models, "get_or_create_gitlab_user", enroll, raising=False)
+    for claim, error in (
+        ({"sub": "901"}, "gitlab_identity_unverified"),
+        ({"sub": "901", "email": "person@sifox.ru", "email_verified": False}, "gitlab_identity_unverified"),
+        ({"sub": "901", "email": "person@example.com", "email_verified": True}, "domain_not_allowed"),
+    ):
+        monkeypatch.setattr(gitlab_auth, "_client", lambda claim=claim: FakeClient(claim))
+        result = asyncio.run(gitlab_auth.gitlab_callback(
+            _request(session={"gitlab_pilot": {"purpose": "login"}})
+        ))
+        assert error in result.headers["location"]
+    lookup.assert_not_awaited()
+    enroll.assert_not_awaited()
+
+
+def test_all_user_mode_rejects_changed_email_for_linked_subject(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_ALL_USERS_ENABLED", True)
+    monkeypatch.setattr(gitlab_auth, "_client", lambda: FakeClient({
+        "sub": "901", "email": "person@sifox.ru", "email_verified": True,
+    }))
+    monkeypatch.setattr(gitlab_auth.models, "get_user_by_auth_identity", AsyncMock(
+        return_value={"id": 91, "email": "person@sifox.com", "is_active": True},
+    ), raising=False)
+    result = asyncio.run(gitlab_auth.gitlab_callback(
+        _request(session={"gitlab_pilot": {"purpose": "login"}})
+    ))
+    assert "gitlab_account_conflict" in result.headers["location"]
+
+
+def test_gitlab_invitation_requires_exact_email_and_marks_accepted(monkeypatch):
+    monkeypatch.setattr(gitlab_auth.config, "GITLAB_ALL_USERS_ENABLED", True)
+    monkeypatch.setattr(gitlab_auth, "_client", lambda: FakeClient({
+        "sub": "901", "email": "person@sifox.ru", "email_verified": True,
+    }))
+    invitation = {"email": "other@sifox.ru", "accepted_at": None}
+    monkeypatch.setattr(gitlab_auth.models, "get_invitation_by_token",
+                        AsyncMock(return_value=invitation), raising=False)
+    lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(gitlab_auth.models, "get_user_by_auth_identity", lookup, raising=False)
+    accept = AsyncMock()
+    monkeypatch.setattr(gitlab_auth.models, "accept_invitation", accept, raising=False)
+    first = asyncio.run(gitlab_auth.gitlab_callback(
+        _request(session={"gitlab_pilot": {"purpose": "login"}}, invite_token="invite-token")
+    ))
+    assert "invite_email_mismatch" in first.headers["location"]
+    lookup.assert_not_awaited()
+    accept.assert_not_awaited()
+    invitation["email"] = "person@sifox.ru"
+    monkeypatch.setattr(gitlab_auth.models, "get_or_create_gitlab_user", AsyncMock(
+        return_value={"id": 91, "email": "person@sifox.ru"}), raising=False)
+    monkeypatch.setattr(gitlab_auth.models, "create_session", AsyncMock(return_value="new-session"), raising=False)
+    second = asyncio.run(gitlab_auth.gitlab_callback(
+        _request(session={"gitlab_pilot": {"purpose": "login"}}, invite_token="invite-token")
+    ))
+    assert second.headers["location"].endswith("/")
+    accept.assert_awaited_once_with("invite-token")
+    assert any("invite_token=" in value for value in second.headers.getlist("set-cookie"))

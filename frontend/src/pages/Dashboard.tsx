@@ -13,14 +13,26 @@ export default function Dashboard() {
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([])
   const [loadingSummary, setLoadingSummary] = useState(true)
   const [loadingChat, setLoadingChat] = useState(true)
-  const [calStatus, setCalStatus] = useState<{ connected: boolean; has_enabled_calendar: boolean } | null>(null)
+  const [calStatus, setCalStatus] = useState<{ connected: boolean; has_enabled_calendar: boolean; google_account_email: string | null } | null>(null)
   const [calendarJustConnected, setCalendarJustConnected] = useState(false)
+  const [calendarNeedsSelection, setCalendarNeedsSelection] = useState(false)
+  const [calendarError, setCalendarError] = useState<string | null>(null)
   const [gitlabNotice, setGitlabNotice] = useState<{ ok: boolean; text: string } | null>(null)
-  const [gitlabStatus, setGitlabStatus] = useState<{ enabled: boolean; can_link: boolean; linked: boolean } | null>(null)
+  const [gitlabStatus, setGitlabStatus] = useState<{ enabled: boolean; direct_login: boolean; all_users: boolean; can_link: boolean; linked: boolean } | null>(null)
   useEffect(() => {
     // Check if redirected back after connecting calendar
     if (searchParams.get('calendar_connected') === '1') {
       setCalendarJustConnected(true)
+      setCalendarNeedsSelection(searchParams.get('calendar_requires_selection') === '1')
+      setSearchParams({}, { replace: true })
+    }
+    if (searchParams.has('calendar_error')) {
+      const code = searchParams.get('calendar_error')
+      setCalendarError(code === 'account_conflict'
+        ? 'Уже подключён другой Google-аккаунт календаря. Его нельзя заменить незаметно; обратитесь к администратору.'
+        : code === 'email_unverified'
+          ? 'Google не подтвердил адрес выбранного календарного аккаунта. Выберите другой аккаунт.'
+          : 'Сессия истекла. Войдите в приложение и повторите подключение календаря.')
       setSearchParams({}, { replace: true })
     }
     if (searchParams.get('gitlab_linked') === '1') {
@@ -63,6 +75,14 @@ export default function Dashboard() {
 
       <div className="page-body" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
 
+        {calendarError && <div role="alert" style={{ color: 'var(--color-error)' }}>{calendarError}</div>}
+
+        {calStatus?.connected && calStatus.google_account_email && (
+          <div role="status" style={{ color: 'var(--color-text-secondary)' }}>
+            Google Calendar подключён: {calStatus.google_account_email}. Этот адрес не меняет вашу учётную запись Sifox.
+          </div>
+        )}
+
         {gitlabNotice && (
           <div role="status" style={{
             borderRadius: 'var(--radius-lg)', padding: 'var(--space-5)',
@@ -73,7 +93,7 @@ export default function Dashboard() {
           </div>
         )}
 
-        {gitlabStatus?.can_link && (
+        {gitlabStatus?.can_link && !gitlabStatus.direct_login && (
           <div style={{
             borderRadius: 'var(--radius-lg)', padding: 'var(--space-5)',
             border: '1px solid var(--color-border)', background: 'var(--color-surface)',
@@ -89,7 +109,7 @@ export default function Dashboard() {
             </a>
           </div>
         )}
-        {gitlabStatus?.linked && !gitlabNotice && (
+        {gitlabStatus?.linked && !gitlabStatus.direct_login && !gitlabNotice && (
           <div role="status" style={{ color: 'var(--color-text-secondary)' }}>
             GitLab подключён. Для проверки входа выйдите из приложения или откройте его в отдельном окне браузера.
           </div>
@@ -108,8 +128,9 @@ export default function Dashboard() {
                 Google Calendar подключён!
               </div>
               <div style={{ fontSize: 'var(--font-size-sm)', color: '#166534', lineHeight: 'var(--line-height-relaxed)' }}>
-                Ваш основной календарь включён для записи. Бот автоматически присоединится к вашим встречам в Яндекс Телемост
-                и после каждой встречи подготовит транскрипт и протокол. Встречи появятся в разделе «Встречи».
+                {calendarNeedsSelection
+                  ? 'Подключён другой Google-аккаунт. Его календари пока не включены для записи — сначала выберите нужный календарь в настройках.'
+                  : 'Ваш основной календарь включён для записи. Бот автоматически присоединится к встречам и после каждой встречи подготовит транскрипт и протокол.'}
               </div>
             </div>
             <button

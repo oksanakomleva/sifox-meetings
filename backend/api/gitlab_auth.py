@@ -1,4 +1,4 @@
-"""One-account GitLab OIDC pilot; does not provision new Sifox users."""
+"""GitLab OIDC sign-in: a pinned pilot or verified-email Sifox accounts."""
 import hashlib
 import hmac
 import logging
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/auth/gitlab", tags=["auth"])
 
 def _require_pilot() -> None:
     if not (
-        config.GITLAB_PILOT_ENABLED
+        (config.GITLAB_PILOT_ENABLED or config.GITLAB_ALL_USERS_ENABLED)
         and config.GITLAB_CLIENT_ID
         and config.GITLAB_CLIENT_SECRET
     ):
@@ -63,16 +63,20 @@ def _error(code: str, *, linking: bool = False) -> RedirectResponse:
 async def gitlab_status(
     session_token: Annotated[str | None, Cookie(alias="session")] = None,
 ):
-    """Expose pilot availability without sending users to a disabled OAuth route."""
+    """Expose login mode without sending users to a disabled OAuth route."""
     enabled = bool(
-        config.GITLAB_PILOT_ENABLED
+        (config.GITLAB_PILOT_ENABLED or config.GITLAB_ALL_USERS_ENABLED)
         and config.GITLAB_CLIENT_ID
         and config.GITLAB_CLIENT_SECRET
     )
+    all_users = enabled and config.GITLAB_ALL_USERS_ENABLED
     if not enabled or not session_token:
-        return {"enabled": enabled, "can_link": False, "linked": False}
+        return {"enabled": enabled, "direct_login": all_users,
+                "all_users": all_users, "can_link": False, "linked": False}
     session = await models.get_session(session_token)
     can_link = bool(
+        not all_users
+        and
         session
         and session.get("is_active", True)
         and not session.get("is_preview")
@@ -83,7 +87,9 @@ async def gitlab_status(
         can_link
         and await models.has_auth_identity(session["user_id"], "gitlab")
     )
-    return {"enabled": enabled, "can_link": can_link and not linked, "linked": linked}
+    return {"enabled": enabled, "direct_login": all_users,
+            "all_users": all_users, "can_link": can_link and not linked,
+            "linked": linked}
 
 
 @router.get("/link")
@@ -93,6 +99,8 @@ async def link_gitlab(
 ):
     """Start linking while already signed in with the pilot's Google account."""
     client = _client()
+    if config.GITLAB_ALL_USERS_ENABLED:
+        raise HTTPException(404, "Direct GitLab sign-in does not need manual linking")
     if request.cookies.get("preview"):
         raise HTTPException(403, "Exit user preview before linking GitLab")
     session = await models.get_session(session_token) if session_token else None
@@ -116,12 +124,67 @@ async def link_gitlab(
 
 @router.get("/login")
 async def login_gitlab(request: Request):
-    """Sign in only an already-linked pilot account; never auto-create users."""
+    """Start GitLab OIDC login with server-side state and PKCE."""
     client = _client()
     request.session["gitlab_pilot"] = {"purpose": "login"}
     return await client.authorize_redirect(
         request, f"{config.BASE_URL}/api/auth/gitlab/callback"
     )
+
+
+async def _finish_login(
+    request: Request, user: dict, *, invite_token: str | None = None,
+) -> RedirectResponse:
+    session_token = await models.create_session(user["id"], config.SESSION_TTL_DAYS)
+    request.session.clear()
+    response = RedirectResponse(f"{config.BASE_URL}/")
+    response.set_cookie(
+        key="session", value=session_token, httponly=True, samesite="lax",
+        secure=config.BASE_URL.startswith("https"),
+        max_age=config.SESSION_TTL_DAYS * 86400, path="/",
+    )
+    if invite_token:
+        response.delete_cookie("invite_token", path="/")
+    return response
+
+
+async def _verified_email_login(request: Request, userinfo: dict, subject: str) -> RedirectResponse:
+    """Register or sign in by exact, verified Sifox email and stable GitLab subject."""
+    email = (userinfo.get("email") or "").strip().lower()
+    if userinfo.get("email_verified") is not True or not email:
+        return _error("gitlab_identity_unverified")
+    if (email.count("@") != 1 or not email.split("@", 1)[0]
+            or email.rsplit("@", 1)[-1] not in {"sifox.com", "sifox.ru"}):
+        return _error("domain_not_allowed")
+
+    invite_token = request.cookies.get("invite_token")
+    if invite_token:
+        invitation = await models.get_invitation_by_token(invite_token)
+        if not invitation:
+            return _error("invite_invalid")
+        if invitation.get("accepted_at"):
+            return _error("invite_used")
+        if invitation["email"].lower() != email:
+            return _error("invite_email_mismatch")
+
+    user = await models.get_user_by_auth_identity("gitlab", subject)
+    if user:
+        if not user.get("is_active", True) or user["email"].lower() != email:
+            return _error("gitlab_account_conflict")
+    else:
+        # The exact email reuses an existing Google user's meetings and rights.
+        # .com and .ru are never merged by similar names.
+        user = await models.get_or_create_gitlab_user(
+            subject=subject, email=email,
+            name=userinfo.get("name") or userinfo.get("preferred_username") or email,
+            avatar_url=userinfo.get("picture"),
+            is_admin_default=email in config.admin_email_list,
+        )
+        if not user:
+            return _error("gitlab_account_conflict")
+    if invite_token:
+        await models.accept_invitation(invite_token)
+    return await _finish_login(request, user, invite_token=invite_token)
 
 
 @router.get("/callback")
@@ -168,6 +231,8 @@ async def gitlab_callback(request: Request):
 
     if pilot.get("purpose") != "login":
         return _error("gitlab_failed")
+    if config.GITLAB_ALL_USERS_ENABLED:
+        return await _verified_email_login(request, userinfo, subject)
     user = await models.get_user_by_auth_identity("gitlab", subject)
     if (
         not user
@@ -176,16 +241,4 @@ async def gitlab_callback(request: Request):
     ):
         return _error("gitlab_not_linked")
 
-    session_token = await models.create_session(user["id"], config.SESSION_TTL_DAYS)
-    request.session.clear()
-    response = RedirectResponse(f"{config.BASE_URL}/")
-    response.set_cookie(
-        key="session",
-        value=session_token,
-        httponly=True,
-        samesite="lax",
-        secure=config.BASE_URL.startswith("https"),
-        max_age=config.SESSION_TTL_DAYS * 86400,
-        path="/",
-    )
-    return response
+    return await _finish_login(request, user)

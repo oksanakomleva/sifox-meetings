@@ -19,6 +19,8 @@ class Config(BaseSettings):
     # GitLab sign-in pilot. Disabled until a GitLab OAuth application is
     # registered and its credentials are configured on the server.
     GITLAB_PILOT_ENABLED: bool = False
+    # Enable verified-email GitLab registration for sifox.com and sifox.ru.
+    GITLAB_ALL_USERS_ENABLED: bool = False
     GITLAB_ISSUER: str = "https://gitlab.sifox.ru"
     GITLAB_CLIENT_ID: str = ""
     GITLAB_CLIENT_SECRET: str = ""

@@ -52,7 +52,7 @@ export const api = {
     loginUrl: () => '/api/auth/login',
     gitlabLoginUrl: () => '/api/auth/gitlab/login',
     gitlabLinkUrl: () => '/api/auth/gitlab/link',
-    gitlabStatus: () => request<{ enabled: boolean; can_link: boolean; linked: boolean }>('/auth/gitlab/status'),
+    gitlabStatus: () => request<{ enabled: boolean; direct_login: boolean; all_users: boolean; can_link: boolean; linked: boolean }>('/auth/gitlab/status'),
     connectCalendarUrl: () => '/api/auth/connect-calendar',
     gmailSendStatus: () => request<{ connected: boolean }>('/auth/gmail-send-status'),
     connectGmailSendUrl: (next: string) => `/api/auth/connect-gmail-send?next=${encodeURIComponent(next)}`,
@@ -123,7 +123,7 @@ export const api = {
     audioUrl: (id: string) => `/api/meetings/${id}/audio`,
     audioDownloadUrl: (id: string) => `/api/meetings/${id}/audio?download=1`,
     calendarStatus: () =>
-      request<{ connected: boolean; has_enabled_calendar: boolean; calendar_count: number }>('/meetings/calendar-status'),
+      request<{ connected: boolean; has_enabled_calendar: boolean; calendar_count: number; google_account_email: string | null }>('/meetings/calendar-status'),
     week: () => request<{ meetings: import('../types').Meeting[] }>('/meetings/week'),
     weekSummary: () =>
       request<{ summary: string | null; count: number }>('/meetings/week-summary'),

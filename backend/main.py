@@ -97,7 +97,7 @@ app = FastAPI(title="Sifox Meetings", lifespan=lifespan)
 
 # Authlib keeps the short-lived GitLab OAuth state in a signed, HTTP-only
 # browser cookie. Keep this middleware absent until the one-user pilot is on.
-if config.GITLAB_PILOT_ENABLED:
+if config.GITLAB_PILOT_ENABLED or config.GITLAB_ALL_USERS_ENABLED:
     app.add_middleware(
         SessionMiddleware,
         secret_key=config.SECRET_KEY,
