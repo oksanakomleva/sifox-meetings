@@ -65,6 +65,73 @@ class TestParticipantPresence:
     def test_no_matching_dom_is_unknown_not_empty(self):
         snapshot = asyncio.run(recorder._participant_snapshot(_JoinPage()))
         assert snapshot["presence"] == "unknown"
+        assert snapshot["ended"] is False
+
+    def test_visible_end_screen_stops_after_repeated_confirmation(self, monkeypatch):
+        elapsed = [0]
+
+        async def advance(seconds):
+            elapsed[0] += seconds
+
+        monkeypatch.setattr(recorder.asyncio, "sleep", advance)
+        monkeypatch.setattr(recorder.time, "monotonic", lambda: elapsed[0])
+        monkeypatch.setattr(recorder.config, "PARTICIPANT_POLL_INTERVAL", 30)
+        monkeypatch.setattr(recorder.config, "EMPTY_POLLS_TO_END", 3)
+        monkeypatch.setattr(recorder, "_participant_snapshot", AsyncMock(return_value={
+            "presence": "unknown", "count": None, "names": set(),
+            "errors": [], "ended": True,
+        }))
+        reasons = []
+        result = asyncio.run(recorder._wait_for_meeting_end(
+            _JoinPage(), {"Анна"}, on_end=lambda reason, present: reasons.append((reason, present)),
+        ))
+        assert result is True
+        assert elapsed[0] == 90
+        assert reasons == [("meeting_ended", True)]
+
+    def test_missing_counter_alone_never_stops_a_live_meeting(self, monkeypatch):
+        elapsed = [0]
+
+        async def advance(seconds):
+            elapsed[0] += seconds
+
+        monkeypatch.setattr(recorder.asyncio, "sleep", advance)
+        monkeypatch.setattr(recorder.time, "monotonic", lambda: elapsed[0])
+        monkeypatch.setattr(recorder.config, "MAX_RECORDING_HOURS", 1)
+        monkeypatch.setattr(recorder.config, "PARTICIPANT_POLL_INTERVAL", 30)
+        monkeypatch.setattr(recorder, "_participant_snapshot", AsyncMock(return_value={
+            "presence": "unknown", "count": None, "names": set(),
+            "errors": [], "ended": False,
+        }))
+        asyncio.run(recorder._wait_for_meeting_end(_JoinPage(), {"Анна"}))
+        assert elapsed[0] == 3630
+
+    def test_repeated_return_to_guest_join_stops_only_that_recording(self, monkeypatch):
+        elapsed = [0]
+
+        async def advance(seconds):
+            elapsed[0] += seconds
+
+        monkeypatch.setattr(recorder.asyncio, "sleep", advance)
+        monkeypatch.setattr(recorder.time, "monotonic", lambda: elapsed[0])
+        monkeypatch.setattr(recorder.config, "PARTICIPANT_POLL_INTERVAL", 30)
+        monkeypatch.setattr(recorder.config, "EMPTY_POLLS_TO_END", 3)
+        monkeypatch.setattr(recorder, "_participant_snapshot", AsyncMock(return_value={
+            "presence": "unknown", "count": None, "names": set(),
+            "errors": [], "ended": False,
+        }))
+        monkeypatch.setattr(recorder, "_telemost_call_state", AsyncMock(return_value={
+            "has_visible_prejoin": True, "has_join": True,
+            "has_name_input": True, "has_leave": False,
+            "has_waiting_room": False, "in_call_signal_count": 0,
+        }))
+        reasons = []
+        assert asyncio.run(recorder._wait_for_meeting_end(
+            _JoinPage(), {"Анна"}, meeting_id="only-this-one",
+            on_end=lambda reason, present: reasons.append((reason, present)),
+        ))
+        assert elapsed[0] == 90
+        assert reasons == [("returned_to_prejoin", True)]
 
     def test_return_to_telemost_home_is_a_real_end(self, monkeypatch):
         page = _JoinPage()
@@ -82,6 +149,15 @@ class TestParticipantPresence:
     def test_single_guest_is_alone_even_if_bot_name_was_not_applied(self):
         page = _JoinPage(state={"names": ["Гость"], "count": 1})
         assert asyncio.run(recorder._participant_snapshot(page))["presence"] == "alone"
+
+    def test_stale_prejoin_iframe_does_not_hide_live_participant_count(self):
+        frame = _JoinSurface("https://telemost.yandex.ru/private-join/test", state={
+            "prejoin": True, "count": None, "names": [],
+        })
+        page = _JoinPage(frames=[frame], state={"count": 2, "names": ["Анна"]})
+        snapshot = asyncio.run(recorder._participant_snapshot(page))
+        assert snapshot["presence"] == "present"
+        assert snapshot["count"] == 2
 
     def test_one_failed_surface_cannot_prove_an_empty_room(self):
         frame = _JoinSurface("https://telemost.yandex.ru/private-join/test")

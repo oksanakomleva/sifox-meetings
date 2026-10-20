@@ -1928,16 +1928,26 @@ _PARTICIPANT_SNAPSHOT_SCRIPT = r"""() => {
   const buttons = [...document.querySelectorAll('button,[role="button"]')].filter(visible);
   const prejoin = buttons.some(e => e.dataset.testid === 'enter-conference-button' ||
     /^(подключиться|присоединиться|join)$/i.test((e.textContent || '').trim()));
+  // Only a visible end-screen heading/alert is strong evidence. Body text
+  // might include the same phrase in a participant's chat message.
+  const ended = [...document.querySelectorAll(
+    'h1,h2,h3,[role="alert"],[role="dialog"]'
+  )].filter(visible).some(e => /^(?:конференция завершена|встреча завершена|звонок заверш[её]н|(?:the )?meeting has ended|call has ended)[.!]?$/i
+    .test((e.textContent || '').trim()));
   const counts = [];
   for (const button of buttons) {
     const label = (button.getAttribute('aria-label') || button.getAttribute('title') || '').trim();
-    if (button.dataset.testid !== 'participants-button' && !/^(участники|participants)$/i.test(label)) continue;
+    if (button.dataset.testid !== 'participants-button' &&
+        !/(participants|участники)/i.test(label)) continue;
     const badge = [...button.querySelectorAll('[class*="badge_"]')].find(visible);
     const text = (badge ? badge.textContent : button.textContent || '').trim();
     const match = text.match(/^(?:(?:участники|participants)\s*)?(\d+)$/i);
-    if (match && Number(match[1]) >= 1) counts.push(Number(match[1]));
+    const labelled = label.match(/(?:участники|participants)\D{0,3}(\d+)\b/i);
+    const number = match?.[1] || labelled?.[1];
+    if (number && Number(number) >= 1) counts.push(Number(number));
   }
-  return {names, count: !prejoin && counts.length ? Math.max(...counts) : null, prejoin};
+  return {names, count: !prejoin && counts.length ? Math.max(...counts) : null,
+    prejoin, ended};
 }"""
 
 
@@ -1947,12 +1957,14 @@ async def _participant_snapshot(page) -> dict:
     counts: list[int] = []
     errors: list[str] = []
     prejoin = False
+    ended_surfaces = 0
     for label, surface in _telemost_join_surfaces(page):
         try:
             state = await asyncio.wait_for(
                 surface.evaluate(_PARTICIPANT_SNAPSHOT_SCRIPT), timeout=5,
             )
             prejoin = prejoin or bool(state.get("prejoin"))
+            ended_surfaces += bool(state.get("ended"))
             names.update(n for n in state.get("names", []) if _is_real_name(n))
             count = state.get("count")
             if isinstance(count, int) and not isinstance(count, bool) and count >= 1:
@@ -1962,7 +1974,10 @@ async def _participant_snapshot(page) -> dict:
     count = max(counts) if counts else None
     # The visible count includes the recorder itself. It remains reliable when
     # tiles are virtualized or a guest name did not get applied.
-    if not prejoin and count is not None and count > 1:
+    # A stale private-join iframe may still expose its guest form while the
+    # live top-level call has a reliable participant counter. Do not let the
+    # stale form erase positive evidence from another surface.
+    if count is not None and count > 1:
         presence = "present"
     elif not prejoin and count == 1 and not errors:
         presence = "alone"
@@ -1971,7 +1986,8 @@ async def _participant_snapshot(page) -> dict:
         presence = "present"
     else:
         presence = "unknown"
-    return {"names": names, "count": count, "presence": presence, "errors": errors}
+    return {"names": names, "count": count, "presence": presence,
+            "errors": errors, "ended": ended_surfaces > 0}
 
 
 async def _get_participant_names(page) -> set[str]:
@@ -2288,6 +2304,8 @@ async def _wait_for_meeting_end(
     empty_polls = 0
     unknown_polls = 0
     partial_alone_polls = 0
+    ended_polls = 0
+    returned_to_prejoin_polls = 0
     deadline = time.monotonic() + config.MAX_RECORDING_HOURS * 3600
     # Grace period after scheduled start — wait this long for someone to arrive
     # before giving up on a meeting that never started
@@ -2326,10 +2344,17 @@ async def _wait_for_meeting_end(
         snapshot = await _participant_snapshot(page)
         initial_participants.update(snapshot["names"])
         logger.info(
-            "Participant probe %s: presence=%s count=%s names=%d errors=%s",
+            "Participant probe %s: presence=%s count=%s names=%d errors=%s ended=%s",
             (meeting_id or "unknown")[:8], snapshot["presence"], snapshot["count"],
-            len(snapshot["names"]), snapshot["errors"],
+            len(snapshot["names"]), snapshot["errors"], snapshot.get("ended", False),
         )
+        ended_polls = (
+            ended_polls + 1
+            if snapshot.get("ended") and snapshot["presence"] != "present" else 0
+        )
+        if ended_polls >= config.EMPTY_POLLS_TO_END:
+            logger.info("Telemost confirmed ended screen for %s", (meeting_id or "unknown")[:8])
+            return finish("meeting_ended")
         presence = snapshot["presence"]
         if presence == "present":
             meeting_started = True
@@ -2365,6 +2390,39 @@ async def _wait_for_meeting_end(
             empty_polls = 0
             partial_alone_polls = 0
             unknown_polls += 1
+            if snapshot.get("count") is None:
+                try:
+                    call_state = await asyncio.wait_for(
+                        _telemost_call_state(page), timeout=5,
+                    )
+                    exited = bool(
+                        call_state.get("has_visible_prejoin")
+                        and call_state.get("has_join")
+                        and call_state.get("has_name_input")
+                        and not call_state.get("has_leave")
+                        and not call_state.get("has_waiting_room")
+                        and not call_state.get("in_call_signal_count")
+                    )
+                    returned_to_prejoin_polls = returned_to_prejoin_polls + 1 if exited else 0
+                    if unknown_polls == 1 or unknown_polls % 10 == 0:
+                        logger.warning(
+                            "Telemost unknown call state for %s: prejoin=%s join=%s "
+                            "name_input=%s leave=%s waiting=%s signals=%s",
+                            (meeting_id or "unknown")[:8],
+                            call_state.get("has_visible_prejoin"), call_state.get("has_join"),
+                            call_state.get("has_name_input"), call_state.get("has_leave"),
+                            call_state.get("has_waiting_room"), call_state.get("in_call_signal_count"),
+                        )
+                    if returned_to_prejoin_polls >= config.EMPTY_POLLS_TO_END:
+                        logger.info("Telemost returned to prejoin for %s", (meeting_id or "unknown")[:8])
+                        return finish("returned_to_prejoin")
+                except Exception as exc:
+                    returned_to_prejoin_polls = 0
+                    if unknown_polls == 1 or unknown_polls % 10 == 0:
+                        logger.warning(
+                            "Telemost call state probe unavailable for %s: %s",
+                            (meeting_id or "unknown")[:8], type(exc).__name__,
+                        )
             if unknown_polls == 1 or unknown_polls % 10 == 0:
                 logger.warning(
                     "Participant state unknown for %s (%d polls); keeping recording",
@@ -2372,6 +2430,7 @@ async def _wait_for_meeting_end(
                 )
             continue
         unknown_polls = 0
+        returned_to_prejoin_polls = 0
         if presence != "alone":
             partial_alone_polls = 0
 
