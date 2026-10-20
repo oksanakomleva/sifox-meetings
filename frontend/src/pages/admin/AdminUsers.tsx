@@ -12,7 +12,8 @@ export default function AdminUsers() {
   const [inviteError, setInviteError] = useState('')
   const [inviteSuccess, setInviteSuccess] = useState('')
   const [loading, setLoading] = useState(true)
-  const [previewLoading, setPreviewLoading] = useState(false)
+  const [showBlocked, setShowBlocked] = useState(false)
+  const [changingUserId, setChangingUserId] = useState<number | null>(null)
 
   useEffect(() => { load() }, [])
 
@@ -68,18 +69,24 @@ export default function AdminUsers() {
     setUsers(prev => prev.map(x => x.id === u.id ? { ...x, is_admin: !x.is_admin } : x))
   }
 
-  const previewSelf = async () => {
-    setPreviewLoading(true)
+  const toggleActive = async (u: User) => {
+    if (u.id === me?.id || changingUserId !== null) return
+    const activate = u.is_active === false
+    if (!activate && !window.confirm(`Заблокировать ${u.name || u.email}? Пользователь сразу потеряет доступ к сервису.`)) return
+    setChangingUserId(u.id)
+    setInviteError('')
     try {
-      const res = await api.admin.previewSelf()
-      // Navigate to the activation URL — it sets a separate `preview` cookie and
-      // lands on the dashboard in user mode. The admin session stays intact.
-      window.location.href = res.url
+      await api.admin.setUserActive(u.id, activate)
+      setUsers(prev => prev.map(x => x.id === u.id ? { ...x, is_active: activate } : x))
     } catch (e: any) {
-      alert(e.message || 'Ошибка')
-      setPreviewLoading(false)
+      setInviteError(e.message || 'Не удалось изменить доступ пользователя')
+    } finally {
+      setChangingUserId(null)
     }
   }
+
+  const blockedCount = users.filter(u => u.is_active === false).length
+  const visibleUsers = users.filter(u => (u.is_active === false) === showBlocked)
 
   return (
     <div className="main-content">
@@ -103,22 +110,12 @@ export default function AdminUsers() {
           {inviteSuccess && <div role="status" style={{ width: '100%', color: 'var(--color-success)' }}>{inviteSuccess}</div>}
         </form>
 
-        {/* ── Preview own account as a regular user ── */}
-        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)', flexWrap: 'wrap' }}>
-          <div style={{ flex: 1, minWidth: 200 }}>
-            <div style={{ fontWeight: 'var(--font-weight-semibold)', marginBottom: 2 }}>Режим пользователя</div>
-            <div style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-text-secondary)' }}>
-              Посмотрите своё приложение так, как его видит обычный пользователь (без прав администратора).
-              Вернуться к админскому виду можно по кнопке в верхней плашке.
-            </div>
-          </div>
-          <button className="btn btn-secondary" onClick={previewSelf} disabled={previewLoading}>
-            {previewLoading ? 'Открываем…' : '👁 Посмотреть как пользователь'}
-          </button>
-        </div>
-
         {/* ── Users table ── */}
         <section>
+          <div style={{ display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
+            <button className={`btn ${showBlocked ? 'btn-secondary' : 'btn-primary'}`} onClick={() => setShowBlocked(false)}>Пользователи</button>
+            <button className={`btn ${showBlocked ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setShowBlocked(true)}>Заблокированные ({blockedCount})</button>
+          </div>
           {loading ? (
             <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 40 }}>
               <span className="spinner" style={{ width: 28, height: 28 }} />
@@ -128,7 +125,7 @@ export default function AdminUsers() {
               <table className="mobile-card-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                    {['Пользователь', 'Email', 'Статус', 'Последний вход', 'Роль'].map(h => (
+                    {['Пользователь', 'Email', 'Статус', 'Последний вход', 'Роль', 'Доступ'].map(h => (
                       <th key={h} style={{
                         padding: 'var(--space-3) var(--space-5)',
                         textAlign: 'left',
@@ -143,11 +140,11 @@ export default function AdminUsers() {
                   </tr>
                 </thead>
                 <tbody>
-                  {users.map((u, i) => (
+                  {visibleUsers.map((u, i) => (
                     <tr
                       key={u.id}
                       style={{
-                        borderBottom: i < users.length - 1 ? '1px solid var(--color-border)' : 'none',
+                        borderBottom: i < visibleUsers.length - 1 ? '1px solid var(--color-border)' : 'none',
                       }}
                     >
                       <td data-label="Пользователь" style={{ padding: 'var(--space-4) var(--space-5)' }}>
@@ -187,7 +184,7 @@ export default function AdminUsers() {
                           }}>
                             {u.is_admin ? 'Админ' : 'Пользователь'}
                           </span>
-                          {u.id !== me?.id && (
+                          {u.id !== me?.id && u.is_active !== false && (
                             <label className="toggle" title={u.is_admin ? 'Убрать роль админа' : 'Назначить админом'}>
                               <input
                                 type="checkbox"
@@ -199,9 +196,14 @@ export default function AdminUsers() {
                           )}
                         </div>
                       </td>
+                      <td data-label="Доступ" style={{ padding: 'var(--space-4) var(--space-5)' }}>
+                        {u.id !== me?.id && <button className="btn btn-secondary" disabled={changingUserId !== null} onClick={() => toggleActive(u)}>
+                          {changingUserId === u.id ? 'Сохраняем…' : u.is_active === false ? 'Разблокировать' : 'Заблокировать'}
+                        </button>}
+                      </td>
                     </tr>
                   ))}
-                  {pending.map(inv => (
+                  {!showBlocked && pending.map(inv => (
                     <tr key={`invite-${inv.id}`} style={{ borderTop: '1px solid var(--color-border)' }}>
                       <td data-label="Пользователь" style={{ padding: 'var(--space-4) var(--space-5)' }}>Ожидает входа</td>
                       <td data-label="Email" style={{ padding: 'var(--space-4) var(--space-5)' }}>{inv.email}</td>
@@ -210,6 +212,7 @@ export default function AdminUsers() {
                       <td data-label="Роль" style={{ padding: 'var(--space-4) var(--space-5)' }}>
                         <button className="btn btn-secondary" disabled={inviteLoading} onClick={() => sendInvite(inv.email)}>Отправить повторно</button>
                       </td>
+                      <td data-label="Доступ" style={{ padding: 'var(--space-4) var(--space-5)' }}>—</td>
                     </tr>
                   ))}
                 </tbody>

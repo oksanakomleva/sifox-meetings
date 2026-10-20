@@ -24,6 +24,7 @@ def api_client(monkeypatch):
     mocks = {}
     defaults = {
         "get_meeting": {"id": MID, "status": "done", "visible_to_all": False},
+        "get_participants": [],
         "user_can_access_meeting": True,
         "get_meeting_access_users": [{"id": 8, "name": "Colleague", "email": "c@sifox.com", "explicit_grant": True, "has_access": True}],
         "grant_meeting_access_many": None,
@@ -49,6 +50,14 @@ def test_nonadmin_reads_existing_access(api_client):
     assert response.status_code == 200
     assert response.json()["users"][0]["explicit_grant"]
     mocks["user_can_access_meeting"].assert_awaited_once_with(7, USER["email"], MID)
+
+
+def test_invited_user_can_open_scheduled_card_without_early_sharing(api_client):
+    client, _, mocks = api_client
+    mocks["get_meeting"].return_value = {"id": MID, "status": "pending", "recorder_user_id": 99}
+    assert client.get(f"/api/meetings/{MID}").status_code == 200
+    assert client.get(f"/api/meetings/{MID}/access").status_code == 403
+    assert client.post(f"/api/meetings/{MID}/access", json={"user_ids": [8]}).status_code == 403
 
 
 def test_nonadmin_grants_to_multiple_colleagues(api_client):

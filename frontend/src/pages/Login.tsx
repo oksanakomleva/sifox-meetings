@@ -7,7 +7,6 @@ export default function Login() {
   const { user, loading } = useAuth()
   const navigate = useNavigate()
   const [gitlabEnabled, setGitlabEnabled] = useState(false)
-  const [gitlabAllUsers, setGitlabAllUsers] = useState(false)
   const query = new URLSearchParams(window.location.search)
   const error = query.get('error')
   const invited = query.get('invite') === '1'
@@ -19,7 +18,6 @@ export default function Login() {
   useEffect(() => {
     api.auth.gitlabStatus().then(status => {
       setGitlabEnabled(status.enabled)
-      setGitlabAllUsers(status.all_users)
     }).catch(() => {})
   }, [])
 
@@ -81,7 +79,7 @@ export default function Login() {
             fontSize: 'var(--font-size-sm)',
             marginBottom: 'var(--space-6)',
           }}>
-            {error === 'domain_not_allowed' && 'Для входа через GitLab нужен подтверждённый адрес @sifox.com или @sifox.ru. Вход через Google также доступен по приглашению.'}
+            {error === 'domain_not_allowed' && 'Для входа нужен корпоративный адрес @sifox.com или @sifox.ru.'}
             {error === 'invite_invalid' && 'Ссылка приглашения недействительна или истекла'}
             {error === 'invite_used' && 'Это приглашение уже было использовано'}
             {error === 'invite_email_mismatch' && 'Адрес выбранного аккаунта GitLab не совпадает с адресом приглашения.'}
@@ -100,21 +98,21 @@ export default function Login() {
         )}
 
         <a
-          href={api.auth.loginUrl()}
+          href={gitlabEnabled ? api.auth.gitlabLoginUrl() : undefined}
           style={{ textDecoration: 'none', display: 'block' }}
         >
-          <button className="btn btn-secondary btn-lg" style={{ width: '100%', gap: 'var(--space-3)' }}>
-            <GoogleIcon />
-            Войти через Google
+          <button className="btn btn-primary btn-lg" style={{ width: '100%' }} disabled={!gitlabEnabled}>
+            Войти через GitLab
           </button>
         </a>
 
         <a
-          href={gitlabEnabled ? api.auth.gitlabLoginUrl() : undefined}
+          href={api.auth.loginUrl()}
           style={{ textDecoration: 'none', display: 'block', marginTop: 'var(--space-3)' }}
         >
-          <button className="btn btn-secondary btn-lg" style={{ width: '100%' }} disabled={!gitlabEnabled}>
-            Войти через GitLab
+          <button className="btn btn-secondary btn-lg" style={{ width: '100%', gap: 'var(--space-3)' }}>
+            <GoogleIcon />
+            Войти через Google
           </button>
         </a>
 
@@ -123,9 +121,7 @@ export default function Login() {
           fontSize: 'var(--font-size-xs)',
           color: 'var(--color-text-muted)',
         }}>
-          Google — для сотрудников sifox.com. {gitlabAllUsers
-            ? 'GitLab — для сотрудников с подтверждённым адресом sifox.com или sifox.ru.'
-            : 'GitLab пока доступен только в пилоте для привязанной учётной записи.'}
+          Вход через Google — только для сотрудников sifox.com.
           {!gitlabEnabled && ' Вход через GitLab ещё не настроен на сервере.'}
         </p>
       </div>

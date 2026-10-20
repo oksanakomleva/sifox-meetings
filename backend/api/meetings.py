@@ -251,7 +251,11 @@ async def _check_access_sharing(meeting_id: str, user: dict) -> dict:
     # Read-only preview sessions must never grant real meeting permissions.
     if user.get("is_preview"):
         raise HTTPException(403, "В режиме просмотра нельзя управлять доступом")
-    return await _get_accessible_meeting(meeting_id, user)
+    meeting = await _get_accessible_meeting(meeting_id, user)
+    if (not user.get("is_admin") and meeting["status"] != "done"
+            and meeting.get("recorder_user_id") != user["user_id"]):
+        raise HTTPException(403, "Управление доступом доступно после завершения встречи")
+    return meeting
 
 
 @router.get("/{meeting_id}/access")

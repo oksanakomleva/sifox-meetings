@@ -1501,8 +1501,12 @@ async def _telemost_surface_state(surface) -> dict:
           const visible = e => {
             const r = e.getBoundingClientRect();
             const s = getComputedStyle(e);
-            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' &&
-              s.display !== 'none';
+            if (!(r.width > 0 && r.height > 0) || s.visibility === 'hidden' ||
+                s.display === 'none') return false;
+            // Telemost can leave its in-call shell mounted behind the guest
+            // iframe. A sized Leave button behind that overlay is not visible.
+            const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+            return !!hit && (e === hit || e.contains(hit) || hit.contains(e));
           };
           const controls = [...document.querySelectorAll("button,[role='button']")]
             .filter(visible)
@@ -1916,7 +1920,9 @@ _PARTICIPANT_SNAPSHOT_SCRIPT = r"""() => {
   const visible = e => {
     const r = e.getBoundingClientRect();
     const s = getComputedStyle(e);
-    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+    if (!(r.width > 0 && r.height > 0) || s.visibility === 'hidden' || s.display === 'none') return false;
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return !!hit && (e === hit || e.contains(hit) || hit.contains(e));
   };
   // Telemost 3: TextName_* lives inside the private-join iframe even in-call.
   // Keep legacy name selectors, but never infer an empty room from no matches.
