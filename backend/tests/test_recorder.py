@@ -30,6 +30,7 @@ from services.recorder import (
     _ensure_silent_fake_audio_file,
     _is_join_confirmed,
     _telemost_call_state,
+    _visible_telemost_participant_count,
     _SYNTHETIC_CAMERA_INIT_SCRIPT,
 )
 from services import recorder
@@ -37,6 +38,15 @@ from tests.e2e.test_speaker import _wait_for_join_control
 
 
 class TestParticipantPresence:
+    def test_visible_join_counter_detects_real_participant_without_names(self):
+        state = {"labels": [
+            "[private-join iframe] участники участники участники2",
+            "[private-join iframe] открыть чат чат",
+        ]}
+        assert _visible_telemost_participant_count(state) == 2
+        assert _visible_telemost_participant_count({"labels": ["участники1"]}) == 1
+        assert _visible_telemost_participant_count({"labels": ["открыть чат"]}) is None
+
     def test_new_iframe_names_and_count_are_used(self):
         frame = _JoinSurface("https://telemost.yandex.ru/private-join/test", state={
             "names": ["Protocaller", "Анна"], "count": 2,
@@ -175,6 +185,32 @@ class TestParticipantPresence:
             _JoinPage(), {"Анна"}, on_end=lambda reason, _: reasons.append(reason),
         ))
         assert elapsed[0] == 120
+        assert reasons == ["blank_call_ui"]
+
+    def test_join_counter_allows_blank_end_when_names_were_empty(self, monkeypatch):
+        elapsed = [0]
+
+        async def advance(seconds):
+            elapsed[0] += seconds
+
+        monkeypatch.setattr(recorder.asyncio, "sleep", advance)
+        monkeypatch.setattr(recorder.time, "monotonic", lambda: elapsed[0])
+        monkeypatch.setattr(recorder.config, "PARTICIPANT_POLL_INTERVAL", 30)
+        monkeypatch.setattr(recorder.config, "BLANK_POLLS_TO_END", 6)
+        monkeypatch.setattr(recorder, "_participant_snapshot", AsyncMock(return_value={
+            "presence": "unknown", "count": None, "names": set(), "errors": [], "ended": False,
+        }))
+        monkeypatch.setattr(recorder, "_telemost_call_state", AsyncMock(return_value={
+            "has_leave": False, "has_mic": True, "has_join": False,
+            "has_name_input": False, "has_waiting_room": False,
+            "in_call_signal_count": 0, "labels": [], "surface_errors": [],
+        }))
+        reasons = []
+        assert asyncio.run(recorder._wait_for_meeting_end(
+            _JoinPage(), set(), participant_seen_at_join=True,
+            on_end=lambda reason, _: reasons.append(reason),
+        ))
+        assert elapsed[0] == 180
         assert reasons == ["blank_call_ui"]
 
     def test_visible_call_control_prevents_blank_end(self, monkeypatch):
