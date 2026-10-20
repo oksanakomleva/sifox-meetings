@@ -743,7 +743,7 @@ async def _record_pipeline(meeting_id: str) -> None:
         )
 
         # 3. Join meeting
-        participants = await startup_step(
+        joined = await startup_step(
             lambda: _join_meeting(
                 page,
                 url,
@@ -752,6 +752,11 @@ async def _record_pipeline(meeting_id: str) -> None:
             "вход во встречу",
             max(30, config.RECORDER_STARTUP_TIMEOUT_SEC),
         )
+        if service == "zoom":
+            participants = joined
+            participant_seen_at_join = False
+        else:
+            participants, participant_seen_at_join = joined
         logger.info("Joined meeting %s, participants: %s", meeting_id[:8], participants)
 
         # 4. Start audio capture
@@ -897,6 +902,7 @@ async def _record_pipeline(meeting_id: str) -> None:
             meeting_id=meeting_id,
             on_end=note_end,
             service=service,
+            participant_seen_at_join=participant_seen_at_join,
         )
         if end_diagnostic:
             try:
@@ -1475,6 +1481,22 @@ def _is_join_confirmed(state: dict) -> bool:
     )
 
 
+def _visible_telemost_participant_count(state: dict) -> int | None:
+    """Read the in-call Participants button when the tile/name probe is empty.
+
+    Telemost 3 currently renders its control as ``Участники ... Участники2``.
+    Only a visible control from the confirmed in-call probe is accepted.
+    """
+    counts = [
+        int(match)
+        for label in state.get("labels") or []
+        for match in re.findall(
+            r"(?:участники|participants)\s*([0-9]+)", label.lower()
+        )
+    ]
+    return max(counts) if counts else None
+
+
 def _join_wait_seconds(
     scheduled_start: datetime | None,
     *,
@@ -1754,7 +1776,7 @@ async def _join_meeting(
     url: str,
     *,
     scheduled_start: datetime | None = None,
-) -> set[str]:
+) -> set[str] | tuple[set[str], bool]:
     if _meeting_service(url) == "zoom":
         return await _join_zoom_meeting(page, url)
 
@@ -1888,7 +1910,15 @@ async def _join_meeting(
     await snap("3-after-join")
     logger.info("Page URL after verified join: %s", page.url)
 
-    return await _get_participant_names(page)
+    names = await _get_participant_names(page)
+    participant_count = _visible_telemost_participant_count(state)
+    participant_seen_at_join = participant_count is not None and participant_count > 1
+    if participant_seen_at_join:
+        logger.info(
+            "Telemost join confirmed another participant via visible counter (%s)",
+            participant_count,
+        )
+    return names, participant_seen_at_join
 
 
 # ── Participant detection ─────────────────────────────────────────────────────
@@ -2298,6 +2328,7 @@ async def _wait_for_meeting_end(
     meeting_id: str | None = None,
     on_end=None,
     service: str = "telemost",
+    participant_seen_at_join: bool = False,
 ) -> bool:
     """Block until the meeting ends. Returns whether any real participant (besides
     Protocaller) was ever present — False means nobody showed up (no_show)."""
@@ -2306,7 +2337,7 @@ async def _wait_for_meeting_end(
             page, initial_participants, scheduled_start,
             meeting_id=meeting_id, on_end=on_end,
         )
-    meeting_started = len(initial_participants) > 0
+    meeting_started = bool(initial_participants) or participant_seen_at_join
     empty_polls = 0
     unknown_polls = 0
     partial_alone_polls = 0
@@ -2418,13 +2449,14 @@ async def _wait_for_meeting_end(
                     # meeting: its iframe and controls vanished, but the URL
                     # stayed on /j/ and no end heading appeared. Only after a
                     # real participant was previously observed do we accept a
-                    # prolonged UI without any call controls as an end signal.
+                    # prolonged UI without any strong call controls as an end
+                    # signal. A microphone button alone also exists on the
+                    # pre-join/dead shell and cannot prove the call is live.
                     blank = bool(
                         meeting_started
                         and not snapshot["names"]
                         and not snapshot["errors"]
                         and not call_state.get("has_leave")
-                        and not call_state.get("has_mic")
                         and not call_state.get("has_join")
                         and not call_state.get("has_name_input")
                         and not call_state.get("has_waiting_room")
@@ -2435,10 +2467,11 @@ async def _wait_for_meeting_end(
                     if unknown_polls == 1 or unknown_polls % 10 == 0:
                         logger.warning(
                             "Telemost unknown call state for %s: prejoin=%s join=%s "
-                            "name_input=%s leave=%s waiting=%s signals=%s labels=%d",
+                            "name_input=%s leave=%s mic=%s waiting=%s signals=%s labels=%d",
                             (meeting_id or "unknown")[:8],
                             call_state.get("has_visible_prejoin"), call_state.get("has_join"),
                             call_state.get("has_name_input"), call_state.get("has_leave"),
+                            call_state.get("has_mic"),
                             call_state.get("has_waiting_room"), call_state.get("in_call_signal_count"),
                             len(call_state.get("labels") or []),
                         )
