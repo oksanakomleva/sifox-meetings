@@ -230,6 +230,52 @@ class TestParticipantPresence:
         assert asyncio.run(recorder._wait_for_meeting_end(_JoinPage(), {"Анна"}))
         assert elapsed[0] >= 180
 
+    def test_prolonged_blank_telemost_ui_ends_only_after_participants_seen(self, monkeypatch):
+        elapsed = [0]
+        async def advance(seconds):
+            elapsed[0] += seconds
+        monkeypatch.setattr(recorder.asyncio, "sleep", advance)
+        monkeypatch.setattr(recorder.time, "monotonic", lambda: elapsed[0])
+        monkeypatch.setattr(recorder.config, "PARTICIPANT_POLL_INTERVAL", 30)
+        monkeypatch.setattr(recorder.config, "BLANK_POLLS_TO_END", 4)
+        monkeypatch.setattr(recorder, "_participant_snapshot", AsyncMock(return_value={
+            "presence": "unknown", "count": None, "names": set(), "errors": [], "ended": False,
+        }))
+        monkeypatch.setattr(recorder, "_telemost_call_state", AsyncMock(return_value={
+            "has_leave": False, "has_mic": False, "has_join": False,
+            "has_name_input": False, "has_waiting_room": False,
+            "in_call_signal_count": 0, "labels": [], "surface_errors": [],
+        }))
+        reasons = []
+        assert asyncio.run(recorder._wait_for_meeting_end(
+            _JoinPage(), {"Анна"}, on_end=lambda reason, _: reasons.append(reason),
+        ))
+        assert elapsed[0] == 120
+        assert reasons == ["blank_call_ui"]
+
+    def test_visible_call_control_prevents_blank_end(self, monkeypatch):
+        elapsed = [0]
+        async def advance(seconds):
+            elapsed[0] += seconds
+        monkeypatch.setattr(recorder.asyncio, "sleep", advance)
+        monkeypatch.setattr(recorder.time, "monotonic", lambda: elapsed[0])
+        monkeypatch.setattr(recorder.config, "MAX_RECORDING_HOURS", 0.03)
+        monkeypatch.setattr(recorder.config, "PARTICIPANT_POLL_INTERVAL", 30)
+        monkeypatch.setattr(recorder.config, "BLANK_POLLS_TO_END", 2)
+        monkeypatch.setattr(recorder, "_participant_snapshot", AsyncMock(return_value={
+            "presence": "unknown", "count": None, "names": set(), "errors": [], "ended": False,
+        }))
+        monkeypatch.setattr(recorder, "_telemost_call_state", AsyncMock(return_value={
+            "has_leave": True, "has_mic": False, "has_join": False,
+            "has_name_input": False, "has_waiting_room": False,
+            "in_call_signal_count": 0, "labels": ["Выйти"],
+        }))
+        reasons = []
+        assert asyncio.run(recorder._wait_for_meeting_end(
+            _JoinPage(), {"Анна"}, on_end=lambda reason, _: reasons.append(reason),
+        ))
+        assert reasons == ["max_duration"]
+
     @pytest.mark.parametrize("mode", ["present", "unknown", "alone", "interrupted_empty"])
     def test_end_detection_with_virtual_clock(self, monkeypatch, mode):
         from datetime import datetime, timezone, timedelta
