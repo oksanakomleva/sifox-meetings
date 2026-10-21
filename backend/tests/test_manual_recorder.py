@@ -382,6 +382,30 @@ def test_zoom_rejects_launcher_url_for_other_meeting_or_without_tokens():
     assert not recorder._zoom_valid_launcher_url(base.replace("abc123", "wrong") + tokens, ZOOM_URL)
 
 
+def test_zoom_browser_entry_ignores_unlabelled_webclient_links():
+    from services import recorder
+    assert "a[href*='/wc/']" not in recorder._ZOOM_BROWSER_JOIN_SELECTORS
+    assert "a:text-is('Присоединиться в браузере')" in recorder._ZOOM_BROWSER_JOIN_SELECTORS
+
+
+def test_zoom_browser_entry_captures_shadow_root_link():
+    from services import recorder
+    assert "event.composedPath()" in recorder._ZOOM_CAPTURE_LAUNCH_SCRIPT
+    assert "HTMLAnchorElement" in recorder._ZOOM_CAPTURE_LAUNCH_SCRIPT
+
+
+def test_zoom_entry_failure_preserves_specific_authentication_challenge():
+    from services import recorder
+    auth = "Zoom показал требование авторизации вместо гостевой формы"
+    assert recorder._zoom_entry_failure_detail(
+        auth, browser_clicks=3, route="launcher", popup_seen=False,
+    ) == auth
+    assert "после нажатия" in recorder._zoom_entry_failure_detail(
+        "Zoom не открыл гостевой веб-клиент из страницы приглашения",
+        browser_clicks=3, route="launcher", popup_seen=False,
+    )
+
+
 def test_zoom_reads_generated_join_url_from_launcher_frame():
     from services import recorder
     generated = (
@@ -411,6 +435,16 @@ def test_zoom_reads_only_matching_tokenized_anchor_from_launcher():
     ]])
 
     assert asyncio.run(recorder._zoom_launcher_webclient_url(page, ZOOM_URL)) == generated
+
+
+def test_zoom_inspects_shadow_root_anchors_for_real_launcher_url():
+    from services import recorder
+    page = MagicMock()
+    page.frames = []
+    page.evaluate = AsyncMock(side_effect=[None, []])
+
+    assert asyncio.run(recorder._zoom_launcher_webclient_url(page, ZOOM_URL)) is None
+    assert "node.shadowRoot" in page.evaluate.await_args_list[1].args[0]
 
 
 def test_zoom_cookie_notice_dismissal_does_not_require_accepting_cookies():

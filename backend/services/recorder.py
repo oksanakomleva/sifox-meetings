@@ -161,8 +161,10 @@ _ZOOM_CAPTURE_LAUNCH_SCRIPT = r"""
     return originalOpen.apply(this, args);
   };
   document.addEventListener('click', event => {
-    const target = event.target;
-    const link = target instanceof Element ? target.closest('a[href]') : null;
+    // Zoom may place the browser-join link inside an open shadow root. At the
+    // document listener event.target is then retargeted to the shadow host.
+    const link = event.composedPath().find(node =>
+      node instanceof HTMLAnchorElement && node.hasAttribute('href'));
     if (link) remember(link.href);
   }, true);
   const originalAnchorClick = HTMLAnchorElement.prototype.click;
@@ -1230,6 +1232,10 @@ async def _zoom_click_visible(page, selectors: tuple[str, ...]) -> bool:
             candidate = page.locator(selector).first
             if await candidate.is_visible(timeout=1_500):
                 await candidate.click(timeout=3_000)
+                if selectors is _ZOOM_BROWSER_JOIN_SELECTORS:
+                    # Selector text is static; never log the meeting URL or
+                    # one-time tokens from the clicked element.
+                    logger.info("Zoom browser entry selector: %s", selector)
                 return True
         except Exception:
             continue
@@ -1401,7 +1407,7 @@ _ZOOM_BROWSER_JOIN_SELECTORS = (
     "a:text-is('Присоединиться из браузера')",
     "a:text-is('Join from your browser')",
     "a:text-is('Join from Your Browser')",
-    "a[href*='/wc/']",
+    "a:text-is('Присоединиться в браузере')",
     "a:has-text('из браузера')", "a:has-text('в браузере')",
     "button:has-text('из браузера')", "button:has-text('в браузере')",
     "a:has-text('from browser')", "a:has-text('from your browser')",
@@ -1452,12 +1458,21 @@ async def _zoom_launcher_webclient_url(page, invitation_url: str) -> str | None:
         if _zoom_valid_launcher_url(candidate, invitation_url):
             return candidate
         # Some Zoom launcher variants expose the generated destination as an
-        # anchor instead of calling window.open. Read-only: no synthetic URL.
+        # anchor, including inside an open shadow root. Read-only: no
+        # synthetic URL and no traversal into unrelated origins.
         try:
-            links = await surface.evaluate(
-                "() => Array.from(document.querySelectorAll('a[href]'), "
-                "link => link.href).slice(0, 50)"
-            )
+            links = await surface.evaluate(r"""() => {
+                const links = [];
+                const visit = root => {
+                  for (const node of root.querySelectorAll('*')) {
+                    if (node instanceof HTMLAnchorElement && node.href)
+                      links.push(node.href);
+                    if (node.shadowRoot) visit(node.shadowRoot);
+                  }
+                };
+                visit(document);
+                return links.slice(0, 200);
+              }""")
         except Exception:
             continue
         if isinstance(links, list):
@@ -1559,6 +1574,15 @@ async def _zoom_missing_guest_form_detail(page) -> str:
     if _zoom_popup_seen(page):
         return "Zoom открыл новую вкладку, но гостевой веб-клиент в ней не загрузился"
     return "Zoom не открыл гостевой веб-клиент из страницы приглашения"
+
+
+def _zoom_entry_failure_detail(detail: str, *, browser_clicks: int,
+                               route: str, popup_seen: bool) -> str:
+    """Keep a concrete Zoom challenge instead of masking it as a failed click."""
+    if (detail == "Zoom не открыл гостевой веб-клиент из страницы приглашения"
+            and browser_clicks and route == "launcher" and not popup_seen):
+        return "Zoom не открыл гостевой веб-клиент после нажатия «Войти через браузер»"
+    return detail
 
 
 async def _zoom_retry_guest_form(page, name_field, attempt: int) -> bool:
@@ -1746,9 +1770,10 @@ async def _join_zoom_meeting(
     if name_field is None:
         await _zoom_debug_snapshot(page, meeting_id, "failure")
         detail = await _zoom_missing_guest_form_detail(page)
-        if (browser_clicks and _zoom_route_kind(page) == "launcher"
-                and not _zoom_popup_seen(page)):
-            detail = "Zoom не открыл гостевой веб-клиент после нажатия «Войти через браузер»"
+        detail = _zoom_entry_failure_detail(
+            detail, browser_clicks=browser_clicks,
+            route=_zoom_route_kind(page), popup_seen=_zoom_popup_seen(page),
+        )
         logger.warning(
             "Zoom guest form missing: route=%s browser_clicks=%d popup_seen=%s direct_fallback=%s detail=%s",
             _zoom_route_kind(page), browser_clicks, _zoom_popup_seen(page), direct_attempted, detail,
