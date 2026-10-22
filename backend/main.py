@@ -34,6 +34,8 @@ async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────
     # Validate before opening the database or starting any external sync.
     validate_runtime(config)
+    from utils.encryption import validate_encryption_keys
+    validate_encryption_keys()
     await init_db(config.DATABASE_URL)
 
     # Ensure the network-backed audio dir exists without blocking the event loop.

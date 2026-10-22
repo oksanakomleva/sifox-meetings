@@ -43,7 +43,6 @@ for _heavy in [
     "google", "google.oauth2", "google.oauth2.credentials",
     "google.auth", "google.auth.transport", "google.auth.transport.requests",
     "googleapiclient", "googleapiclient.discovery",
-    "cryptography", "cryptography.fernet",
 ]:
     if _heavy not in sys.modules:
         _stub_module(_heavy)

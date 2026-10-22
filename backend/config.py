@@ -74,6 +74,10 @@ class Config(BaseSettings):
 
     # ── Encryption ────────────────────────────────────────────────────────
     ENCRYPTION_KEY: str                      # Fernet key (base64)
+    # Rotation only: read both keys first, then switch writes in a later deploy.
+    # Remove after every stored token is rotated and the new key is primary.
+    ENCRYPTION_KEY_NEXT: str = ""
+    ENCRYPTION_WRITE_NEXT: bool = False
 
     # ── Recording ─────────────────────────────────────────────────────────
     JOIN_BEFORE_MINUTES: int = 1
