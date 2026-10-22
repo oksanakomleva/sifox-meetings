@@ -33,6 +33,9 @@ def _settings(**overrides):
         "ADMIN_EMAILS": "oksana.komleva@sifox.com",
         "STAGING_ALLOWED_EMAILS": "",
         "STAGING_INVITE_SENDER_EMAIL": "",
+        "ENCRYPTION_KEY_NEXT": "",
+        "ENCRYPTION_WRITE_NEXT": False,
+        "ENCRYPTION_ROTATE_ON_START": False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -68,6 +71,26 @@ def test_staging_flag_cannot_run_in_production_environment():
 
 def test_production_configuration_keeps_existing_behavior():
     validate_runtime(_settings(APP_ENV="production"), railway_environment="production")
+
+
+@pytest.mark.parametrize("changes, railway_environment, reason", [
+    ({"APP_ENV": "production", "ENCRYPTION_KEY_NEXT": "new", "ENCRYPTION_WRITE_NEXT": True},
+     "production", "limited to Railway staging"),
+    ({"ENCRYPTION_KEY_NEXT": "new", "ENCRYPTION_WRITE_NEXT": True},
+     "production", "limited to Railway staging"),
+    ({"ENCRYPTION_WRITE_NEXT": True}, "staging", "ENCRYPTION_KEY_NEXT"),
+    ({"ENCRYPTION_KEY_NEXT": "new"}, "staging", "ENCRYPTION_WRITE_NEXT"),
+])
+def test_rotation_startup_gate_rejects_unsafe_configuration(changes, railway_environment, reason):
+    with pytest.raises(RuntimeError, match=reason):
+        validate_runtime(_settings(ENCRYPTION_ROTATE_ON_START=True, **changes),
+                         railway_environment=railway_environment, volume_mount="/audio")
+
+
+def test_rotation_startup_gate_allows_only_complete_staging_configuration():
+    validate_runtime(_settings(ENCRYPTION_ROTATE_ON_START=True,
+                               ENCRYPTION_KEY_NEXT="new", ENCRYPTION_WRITE_NEXT=True),
+                     railway_environment="staging", volume_mount="/audio")
 
 
 def test_staging_gitlab_all_users_requires_its_own_credentials():

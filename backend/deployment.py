@@ -23,6 +23,13 @@ def validate_runtime(settings, *, railway_environment: str | None = None,
     """
     if railway_environment is None:
         railway_environment = os.getenv("RAILWAY_ENVIRONMENT_NAME")
+    if getattr(settings, "ENCRYPTION_ROTATE_ON_START", False):
+        if settings.APP_ENV != "staging" or railway_environment != "staging":
+            raise RuntimeError("Encryption rotation is limited to Railway staging")
+        if not getattr(settings, "ENCRYPTION_KEY_NEXT", ""):
+            raise RuntimeError("Encryption rotation requires ENCRYPTION_KEY_NEXT")
+        if not getattr(settings, "ENCRYPTION_WRITE_NEXT", False):
+            raise RuntimeError("Encryption rotation requires ENCRYPTION_WRITE_NEXT")
     if railway_environment == "staging" and settings.APP_ENV != "staging":
         raise RuntimeError("Railway staging must set APP_ENV=staging")
     if settings.APP_ENV != "staging":

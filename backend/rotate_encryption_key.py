@@ -60,6 +60,19 @@ async def rotate_stored_tokens(conn, *, apply: bool) -> dict[str, tuple[int, int
     return result
 
 
+async def rotate_staging_pool(pool) -> dict[str, tuple[int, int]]:
+    """Apply the guarded migration, then confirm no old-key fields remain."""
+    ensure_staging_target()
+    if not config.ENCRYPTION_WRITE_NEXT:
+        raise RuntimeError("Enable ENCRYPTION_WRITE_NEXT before applying rotation")
+    async with pool.acquire() as conn:
+        changed = await rotate_stored_tokens(conn, apply=True)
+        remaining = await rotate_stored_tokens(conn, apply=False)
+    if any(old_count for _, old_count in remaining.values()):
+        raise RuntimeError("Old-key token fields remain after encryption rotation")
+    return changed
+
+
 async def _main(*, apply: bool) -> None:
     ensure_staging_target()
     if apply and not config.ENCRYPTION_WRITE_NEXT:

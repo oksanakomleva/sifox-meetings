@@ -11,7 +11,7 @@ from api import admin
 from auth.deps import get_test_or_admin_user
 from config import config
 from database import connection as db_connection
-from rotate_encryption_key import _main, rotate_stored_tokens
+from rotate_encryption_key import _main, rotate_staging_pool, rotate_stored_tokens
 from utils import encryption
 
 
@@ -191,3 +191,38 @@ def test_staging_rotation_status_is_authenticated_read_only(monkeypatch):
         monkeypatch.setattr(config, "APP_ENV", "production")
         assert client.get("/api/admin/encryption-rotation-status").status_code == 404
     app.dependency_overrides.clear()
+
+
+def test_guarded_startup_rotation_is_idempotent(monkeypatch):
+    old, new = _keys(monkeypatch)
+    monkeypatch.setattr(config, "APP_ENV", "staging")
+    monkeypatch.setattr(config, "DATABASE_URL", "postgresql://test@postgres.railway.internal/db")
+    monkeypatch.setattr(config, "ENCRYPTION_WRITE_NEXT", True)
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "staging")
+    stored = _Connection({
+        "google_tokens": [],
+        "gmail_send_tokens": [{"user_id": 1, "access_token": old.encrypt(b"a").decode(),
+                               "refresh_token": old.encrypt(b"r").decode()}],
+    })
+
+    class _Acquire:
+        async def __aenter__(self):
+            return stored
+
+        async def __aexit__(self, *_):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    pool = _Pool()
+    assert asyncio.run(rotate_staging_pool(pool)) == {
+        "google_tokens": (0, 0), "gmail_send_tokens": (1, 2),
+    }
+    assert asyncio.run(rotate_staging_pool(pool)) == {
+        "google_tokens": (0, 0), "gmail_send_tokens": (1, 0),
+    }
+    assert new.decrypt(stored.tables["gmail_send_tokens"][0]["access_token"].encode()) == b"a"
+    assert new.decrypt(stored.tables["gmail_send_tokens"][0]["refresh_token"].encode()) == b"r"
+    assert stored.updates == [("gmail_send_tokens", 1)]

@@ -78,6 +78,9 @@ class Config(BaseSettings):
     # Remove after every stored token is rotated and the new key is primary.
     ENCRYPTION_KEY_NEXT: str = ""
     ENCRYPTION_WRITE_NEXT: bool = False
+    # Staging-only one-shot migration gate. Keep false until a backup exists and
+    # ENCRYPTION_WRITE_NEXT is active; rotation is idempotent on later restarts.
+    ENCRYPTION_ROTATE_ON_START: bool = False
 
     # ── Recording ─────────────────────────────────────────────────────────
     JOIN_BEFORE_MINUTES: int = 1

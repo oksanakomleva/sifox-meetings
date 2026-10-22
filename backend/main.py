@@ -37,6 +37,14 @@ async def lifespan(app: FastAPI):
     from utils.encryption import validate_encryption_keys
     validate_encryption_keys()
     await init_db(config.DATABASE_URL)
+    if config.ENCRYPTION_ROTATE_ON_START:
+        from database.connection import get_pool
+        from rotate_encryption_key import rotate_staging_pool
+        changed = await rotate_staging_pool(await get_pool())
+        logger.info(
+            "Staging encryption rotation verified: %s old-key token fields moved",
+            sum(old_count for _, old_count in changed.values()),
+        )
 
     # Ensure the network-backed audio dir exists without blocking the event loop.
     from services import fsio
