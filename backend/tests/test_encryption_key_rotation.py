@@ -3,8 +3,14 @@ from copy import deepcopy
 
 import pytest
 from cryptography.fernet import Fernet, InvalidToken
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from unittest.mock import AsyncMock
 
+from api import admin
+from auth.deps import get_test_or_admin_user
 from config import config
+from database import connection as db_connection
 from rotate_encryption_key import _main, rotate_stored_tokens
 from utils import encryption
 
@@ -144,3 +150,44 @@ def test_rotation_command_refuses_writes_before_switch(monkeypatch):
     monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "staging")
     with pytest.raises(RuntimeError, match="Enable ENCRYPTION_WRITE_NEXT"):
         asyncio.run(_main(apply=True))
+
+
+def test_staging_rotation_status_is_authenticated_read_only(monkeypatch):
+    old, new = _keys(monkeypatch)
+    monkeypatch.setattr(config, "APP_ENV", "staging")
+    monkeypatch.setattr(config, "DATABASE_URL", "postgresql://test@postgres.railway.internal/db")
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "staging")
+    stored = _Connection({
+        "google_tokens": [{"user_id": 1, "access_token": old.encrypt(b"a").decode(),
+                           "refresh_token": new.encrypt(b"r").decode()}],
+        "gmail_send_tokens": [],
+    })
+
+    class _Acquire:
+        async def __aenter__(self):
+            return stored
+
+        async def __aexit__(self, *_):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(db_connection, "get_pool", AsyncMock(return_value=_Pool()))
+    app = FastAPI()
+    app.include_router(admin.router)
+    with TestClient(app) as client:
+        assert client.get("/api/admin/encryption-rotation-status").status_code == 401
+        app.dependency_overrides[get_test_or_admin_user] = lambda: {"is_admin": True}
+        response = client.get("/api/admin/encryption-rotation-status")
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "private, no-store"
+        assert response.json() == {"tables": {
+            "google_tokens": {"rows": 1, "old_key_token_fields": 1},
+            "gmail_send_tokens": {"rows": 0, "old_key_token_fields": 0},
+        }}
+        assert stored.updates == []
+        monkeypatch.setattr(config, "APP_ENV", "production")
+        assert client.get("/api/admin/encryption-rotation-status").status_code == 404
+    app.dependency_overrides.clear()

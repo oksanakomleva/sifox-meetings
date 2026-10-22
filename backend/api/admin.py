@@ -7,10 +7,11 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from typing import Annotated, Literal
+from cryptography.fernet import InvalidToken
 
 from auth.deps import get_admin_user, get_test_or_admin_user
 from database import models
@@ -22,6 +23,32 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 AdminUser = Annotated[dict, Depends(get_test_or_admin_user)]
 RealAdminUser = Annotated[dict, Depends(get_admin_user)]
 TestOrAdminUser = AdminUser  # alias kept for clarity in test endpoints
+
+
+@router.get("/encryption-rotation-status")
+async def encryption_rotation_status(admin: AdminUser, response: Response):
+    """Staging-only, read-only token counts; never return keys or ciphertext."""
+    from database.connection import get_pool
+    from rotate_encryption_key import ensure_staging_target, rotate_stored_tokens
+
+    try:
+        ensure_staging_target()
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(404, "Not available") from exc
+
+    pool = await get_pool()
+    try:
+        async with pool.acquire() as conn:
+            counts = await rotate_stored_tokens(conn, apply=False)
+    except InvalidToken as exc:
+        raise HTTPException(409, "Stored token cannot be decrypted with either key") from exc
+    response.headers["Cache-Control"] = "private, no-store"
+    return {
+        "tables": {
+            table: {"rows": rows, "old_key_token_fields": old_tokens}
+            for table, (rows, old_tokens) in counts.items()
+        },
+    }
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────

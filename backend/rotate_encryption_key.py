@@ -22,6 +22,17 @@ from utils.encryption import rotate_encrypted_token, validate_encryption_keys
 _TOKEN_TABLES = ("google_tokens", "gmail_send_tokens")
 
 
+def ensure_staging_target() -> None:
+    """Keep rotation diagnostics and writes inside Railway staging only."""
+    if config.APP_ENV != "staging" or os.getenv("RAILWAY_ENVIRONMENT_NAME") != "staging":
+        raise RuntimeError("Rotation may only run inside the Railway staging environment")
+    if not (urlsplit(config.DATABASE_URL).hostname or "").endswith(".railway.internal"):
+        raise RuntimeError("Rotation requires the private staging database")
+    if not config.ENCRYPTION_KEY_NEXT:
+        raise RuntimeError("ENCRYPTION_KEY_NEXT must be configured first")
+    validate_encryption_keys()
+
+
 async def rotate_stored_tokens(conn, *, apply: bool) -> dict[str, tuple[int, int]]:
     """Inspect or rotate both token tables; fail atomically on bad ciphertext."""
     result = {}
@@ -50,15 +61,9 @@ async def rotate_stored_tokens(conn, *, apply: bool) -> dict[str, tuple[int, int
 
 
 async def _main(*, apply: bool) -> None:
-    if config.APP_ENV != "staging" or os.getenv("RAILWAY_ENVIRONMENT_NAME") != "staging":
-        raise RuntimeError("Rotation may only run inside the Railway staging environment")
-    if not (urlsplit(config.DATABASE_URL).hostname or "").endswith(".railway.internal"):
-        raise RuntimeError("Rotation requires the private staging database")
-    if not config.ENCRYPTION_KEY_NEXT:
-        raise RuntimeError("ENCRYPTION_KEY_NEXT must be configured first")
+    ensure_staging_target()
     if apply and not config.ENCRYPTION_WRITE_NEXT:
         raise RuntimeError("Enable ENCRYPTION_WRITE_NEXT before applying rotation")
-    validate_encryption_keys()
 
     import asyncpg
     conn = await asyncpg.connect(config.DATABASE_URL, timeout=10)
